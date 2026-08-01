@@ -30,6 +30,21 @@ TRADE_TEXT_ALIASES = {
     "kaitai": ["解体"],
 }
 
+# 29業種を1文字の略号で表す名簿がある（例: 東京都建設業許可業者名簿の業種別列見出し）。
+# 建設業法 別表第一の掲載順(01〜29)と対応。
+TRADE_ABBREV_ORDER = [
+    "土", "建", "大", "左", "と", "石", "屋", "電", "管", "タ",
+    "鋼", "筋", "ほ", "し", "板", "ガ", "塗", "防", "内", "機",
+    "絶", "通", "園", "井", "具", "水", "消", "清", "解",
+]
+ABBREV_TO_CODE = {abbrev: f"{i:02d}" for i, abbrev in enumerate(TRADE_ABBREV_ORDER, start=1)}
+
+
+def category_from_abbrev(abbrev: str) -> str | None:
+    """1文字略号("と"/"塗"/"解" 等) → tobi/tosou/kaitai。対象外業種・非略号はNone。"""
+    code = ABBREV_TO_CODE.get((abbrev or "").strip())
+    return category_from_code(code) if code else None
+
 
 def category_from_code(code) -> str | None:
     """業種コード(2桁 or 素の数値。"05"/"5"/5 等)→ tobi/tosou/kaitai。対象外業種はNone。"""
@@ -88,16 +103,22 @@ def normalize_trades(raw_values) -> str:
 
 # ── 和暦日付・金額の正規化（列名の違いに関わらず共通で必要） ──────────
 ERA_BASE = {"令和": 2018, "平成": 1988, "昭和": 1925, "大正": 1911}
+# 「R08.05.30」のようなアルファベット略記(R/H/S/T)の元号表記も名簿ではよく使われる。
+ALPHA_ERA_BASE = {"R": 2018, "H": 1988, "S": 1925, "T": 1911}
 _ZEN2HAN = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
 def parse_year(raw) -> int | None:
-    """許可年月日から西暦年を抜き出す。和暦(令和/平成/昭和/大正)・西暦・
-    Excelのdatetime/dateセルのいずれにも対応する。"""
+    """許可年月日から西暦年を抜き出す。和暦(令和/平成/昭和/大正)・
+    アルファベット略記和暦(R08.05.30 等)・西暦・Excelのdatetime/dateセルの
+    いずれにも対応する。"""
     import datetime as _dt
     if isinstance(raw, (_dt.date, _dt.datetime)):
         return raw.year
     s = (str(raw) if raw is not None else "").translate(_ZEN2HAN)
+    m = re.match(r"\s*([RHSTrhst])\s*0*(\d{1,2})[.\-/]", s)
+    if m:
+        return ALPHA_ERA_BASE[m.group(1).upper()] + int(m.group(2))
     for era, base in ERA_BASE.items():
         m = re.search(rf"{era}\s*(元|\d+)\s*年", s)
         if m:
@@ -105,6 +126,19 @@ def parse_year(raw) -> int | None:
             return base + n
     m = re.search(r"(19|20)\d{2}", s)
     return int(m.group()) if m else None
+
+
+_FALSY_FLAG = {"", "0", "－", "-", "ー", "―", "無", "なし"}
+
+
+def is_licensed_flag(v) -> bool:
+    """横持ち業種列のセル値(1=一般/2=特定/空欄またはハイフン=なし)が
+    「許可あり」を意味するかどうか。"""
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return v != 0
+    return str(v).strip() not in _FALSY_FLAG
 
 
 def parse_capital(raw) -> int:
@@ -117,6 +151,19 @@ def parse_capital(raw) -> int:
     s = re.sub(r"[,，円\s]", "", s)
     m = re.search(r"\d+", s)
     return int(m.group()) if m else 0
+
+
+_PREF_SUFFIX = re.compile(r"^(.{2,3}?(?:都|道|府|県))(.*)$")
+
+
+def split_pref_city(raw: str):
+    """「東京都文京区」のように都道府県と市区町村が1列に結合された表記を分割する。
+    分割できなければ (None, raw) を返す。"""
+    s = (raw or "").strip()
+    m = _PREF_SUFFIX.match(s)
+    if m:
+        return m.group(1), m.group(2)
+    return None, s
 
 
 def find_header_row(rows, candidate_sets, max_scan=15):

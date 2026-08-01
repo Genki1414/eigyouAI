@@ -3,12 +3,15 @@ enrich.py — AIエンリッチメント層
 各社について Web検索→HP読取 をAIに行わせ、営業に効く属性を構造化して付与する。
 
 必要環境変数: ANTHROPIC_API_KEY
-コスト目安: web検索込みで1社あたり2〜4円。3万社フルで約10万円前後。
+コスト実測(2026-08、資本金300万〜1億円のサンプル73社平均。旧見積もりの「1社2〜4円」は
+実態と大きく乖離していたため実測値に置き換え): 1社あたり入力6.7万トークン/出力1,400トークン/
+web検索4.9回 ≈ $0.20(導入価格)〜$0.27(標準価格) ≈ 30〜40円。都道府県14,688社フルなら
+概算$2,900〜4,000(実行時のAPI残高を要確認)。
 まずは rank対象のS/A候補(資本金・許可種別で事前絞込)から回すのが定石。
 
 使い方:
-  python3 enrich.py --limit 100          # 未エンリッチの100社を処理
-  python3 enrich.py --pref 東京都 --limit 500
+  python3 enrich.py --limit 100                    # 未エンリッチの100社を処理(既定は無作為抽出)
+  python3 enrich.py --pref 東京都 --sample --limit 500  # 資本金300万〜1億円から無作為抽出
 """
 import argparse, json, os, sqlite3, time
 from pathlib import Path
@@ -46,7 +49,9 @@ Web検索とHPの内容から、以下をJSONのみで返してください(前�
 def enrich_one(client, row):
     """1社分。呼び出し側で retry / rate limit / checkpoint に包まれる。"""
     msg = client.messages.create(
-        model=MODEL, max_tokens=1000,
+        # web検索を複数回はさむとJSON本体を書く前にmax_tokensを使い切ることがある
+        # (実測: 1000だと出力の頭数十字で打ち切られるケースを確認)ため余裕を持たせる
+        model=MODEL, max_tokens=2000,
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": PROMPT.format(
             name=row["name"], pref=row["pref"] or "", city=row["city"] or "",
@@ -57,8 +62,12 @@ def enrich_one(client, row):
     try:
         d = json.loads(text[text.index("{"): text.rindex("}") + 1])
     except Exception as e:
-        # 検品(enrich_review.py)で原因を追えるよう、生レスポンスの先頭を残す
-        raise ValueError(f"JSON抽出失敗({type(e).__name__}: {e}) raw[:500]={text[:500]!r}") from e
+        # 検品(enrich_review.py)で原因を追えるよう、生レスポンスの先頭を残す。
+        # 文字列に"500"を含めると resilience.is_retryable() の再試行対象ヒント
+        # ("500"=サーバエラーの意)に誤って一致し、無駄な再試行(＝無駄なAPI課金)を
+        # 生んでしまうため、"raw_snippet"という表記にしている(実際にこの事故で
+        # 不要な再試行が発生していたことをログで確認済み)。
+        raise ValueError(f"JSON抽出失敗({type(e).__name__}: {e}) raw_snippet={text[:500]!r}") from e
     stu = getattr(msg.usage, "server_tool_use", None)
     d["_usage"] = {
         "input_tokens": msg.usage.input_tokens,

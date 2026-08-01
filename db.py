@@ -28,7 +28,10 @@ CREATE TABLE IF NOT EXISTS companies (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   license_no TEXT UNIQUE, name TEXT NOT NULL, name_norm TEXT,
   pref TEXT, city TEXT, address TEXT, phone TEXT, fax TEXT, email TEXT,
-  license_type TEXT, trades TEXT, capital INTEGER, founded_year INTEGER,
+  license_type TEXT, trades TEXT, capital INTEGER,
+  founded_year INTEGER,  -- 許可年月日からの推定(5年ごとの許可更新で動くため実際の設立年ではない。
+                          -- scoring.py/learn.pyの社歴判定には使わない。将来より正確な設立年データが
+                          -- 得られたら差し替える前提でこの列は残している)
   has_website INTEGER, website_url TEXT, website_quality INTEGER,
   hiring_now INTEGER, est_employees INTEGER, google_reviews INTEGER,
   prime_ratio REAL, enrich_note TEXT, enriched_at TEXT,

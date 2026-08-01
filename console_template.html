@@ -197,7 +197,7 @@ const mo = D.model;
 const CN = {va_A:"文面A(実績称賛)",va_B:"文面B(課題提起)",va_C:"文面C(同業事例)",ch_mail:"チャネル:メール",
  ch_fax:"チャネル:FAX",ch_dm:"チャネル:郵送DM",is_tobi:"とび・土工",is_kaitai:"解体",
  hiring_now:"求人出稿中",has_website:"HPあり",website_quality:"HP品質",log_emp:"従業員規模",
- log_capital:"資本金",google_reviews:"レビュー数",prime_ratio:"元請比率",age_years:"社歴"};
+ log_capital:"資本金",google_reviews:"レビュー数",prime_ratio:"元請比率",license_seq_pct:"許可番号順位(社歴代理)"};
 const top = Object.entries(mo.coef).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).slice(0,8);
 const mx = Math.max(...top.map(([,v])=>Math.abs(v)));
 document.getElementById("model").innerHTML = `

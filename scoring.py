@@ -37,12 +37,13 @@ def score_row(r):
     if not r["has_website"]:
         d["digital"] = 2  # FAX/郵送チャネル行き
     # 3. 成長シグナル (25)
+    # founded_year(許可年月日からの推定)は5年ごとの許可更新で値が動くため
+    # 実データでは社歴の代理変数にならず、判定に使わない(learn.pyのlicense_seq_pct参照)。
+    # 浮いた4点は求人出稿シグナルへ寄せた。
     g = 0
     if r["hiring_now"]:
-        g += 15
+        g += 19
     g += clamp((r["google_reviews"] or 0) * 1.5, 0, 6)
-    if r["founded_year"] and r["founded_year"] >= 2010:
-        g += 4  # 若い会社ほどツール導入が速い
     d["growth"] = clamp(g, 0, 25)
     # 4. 商流適合 (25)
     s = 0

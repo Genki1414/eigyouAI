@@ -11,7 +11,7 @@ V1(手書きルール4軸)は「勘の言語化」でしかない。実際に送
 
 使い方: python3 learn.py
 """
-import json, sqlite3
+import json, re, sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +26,7 @@ OUT = Path(__file__).parent / "out" / "model_v2.json"
 # 「この会社にはどのチャネルで何型を送るべきか」まで一体で学習できる。
 FEATURES = [
     "has_website", "website_quality", "hiring_now", "log_emp", "log_capital",
-    "google_reviews", "prime_ratio", "is_tobi", "is_kaitai", "age_years",
+    "google_reviews", "prime_ratio", "is_tobi", "is_kaitai", "license_seq_pct",
     "ch_mail", "ch_fax", "ch_dm", "va_A", "va_B", "va_C",
 ]
 
@@ -40,11 +40,49 @@ SELECT t.responded AS y,
        COALESCE(c.google_reviews,0)   AS google_reviews,
        COALESCE(c.prime_ratio,0.3)    AS prime_ratio,
        COALESCE(c.trades,'')          AS trades,
-       COALESCE(c.founded_year,2000)  AS founded_year,
        t.channel, t.variant, c.id AS cid, c.score AS score_v1
 FROM touches t JOIN companies c ON c.id = t.company_id
 WHERE t.delivered = 1
 """
+
+
+def _license_seq(license_no):
+    """許可番号から連番部分を抜き出す。"第10000号"形式・末尾が素の数字の
+    形式のどちらにも対応。パース不能ならNone。"""
+    if not license_no:
+        return None
+    m = re.search(r"第(\d+)号", license_no)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(\d+)\s*$", license_no)
+    if m:
+        return int(m.group(1))
+    nums = re.findall(r"\d+", license_no)
+    return int(nums[-1]) if nums else None
+
+
+def compute_license_seq_pct(con):
+    """許可番号の連番を都道府県内でパーセンタイル化する({company_id: 0〜1})。
+    許可番号は初回付与後、更新しても変わらない番号のため、5年ごとに更新される
+    founded_year(許可年月日)と違って社歴の代理変数として使える
+    (連番が小さい=古くから許可を持つ=社歴が長い、値が小さいほど社歴が長い)。
+    実データ(東京都名簿, n=13,897)で連番と資本金の間にSpearman rho=-0.35
+    (p≈0)の負の相関を確認済み。パース不能な許可番号は中央値0.5として扱う。"""
+    rows = con.execute("SELECT id, pref, license_no FROM companies").fetchall()
+    by_pref = {}
+    for r in rows:
+        by_pref.setdefault(r["pref"], []).append((r["id"], _license_seq(r["license_no"])))
+    pct = {}
+    for items in by_pref.values():
+        known = sorted((cid, seq) for cid, seq in items if seq is not None)
+        n = len(known)
+        for rank, (cid, _seq) in enumerate(known):
+            pct[cid] = rank / (n - 1) if n > 1 else 0.5
+        for cid, seq in items:
+            if seq is None:
+                pct[cid] = 0.5
+    return pct
+
 
 def featurize(r):
     trades = r["trades"].split(",")
@@ -53,7 +91,7 @@ def featurize(r):
         np.log1p(r["emp"]), np.log1p(r["capital"] / 1000),
         np.log1p(r["google_reviews"]), r["prime_ratio"],
         1 if "tobi" in trades else 0, 1 if "kaitai" in trades else 0,
-        (2026 - r["founded_year"]) / 10,
+        r["license_seq_pct"],
         1 if r["channel"] == "メール" else 0,
         1 if r["channel"] == "FAX" else 0,
         1 if r["channel"] == "郵送DM" else 0,
@@ -77,6 +115,9 @@ def main():
     if len(rows) < 100:
         print(f"学習データ不足({len(rows)}件)。まず接触数を増やしてください。")
         return
+
+    seq_pct = compute_license_seq_pct(con)
+    rows = [dict(r, license_seq_pct=seq_pct.get(r["cid"], 0.5)) for r in rows]
 
     X = np.array([featurize(r) for r in rows], dtype=float)
     y = np.array([r["y"] for r in rows], dtype=int)
@@ -142,12 +183,13 @@ def main():
         COALESCE(website_quality,0) website_quality, COALESCE(hiring_now,0) hiring_now,
         COALESCE(est_employees,5) emp, COALESCE(capital,3000) capital,
         COALESCE(google_reviews,0) google_reviews, COALESCE(prime_ratio,0.3) prime_ratio,
-        COALESCE(trades,'') trades, COALESCE(founded_year,2000) founded_year
+        COALESCE(trades,'') trades
         FROM companies""").fetchall()
     # 最良チャネル×最良文面で送った場合の期待反応確率を各社のV2スコアとする
     best_ch, best_va = "メール", "A"
     for r in allrows:
         d = dict(r); d["channel"] = best_ch; d["variant"] = best_va
+        d["license_seq_pct"] = seq_pct.get(r["id"], 0.5)
         p = model.predict_proba(np.array([featurize(d)], dtype=float))[0][1]
         con.execute("UPDATE companies SET score_v2=? WHERE id=?", (round(p * 100, 2), r["id"]))
     con.commit()

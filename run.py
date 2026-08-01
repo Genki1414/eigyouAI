@@ -66,7 +66,7 @@ STEPS = [
     dict(key="ingest", desc="企業データ投入",
          pre=lambda con: (True, ""),
          run=lambda con, demo: sh(["generate_sample.py"]) if demo else
-             (print("  → 本番: python3 ingest.py data/kyoka_gyosha.csv") or False),
+             (print("  → 本番: python3 ingest.py 東京都 data/tokyo_kensetsu_meibo.xlsx") or False),
          done=lambda con: n_companies(con) > 0),
 
     dict(key="dedup", desc="名寄せ・重複統合",

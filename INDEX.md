@@ -41,7 +41,7 @@ IM.md・console.html に出ている数字を、そのまま買い手や顧客�
 | `db.py` | スキーマ / マイグレーション / **接触ガード** | 触らない |
 | `storage.py` | SQLite⇔Postgres 方言吸収 | 移行時のみ |
 | `resilience.py` | レート制御 / 再試行 / 再開 / 冪等 | 触らない |
-| `ingest.py` | 国交省CSV取込 | **T1で実装** |
+| `ingest.py` | 都道府県別許可業者名簿Excel取込（県ごとの差は`parsers/<pref>.py`） | **T1で実装** |
 | `enrich.py` | AIエンリッチメント（HP/求人/レビュー） | APIキー設定のみ |
 | `offers.py` | テナント・オファー定義（マルチプロダクト） | オファー追加時 |
 | `scoring.py` | スコアV1（4軸100点） | 触らない |
@@ -145,7 +145,7 @@ python3 storage.py test
 | T6 | Postgres移行（数万社超えてから） | 半日 |
 | T7 | デプロイ | 2時間 |
 
-**合計 約3人日**。ただしT1のCSV取得と法務確認は別途。
+**合計 約3人日**。ただしT1の名簿Excel取得と法務確認は別途。
 
 ---
 

@@ -4,14 +4,16 @@
 のパイプライン第1弾。M&A時にはこのマシン自体が資産(#41 建設AI営業)になる。
 
 ## 構成
-1. ingest.py    — 国交省 建設業許可業者CSV → SQLite (とび・土工/塗装/解体を抽出)
+1. ingest.py    — 都道府県別 建設業許可業者名簿Excel → SQLite (とび・土工/塗装/解体を抽出)
+                 ※ 2026-08-01 追記: 国交省の企業情報検索システムに一括CSV DLは無いと判明し、
+                   都道府県別Excelを読む設計に変更。県ごとの差は parsers/<pref>.py に分離。
 2. enrich.py    — Claude API(web検索付き)で各社のHP/求人/レビューを構造化付与
 3. scoring.py   — 4軸25点×4=100点でS/A/B/Cランク付け + 推奨チャネル判定
 4. out/dashboard.html — 営業司令塔ダッシュボード(単一HTML、そのまま開ける)
 
 ## 本番投入手順
-1. https://etsuran2.mlit.go.jp/TAKKEN/ から対象業種のCSVを取得 → data/ に置く
-2. python3 ingest.py data/xxx.csv
+1. 都道府県の建設業許可業者名簿Excelを取得（例: 東京都都市整備局が月1回公開） → data/ に置く
+2. python3 ingest.py 東京都 data/xxx.xlsx
 3. export ANTHROPIC_API_KEY=... && python3 enrich.py --limit 500 (資本金上位から)
 4. python3 scoring.py
 5. out/scored.json をダッシュボード/CRMに接続

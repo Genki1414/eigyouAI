@@ -27,7 +27,7 @@ python3 storage.py test
 ## 1. アーキテクチャ（変更しないこと）
 
 ```
-[許可業者CSV] → ingest.py → [companies]
+[都道府県別許可業者名簿Excel] → parsers/<pref>.py → ingest.py → [companies]
                               ↓ enrich.py（AI: HP/求人/レビュー）
                               ↓ scoring.py（V1: 4軸100点）
 [offers/tenants] → campaign.py（接触ガード） → [touches]
@@ -51,13 +51,30 @@ python3 storage.py test
 
 ## 2. 実装するタスク（優先順）
 
-### T1. 国交省データの取込【半日】
-- 取得元: https://etsuran2.mlit.go.jp/TAKKEN/
+### T1. 建設業許可業者名簿の取込【半日】※2026-08-01 設計変更
+- ~~取得元: https://etsuran2.mlit.go.jp/TAKKEN/~~ → **このシステムに一括CSVダウンロードは無い。**
+  実データは都道府県ごとに公開されている名簿Excel（例: 東京都は都市整備局が
+  建設業情報管理センター登録情報から月1回公開）を使う。
 - 対象業種: とび・土工工事業 / 塗装工事業 / 解体工事業
-- `ingest.py` は既に列マッピング済み。CSVの実際のヘッダ名が異なる場合は
-  `ingest.py` の `row.get("...")` のキーだけを直す。**スキーマは変更しない**
+- 大臣許可業者（本店・支店が複数都道府県）は当面スコープ外。知事許可が9割以上のため
+- 設計: `ingest.py` は都道府県別Excelを読むオーケストレータ。県ごとのヘッダ位置・
+  業種表記（コード/業種名/1・2フラグの横持ち）の差は `parsers/<pref>.py` に分離し、
+  業種の表現ゆれの変換表・和暦日付や金額の正規化は `parsers/common.py` に共通化した。
+  **companiesテーブルのスキーマは変更していない**
+- 現状: `parsers/tokyo.py` で東京都のみ実装済み。合成Excel（縦持ち/横持ち両形式、
+  和暦・カンマ区切り金額・大臣許可混在）で ingest→dedup の通しを確認済みだが、
+  **実ファイルは未検証**（このネットワーク環境からは対象サイトに到達できず、
+  実データでのヘッダ確認ができていない）。ヘッダは固定位置ではなく候補語マッチで
+  検出する作りなので、実ファイルを初めて通す際は「対象業種が1件も取れない」警告と
+  ログの `n_in/n_target` 件数を必ず確認すること。ヘッダが想定と違えば
+  `parsers/tokyo.py` の `_HEADER_CANDIDATES` に実際の表記を追加すればよい
+- 東京都で通ってから他県を追加する。追加時は `parsers/<pref>.py` に
+  `parse(path) -> Iterator[dict]` を実装し、`parsers/__init__.py` の `REGISTRY` に登録するだけ
+- 使い方: `python3 ingest.py 東京都 data/tokyo_kensetsu_meibo.xlsx`
 - 投入後に必ず `python3 run.py step dedup` を実行（名寄せ）
-- 検証: `python3 test_pipeline.py` が通ること
+- 検証: `python3 test_pipeline.py` が通ること（新規投入した会社はscoring未実施のため
+  rank NULLになる。demoデータと混在させたまま検証しないこと。クリーンな状態で
+  ingest→dedup→scoringの順に通してから検証する）
 
 ### T2. メール送信の実装【半日】
 - `senders.py` の `MailSender._deliver()` のみを実装する

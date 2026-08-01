@@ -39,12 +39,9 @@ def score_row(r):
     # 3. 成長シグナル (25)
     # founded_year(許可年月日からの推定)は5年ごとの許可更新で値が動くため
     # 実データでは社歴の代理変数にならず、判定に使わない(learn.pyのlicense_seq_pct参照)。
-    # 浮いた4点は求人出稿シグナルへ寄せた。
-    g = 0
-    if r["hiring_now"]:
-        g += 19
-    g += clamp((r["google_reviews"] or 0) * 1.5, 0, 6)
-    d["growth"] = clamp(g, 0, 25)
+    # google_reviewsは実データでAIが実際の件数を取得できておらず(ほぼ全件0)信頼できないため
+    # 使わない。求人出稿シグナル(hiring_now)に全25点を寄せた。
+    d["growth"] = 25 if r["hiring_now"] else 0
     # 4. 商流適合 (25)
     s = 0
     trades = (r["trades"] or "").split(",")
@@ -73,7 +70,15 @@ def main():
     con.row_factory = sqlite3.Row
     rows = con.execute("SELECT * FROM companies").fetchall()
     out = []
+    excluded = 0
     for r in rows:
+        # is_target_business=0(施工実態なしとAIが判定)はスコアリング対象外。
+        # dedup_ofとは別軸のフラグなので、代表社への集約とは独立に除外する。
+        if r["is_target_business"] == 0:
+            excluded += 1
+            con.execute("UPDATE companies SET score=NULL, rank=NULL, score_detail=NULL WHERE id=?",
+                        (r["id"],))
+            continue
         total, rank, detail = score_row(r)
         con.execute("UPDATE companies SET score=?, rank=?, score_detail=? WHERE id=?",
                     (total, rank, json.dumps(detail), r["id"]))
@@ -87,7 +92,8 @@ def main():
     dist = {}
     for o in out:
         dist[o["rank"]] = dist.get(o["rank"], 0) + 1
-    print(f"スコアリング完了: {len(out)}社 / 分布 {dist} → {OUT}")
+    print(f"スコアリング完了: {len(out)}社 / 分布 {dist} "
+          f"(施工実態なしで除外 {excluded}社) → {OUT}")
 
 if __name__ == "__main__":
     main()

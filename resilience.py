@@ -143,7 +143,7 @@ class Checkpoint:
             VALUES (?,?,'failed',1,?,?)
             ON CONFLICT(job,item_id) DO UPDATE SET
               status='failed', attempts=attempts+1, error=excluded.error, updated_at=excluded.updated_at""",
-            (self.job, str(item_id), str(error)[:400],
+            (self.job, str(item_id), str(error)[:1000],
              datetime.now().isoformat(timespec="seconds")))
         self.con.commit()
 

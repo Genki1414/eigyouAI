@@ -30,9 +30,14 @@ Web検索とHPの内容から、以下をJSONのみで返してください(前�
   "has_website": 0か1,
   "website_url": "URLまたはnull",
   "website_quality": 0-3の整数,  // 0:なし 1:古い名刺サイト 2:普通 3:採用・実績が充実
-  "hiring_now": 0か1,            // 求人媒体・自社採用ページに現在出稿しているか
+  "hiring_now": 0か1,            // Indeed/ハローワーク/求人ボックス等の求人媒体に「現在」掲載中の
+                                  // 求人が確認できた場合のみ1。自社HPに採用ページがあるだけ、
+                                  // または過去の掲載履歴しか見つからない場合は0。確認できなければ0。
+  "hiring_source": "hiring_nowを1と判定した根拠(媒体名とURL等)。0ならnull",
   "est_employees": 従業員数の推定整数,
-  "google_reviews": Googleマップのレビュー件数(不明なら0),
+  "is_target_business": 0か1,    // 足場・とび・塗装・解体の施工を実際に行っている会社なら1。
+                                  // 商社・不動産デベロッパー・メーカー・卸売等で、許可は持つが
+                                  // 自社では施工しない(グループ会社が施工する等)場合は0。
   "prime_ratio": 0.0-1.0,        // 元請工事の比率推定
   "enrich_note": "営業初回接触に使える具体的な所見を日本語80字以内"
 }}
@@ -49,12 +54,26 @@ def enrich_one(client, row):
     )
     text = "".join(b.text for b in msg.content if b.type == "text")
     text = text.replace("```json", "").replace("```", "").strip()
-    return json.loads(text[text.index("{"): text.rindex("}") + 1])
+    try:
+        d = json.loads(text[text.index("{"): text.rindex("}") + 1])
+    except Exception as e:
+        # 検品(enrich_review.py)で原因を追えるよう、生レスポンスの先頭を残す
+        raise ValueError(f"JSON抽出失敗({type(e).__name__}: {e}) raw[:500]={text[:500]!r}") from e
+    stu = getattr(msg.usage, "server_tool_use", None)
+    d["_usage"] = {
+        "input_tokens": msg.usage.input_tokens,
+        "output_tokens": msg.usage.output_tokens,
+        "web_search_requests": (getattr(stu, "web_search_requests", 0) or 0) if stu else 0,
+    }
+    return d
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=50)
     ap.add_argument("--pref", default=None)
+    ap.add_argument("--sample", action="store_true",
+                     help="資本金300万〜1億円のレンジからランダム抽出する"
+                          "(capital DESCだと巨大企業ばかりになるため)")
     args = ap.parse_args()
 
     import anthropic  # pip install anthropic （本番のみ必要）
@@ -66,7 +85,9 @@ def main():
     p = []
     if args.pref:
         q += " AND pref=?"; p.append(args.pref)
-    q += " ORDER BY capital DESC LIMIT ?"; p.append(args.limit)
+    if args.sample:
+        q += " AND capital BETWEEN 3000 AND 100000"
+    q += " ORDER BY RANDOM() LIMIT ?"; p.append(args.limit)
     rows = {r["id"]: r for r in con.execute(q, p).fetchall()}
 
     # ── 耐障害化: レート制御 + 指数バックオフ + 中断からの再開 ──
@@ -75,19 +96,24 @@ def main():
     targets = ck.remaining(list(rows.keys()))
 
     done = failed = 0
+    usage_totals = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
     for cid in targets:
         row = rows[cid]
         try:
             rl.acquire()
             d = R.retry(lambda: enrich_one(client, row), job=f"enrich:{row['name']}")
+            u = d.pop("_usage", {})
+            usage_totals["input_tokens"] += u.get("input_tokens", 0)
+            usage_totals["output_tokens"] += u.get("output_tokens", 0)
+            usage_totals["web_search_requests"] += u.get("web_search_requests", 0)
             con.execute(
                 """UPDATE companies SET has_website=?, website_url=?, website_quality=?,
-                   hiring_now=?, est_employees=?, google_reviews=?, prime_ratio=?,
-                   enrich_note=?, enriched_at=datetime('now')
+                   hiring_now=?, hiring_source=?, est_employees=?, is_target_business=?,
+                   prime_ratio=?, enrich_note=?, enriched_at=datetime('now')
                    WHERE id=?""",
                 (d["has_website"], d.get("website_url"), d["website_quality"],
-                 d["hiring_now"], d["est_employees"], d["google_reviews"],
-                 d["prime_ratio"], d["enrich_note"], cid))
+                 d["hiring_now"], d.get("hiring_source"), d["est_employees"],
+                 d["is_target_business"], d["prime_ratio"], d["enrich_note"], cid))
             con.commit()
             ck.done(cid)
             done += 1
@@ -102,6 +128,19 @@ def main():
     if failed:
         print(f"  失敗分は同じコマンドを再実行すれば続きから走ります "
               f"(処理済み {done}件はスキップされます)")
+
+    if done:
+        avg_in = usage_totals["input_tokens"] / done
+        avg_out = usage_totals["output_tokens"] / done
+        avg_search = usage_totals["web_search_requests"] / done
+        # Sonnet 5: 導入価格 $2/$10 per MTok(〜2026-08-31) / 標準価格 $3/$15。web検索 $10/1000件。
+        def cost(inp_price, out_price):
+            return avg_in / 1e6 * inp_price + avg_out / 1e6 * out_price + avg_search / 1000 * 10.0
+        cost_intro, cost_std = cost(2.0, 10.0), cost(3.0, 15.0)
+        print(f"\n実測コスト(成功{done}件平均・失敗分は含まず):")
+        print(f"  入力 {avg_in:.0f}トークン / 出力 {avg_out:.0f}トークン / web検索 {avg_search:.2f}回")
+        print(f"  1社あたり ${cost_intro:.5f}(導入価格) / ${cost_std:.5f}(2026-09-01以降の標準価格)")
+        print(f"  14,688社全件なら ${cost_intro * 14688:,.2f}(導入価格) / ${cost_std * 14688:,.2f}(標準価格)")
 
 if __name__ == "__main__":
     main()

@@ -26,7 +26,7 @@ OUT = Path(__file__).parent / "out" / "model_v2.json"
 # 「この会社にはどのチャネルで何型を送るべきか」まで一体で学習できる。
 FEATURES = [
     "has_website", "website_quality", "hiring_now", "log_emp", "log_capital",
-    "google_reviews", "prime_ratio", "is_tobi", "is_kaitai", "license_seq_pct",
+    "prime_ratio", "is_tobi", "is_kaitai", "license_seq_pct",
     "ch_mail", "ch_fax", "ch_dm", "va_A", "va_B", "va_C",
 ]
 
@@ -37,7 +37,6 @@ SELECT t.responded AS y,
        COALESCE(c.hiring_now,0)       AS hiring_now,
        COALESCE(c.est_employees,5)    AS emp,
        COALESCE(c.capital,3000)       AS capital,
-       COALESCE(c.google_reviews,0)   AS google_reviews,
        COALESCE(c.prime_ratio,0.3)    AS prime_ratio,
        COALESCE(c.trades,'')          AS trades,
        t.channel, t.variant, c.id AS cid, c.score AS score_v1
@@ -89,7 +88,7 @@ def featurize(r):
     return [
         r["has_website"], r["website_quality"], r["hiring_now"],
         np.log1p(r["emp"]), np.log1p(r["capital"] / 1000),
-        np.log1p(r["google_reviews"]), r["prime_ratio"],
+        r["prime_ratio"],
         1 if "tobi" in trades else 0, 1 if "kaitai" in trades else 0,
         r["license_seq_pct"],
         1 if r["channel"] == "メール" else 0,
@@ -182,7 +181,7 @@ def main():
     allrows = con.execute("""SELECT id, COALESCE(has_website,0) has_website,
         COALESCE(website_quality,0) website_quality, COALESCE(hiring_now,0) hiring_now,
         COALESCE(est_employees,5) emp, COALESCE(capital,3000) capital,
-        COALESCE(google_reviews,0) google_reviews, COALESCE(prime_ratio,0.3) prime_ratio,
+        COALESCE(prime_ratio,0.3) prime_ratio,
         COALESCE(trades,'') trades
         FROM companies""").fetchall()
     # 最良チャネル×最良文面で送った場合の期待反応確率を各社のV2スコアとする

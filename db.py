@@ -33,7 +33,9 @@ CREATE TABLE IF NOT EXISTS companies (
                           -- scoring.py/learn.pyの社歴判定には使わない。将来より正確な設立年データが
                           -- 得られたら差し替える前提でこの列は残している)
   has_website INTEGER, website_url TEXT, website_quality INTEGER,
-  hiring_now INTEGER, est_employees INTEGER, google_reviews INTEGER,
+  hiring_now INTEGER, hiring_source TEXT, est_employees INTEGER,
+  google_reviews INTEGER,  -- 未使用(スコアリング対象外。理由はscoring.py参照)。過去分の参考値として列は残す
+  is_target_business INTEGER,  -- 施工実態の有無(0/1)。0はスコアリング対象外
   prime_ratio REAL, enrich_note TEXT, enriched_at TEXT,
   score REAL, rank TEXT, score_detail TEXT, score_v2 REAL,
   dedup_of INTEGER
@@ -147,6 +149,7 @@ def migrate(con):
         ("companies", "name_norm", "TEXT"), ("companies", "score_v2", "REAL"),
         ("companies", "dedup_of", "INTEGER"), ("companies", "enriched_at", "TEXT"),
         ("companies", "email", "TEXT"),
+        ("companies", "hiring_source", "TEXT"), ("companies", "is_target_business", "INTEGER"),
         ("touches", "step", "INTEGER DEFAULT 1"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}

@@ -62,7 +62,7 @@ IM.md・console.html に出ている数字を、そのまま買い手や顧客�
 | ファイル | 項目数 | 検証内容 |
 |---|---|---|
 | `test_pipeline.py` | 48 | 不変条件・法令遵守・数字の整合・モデル精度 |
-| `api.py test` | 19 | エンドポイント・署名・冪等・アトリビューション |
+| `api.py test` | 27 | エンドポイント・署名・冪等・アトリビューション・Stock Factory運用API |
 | `test_concurrency.py` | 5群 | 並列書き込み・レート・再開・二重送信防止 |
 | `senders.py test` | 3群 | 宛先検証・送信者表示・冪等 |
 | `storage.py test` | 5 | SQL方言変換 |
@@ -109,7 +109,7 @@ pip install -r requirements.txt
 python3 run.py status          # 進捗一覧
 python3 run.py all --demo      # 全工程をデモデータで実行
 python3 test_pipeline.py       # 48項目
-python3 api.py test            # 19項目
+python3 api.py test            # 27項目
 python3 test_concurrency.py
 python3 senders.py test
 python3 storage.py test

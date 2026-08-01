@@ -3,7 +3,7 @@
 **⚠ 先に INDEX.md の「最重要の注意」を読むこと（数値はシミュレーション値です）**
 
 **この文書の目的**: 本番投入で残っている作業を、設計判断なしで実行できる形にする。
-既存の設計を変更しないこと。テスト（`test_pipeline.py` 48項目 / `api.py test` 19項目 /
+既存の設計を変更しないこと。テスト（`test_pipeline.py` 48項目 / `api.py test` 27項目 /
 `test_concurrency.py` / `senders.py test` / `storage.py test`）が全て通る状態を維持すること。
 
 ---
@@ -14,7 +14,7 @@
 pip install -r requirements.txt
 python3 run.py all --demo      # デモデータで全工程が通ることを確認
 python3 test_pipeline.py       # 48項目
-python3 api.py test            # 19項目
+python3 api.py test            # 27項目
 python3 test_concurrency.py
 python3 senders.py test
 python3 storage.py test
@@ -117,6 +117,26 @@ curl http://127.0.0.1:8787/health
 ```
 - APIの前段にTLS終端（nginx / Cloudflare）を置く。`api.py` は127.0.0.1のみ待受
 - cronは `deploy/crontab` をそのまま使う
+
+### T8. Stock Factory連携【完了・2026-08-01】
+`stockfactory-office`（`src/execution/adapters/sales-engine.ts`）から叩けるよう、
+`api.py` に運用API 3本を追加済み。新規テーブル・スキーマ変更なし。
+
+- `GET /api/ops/status` — `run.status_dict()`。企業数・採点済み数・ランク分布・
+  キャンペーン数・各パイプラインステップの完了状況
+- `GET /api/ops/metrics` — `metrics.compute()`（CLIの`metrics.py`と同じ集計ロジックを
+  関数として切り出して共有）
+- `POST /api/ops/run-step` — `run.run_op(con, step, campaign_id, dry_run)`。
+  body: `{"step": "score"|"compose"|"dedup"|"learn"|"send"|"followup", "campaignId", "dryRun"}`
+  - `send`/`followup` は必ず `senders.send_campaign()` 経由（＝`db.can_contact()` を
+    必ず通る）。この経路が「接触ガードのバイパス」（3節参照）にならないことを
+    `api.py test` に専用のテストとして追加してある
+  - `send`/`followup` の実送信は `senders.py` の `_deliver()` が未実装（T2/T5未着手）の
+    チャネルでは `NotImplementedError` になる。T2/T5を実装すればそのまま実送信に切り替わる
+- 認証: 3本共通で `Authorization: Bearer <SALES_ENGINE_API_KEY>`。未設定時は常に401
+  （`WEBHOOK_SECRET`と違い開発用デフォルト値は持たせていない。実送信まで叩ける
+  強い権限のため）
+- `.env` に `SALES_ENGINE_API_KEY` を生成して設定するだけで社長側のRuntimeと繋がる
 
 ---
 

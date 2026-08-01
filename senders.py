@@ -1,0 +1,346 @@
+"""
+senders.py — 送信アダプタ層
+チャネル（FAX / メール / SMS / 郵送）ごとに事業者は違うが、呼び出し側から見た形は同じにする。
+本番で事業者を差し替えても campaign.py / followup.py を触らなくて済むようにするのが目的。
+
+設計の要点:
+  - send() は必ず SendResult を返す。例外は投げず、失敗も結果として返す（一括送信が止まらない）
+  - 恒久エラー(宛先不明・番号不正)は permanent=True で返し、呼び出し側が配信停止に入れる
+  - 冪等キーを必ず受け取る。同じキーの再送はアダプタ層で弾く
+  - レート制御はアダプタが自分で持つ（事業者ごとに上限が違うため）
+  - 送信者情報の付与はここで強制する（特定電子メール法。文面生成側の実装漏れを防ぐ）
+
+本番実装で差すもの:
+  MailSender  → SendGrid / Amazon SES
+  FaxSender   → 秒速FAX / メッセージプラス
+  SmsSender   → Twilio / KDDI Message Cast
+  PostSender  → ハガキ・封書の印刷発送代行API
+
+  python3 senders.py test    # モックで一通り動かす
+"""
+import json
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+import resilience as R
+
+
+@dataclass
+class SendResult:
+    ok: bool
+    provider_id: Optional[str] = None      # 事業者側のメッセージID（追跡に使う）
+    error: Optional[str] = None
+    permanent: bool = False                # True=再送しても無駄（宛先不明など）
+    cost_yen: int = 0
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass
+class Recipient:
+    company_id: int
+    name: str
+    email: Optional[str] = None
+    fax: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+
+
+@dataclass
+class Sender:
+    """テナントの送信者情報。特定電子メール法の表示義務を満たすために必須。"""
+    name: str
+    email: str
+    address: str
+    optout_url: str
+
+
+# ── 基底クラス ──────────────────────────────
+class BaseSender:
+    channel = "base"
+    unit_cost_yen = 0
+    rate_service = "default"
+
+    def __init__(self, con, dry_run=True):
+        self.con = con
+        self.dry_run = dry_run
+        self.rl = R.limiter_for(self.rate_service)
+        self.idem = R.Idempotency(con)
+
+    # 各アダプタが実装する
+    def _deliver(self, to: Recipient, sender: Sender, subject, body) -> SendResult:
+        raise NotImplementedError
+
+    def validate(self, to: Recipient) -> Optional[str]:
+        """宛先が使えるか。使えない理由を返す（Noneなら可）"""
+        raise NotImplementedError
+
+    def footer(self, sender: Sender) -> str:
+        """全チャネル共通の送信者表示。ここで強制するので文面側の漏れが起きない。"""
+        return (f"\n\n──────────\n{sender.name}\n{sender.address}\n"
+                f"{sender.email}\n配信停止: {sender.optout_url}")
+
+    def send(self, to: Recipient, sender: Sender, subject, body, idem_key) -> SendResult:
+        # 1. 二重送信の防止
+        if self.con.execute("SELECT 1 FROM idempotency WHERE key=?", (idem_key,)).fetchone():
+            return SendResult(ok=True, provider_id="skipped", error="送信済み（冪等キー一致）")
+
+        # 2. 宛先の検証
+        why = self.validate(to)
+        if why:
+            return SendResult(ok=False, error=why, permanent=True)
+
+        # 3. レート制御
+        self.rl.acquire()
+
+        # 4. 送信（一時エラーのみ再試行）
+        full_body = body + self.footer(sender)
+        try:
+            res = R.retry(lambda: self._deliver(to, sender, subject, full_body),
+                          attempts=4, job=f"{self.channel}:{to.name}")
+        except Exception as e:  # noqa: BLE001
+            return SendResult(ok=False, error=str(e)[:200],
+                              permanent=isinstance(e, R.Fatal))
+
+        # 5. 成功したら冪等キーを記録
+        if res.ok:
+            self.idem.record(idem_key, {"provider_id": res.provider_id,
+                                        "at": datetime.now().isoformat(timespec="seconds")})
+            res.cost_yen = self.unit_cost_yen
+        return res
+
+
+# ── メール ─────────────────────────────────
+class MailSender(BaseSender):
+    channel = "メール"
+    unit_cost_yen = 1
+    rate_service = "sendgrid"
+    EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+    def validate(self, to):
+        if not to.email:
+            return "メールアドレス未取得"
+        if not self.EMAIL_RE.match(to.email):
+            return f"メールアドレス形式不正: {to.email}"
+        return None
+
+    def _deliver(self, to, sender, subject, body):
+        if self.dry_run:
+            return SendResult(ok=True, provider_id=f"mock_mail_{uuid.uuid4().hex[:10]}")
+        # 本番: SendGrid
+        # import sendgrid
+        # sg = sendgrid.SendGridAPIClient(os.environ["SENDGRID_API_KEY"])
+        # r = sg.send(Mail(from_email=sender.email, to_emails=to.email,
+        #                  subject=subject, plain_text_content=body))
+        # 401/403 は Fatal（キー不正なので再試行しても無駄）
+        raise NotImplementedError("SENDGRID_API_KEY を設定して本実装に差し替える")
+
+
+# ── FAX ────────────────────────────────────
+class FaxSender(BaseSender):
+    channel = "FAX"
+    unit_cost_yen = 12
+    rate_service = "fax_api"
+
+    def validate(self, to):
+        if not to.fax:
+            return "FAX番号未取得"
+        digits = re.sub(r"\D", "", to.fax)
+        if not (9 <= len(digits) <= 11) or not digits.startswith("0"):
+            return f"FAX番号形式不正: {to.fax}"
+        return None
+
+    def footer(self, sender):
+        # FAXは用紙1枚に収める必要があるので簡潔に
+        return (f"\n\n{sender.name} / {sender.email}\n"
+                f"今後の送付が不要な場合は、本紙にその旨ご記入のうえご返信ください。")
+
+    def _deliver(self, to, sender, subject, body):
+        if self.dry_run:
+            return SendResult(ok=True, provider_id=f"mock_fax_{uuid.uuid4().hex[:10]}")
+        raise NotImplementedError("FAX事業者APIに差し替える（秒速FAX / メッセージプラス等）")
+
+
+# ── SMS ────────────────────────────────────
+class SmsSender(BaseSender):
+    channel = "SMS"
+    unit_cost_yen = 8
+    rate_service = "sms"
+    MAX_CHARS = 660
+
+    def validate(self, to):
+        if not to.phone:
+            return "電話番号未取得"
+        digits = re.sub(r"\D", "", to.phone)
+        if not digits.startswith("0") or len(digits) not in (10, 11):
+            return f"電話番号形式不正: {to.phone}"
+        # 固定電話にSMSは届かない
+        if not digits.startswith(("070", "080", "090")):
+            return "携帯番号ではない（SMS不達）"
+        return None
+
+    def send(self, to, sender, subject, body, idem_key):
+        if len(body) > self.MAX_CHARS:
+            return SendResult(ok=False, error=f"本文が長すぎる({len(body)}字 > {self.MAX_CHARS})",
+                              permanent=True)
+        return super().send(to, sender, subject, body, idem_key)
+
+    def footer(self, sender):
+        return f"\n{sender.name}\n停止:{sender.optout_url}"
+
+    def _deliver(self, to, sender, subject, body):
+        if self.dry_run:
+            return SendResult(ok=True, provider_id=f"mock_sms_{uuid.uuid4().hex[:10]}")
+        raise NotImplementedError("SMS事業者APIに差し替える")
+
+
+# ── 郵送DM ─────────────────────────────────
+class PostSender(BaseSender):
+    channel = "郵送DM"
+    unit_cost_yen = 95
+    rate_service = "default"
+
+    def validate(self, to):
+        if not to.address:
+            return "住所未取得"
+        if len(to.address) < 6:
+            return f"住所が不完全: {to.address}"
+        return None
+
+    def _deliver(self, to, sender, subject, body):
+        if self.dry_run:
+            return SendResult(ok=True, provider_id=f"mock_post_{uuid.uuid4().hex[:10]}")
+        raise NotImplementedError("印刷発送代行APIに差し替える")
+
+
+REGISTRY = {s.channel: s for s in (MailSender, FaxSender, SmsSender, PostSender)}
+
+
+def get_sender(channel, con, dry_run=True):
+    cls = REGISTRY.get(channel)
+    if not cls:
+        raise ValueError(f"未対応チャネル: {channel}")
+    return cls(con, dry_run=dry_run)
+
+
+# ── 一括送信 ────────────────────────────────
+def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
+    """キャンペーンの未送信分を実際に送る。
+    campaign.py simulate の本番版がこれ。接触ガードはここでも最終確認する。"""
+    import db
+
+    q = """SELECT t.id tid, t.channel, t.subject, t.body, t.company_id, t.step,
+                  c.name, c.email, c.fax, c.phone, c.address,
+                  tn.name sname, tn.sender_email, tn.sender_address, tn.optout_url
+           FROM touches t
+           JOIN companies c ON c.id = t.company_id
+           LEFT JOIN campaigns cp ON cp.id = t.campaign_id
+           LEFT JOIN offers o ON o.id = 1
+           LEFT JOIN tenants tn ON tn.id = o.tenant_id
+           WHERE t.campaign_id=? AND t.step=? AND t.sent_at IS NULL
+             AND t.body IS NOT NULL AND t.body != ''"""
+    p = [campaign_id, step]
+    if limit:
+        q += " LIMIT ?"; p.append(limit)
+    rows = con.execute(q, p).fetchall()
+
+    if not rows:
+        print("送信対象がありません（文面未生成、または全て送信済み）")
+        return
+
+    print(f"送信対象 {len(rows)}件 / {'DRY RUN（実送信しません）' if dry_run else '★本番送信★'}")
+    stats = {"sent": 0, "failed": 0, "blocked": 0, "suppressed": 0}
+    cost = 0
+
+    for r in rows:
+        # 送信直前の最終ガード（作成後に配信停止された可能性がある）
+        allowed, why = db.can_contact(con, r["company_id"])
+        if not allowed:
+            stats["blocked"] += 1
+            con.execute("UPDATE touches SET note=? WHERE id=?", (f"送信中止: {why}", r["tid"]))
+            continue
+
+        sender = Sender(
+            name=r["sname"] or "AshiBase（足場ベース）",
+            email=r["sender_email"] or "info@ashibase.jp",
+            address=r["sender_address"] or "",
+            optout_url=r["optout_url"] or "https://ashibase.jp/optout")
+        to = Recipient(company_id=r["company_id"], name=r["name"], email=r["email"],
+                       fax=r["fax"], phone=r["phone"], address=r["address"])
+
+        adapter = get_sender(r["channel"], con, dry_run=dry_run)
+        key = R.Idempotency.key("send", campaign_id, r["company_id"], step)
+        res = adapter.send(to, sender, r["subject"], r["body"], key)
+
+        if res.ok:
+            con.execute("""UPDATE touches SET sent_at=?, delivered=1, note=?, unit_cost_yen=?
+                           WHERE id=?""",
+                        (datetime.now().isoformat(timespec="seconds"),
+                         f"provider_id={res.provider_id}", res.cost_yen, r["tid"]))
+            stats["sent"] += 1
+            cost += res.cost_yen
+        else:
+            con.execute("UPDATE touches SET delivered=0, note=? WHERE id=?",
+                        (f"送信失敗: {res.error}", r["tid"]))
+            stats["failed"] += 1
+            # 恒久エラーは配信停止に入れる（宛先不明への再送は無意味かつ有害）
+            if res.permanent and "未取得" not in (res.error or ""):
+                db.suppress(con, r["company_id"], "bounce_hard", source=adapter.channel,
+                            note=res.error)
+                stats["suppressed"] += 1
+        con.commit()
+
+    con.execute("UPDATE campaigns SET cost_yen = COALESCE(cost_yen,0) + ? WHERE id=?",
+                (cost, campaign_id))
+    con.commit()
+    print(f"  送信 {stats['sent']} / 失敗 {stats['failed']} / "
+          f"ガードで中止 {stats['blocked']} / 恒久エラーで配信停止 {stats['suppressed']}")
+    print(f"  実費 {cost:,}円")
+    return stats
+
+
+if __name__ == "__main__":
+    import sys
+    import db
+
+    con = db.connect(); db.migrate(con)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        print("── 宛先検証 ──")
+        cases = [
+            (MailSender, Recipient(1, "テスト", email="a@b.co.jp"), None),
+            (MailSender, Recipient(1, "テスト", email="こわれた"), "形式不正"),
+            (MailSender, Recipient(1, "テスト"), "未取得"),
+            (FaxSender, Recipient(1, "テスト", fax="03-1234-5678"), None),
+            (FaxSender, Recipient(1, "テスト", fax="123"), "形式不正"),
+            (SmsSender, Recipient(1, "テスト", phone="090-1234-5678"), None),
+            (SmsSender, Recipient(1, "テスト", phone="03-1234-5678"), "携帯番号ではない"),
+            (PostSender, Recipient(1, "テスト", address="東京都千代田区1-1-1"), None),
+        ]
+        for cls, rcp, expect in cases:
+            why = cls(con).validate(rcp)
+            ok = (why is None) if expect is None else (expect in (why or ""))
+            print(f"  {'✓' if ok else '✗'} {cls.channel:<6} {why or '送信可'}")
+
+        print("\n── 送信者情報の自動付与 ──")
+        s = Sender("AshiBase（足場ベース）", "info@ashibase.jp", "東京都...", "https://ashibase.jp/optout")
+        for cls in (MailSender, FaxSender, SmsSender):
+            f = cls(con).footer(s)
+            has = all(k in f for k in ("AshiBase",)) and ("optout" in f or "ご返信" in f)
+            print(f"  {'✓' if has else '✗'} {cls.channel:<6} 送信者表示と停止手段あり")
+
+        print("\n── 二重送信の防止 ──")
+        con.execute("DELETE FROM idempotency WHERE key LIKE 'test:%'"); con.commit()
+        m = MailSender(con, dry_run=True)
+        rcp = Recipient(1, "テスト", email="a@b.co.jp")
+        r1 = m.send(rcp, s, "件名", "本文", "test:1")
+        r2 = m.send(rcp, s, "件名", "本文", "test:1")
+        print(f"  1回目: {r1.provider_id}")
+        print(f"  2回目: {r2.provider_id}  {'✓ 送信されない' if r2.provider_id=='skipped' else '✗ 二重送信'}")
+        con.execute("DELETE FROM idempotency WHERE key LIKE 'test:%'"); con.commit()
+    else:
+        cid = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+        step = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+        send_campaign(con, cid, step, dry_run=True)

@@ -1,0 +1,6 @@
+# 本番で必要なもの
+anthropic>=0.40.0        # エンリッチメント・文面生成
+scikit-learn>=1.4        # スコアV2の学習
+numpy>=1.26
+psycopg[binary]>=3.1     # Postgresへ移行する場合のみ
+sendgrid>=6.11           # メール送信（差し替え可）

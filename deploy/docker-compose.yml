@@ -1,0 +1,32 @@
+services:
+  api:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    env_file: [../.env]
+    ports: ["127.0.0.1:8787:8787"]
+    volumes: ["engine-data:/app/out"]
+    restart: unless-stopped
+    depends_on: { postgres: { condition: service_healthy } }
+
+  # バッチ（cronで定期実行）
+  worker:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    env_file: [../.env]
+    volumes: ["engine-data:/app/out", "../data:/app/data:ro"]
+    command: ["/bin/bash", "-c", "crontab /app/deploy/crontab && cron -f"]
+    restart: unless-stopped
+    depends_on: { postgres: { condition: service_healthy } }
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ashibase
+      POSTGRES_USER: ashibase
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORDを.envに設定してください}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ashibase"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+volumes: { engine-data: {}, pgdata: {} }

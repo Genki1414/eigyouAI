@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>足場AI営業エンジン — リード司令塔</title>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700;900&family=IBM+Plex+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --concrete:#EFF1F2; --surface:#FFFFFF; --ink:#16191D; --steel:#6E7880;
+  --line:#DDE1E4; --safety:#F2C511; --blue:#24589E; --blue-soft:#E8EFF8;
+  --mono:'IBM Plex Mono',monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--concrete);color:var(--ink);font-family:'IBM Plex Sans JP',sans-serif;font-size:14px;line-height:1.6}
+.stripe{height:8px;background:repeating-linear-gradient(-45deg,var(--safety) 0 14px,var(--ink) 14px 28px)}
+header{background:var(--surface);border-bottom:1px solid var(--line);padding:20px 24px 16px}
+.hd-row{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;max-width:1200px;margin:0 auto}
+h1{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:clamp(20px,4vw,28px);letter-spacing:.02em}
+h1 small{font-weight:700;font-size:12px;color:var(--steel);letter-spacing:.18em;display:block}
+.asof{font-family:var(--mono);font-size:12px;color:var(--steel)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;max-width:1200px;margin:16px auto 0}
+.kpi{background:var(--concrete);border:1px solid var(--line);border-radius:6px;padding:10px 14px}
+.kpi b{font-family:var(--mono);font-size:24px;font-weight:600;display:block}
+.kpi span{font-size:11px;color:var(--steel);letter-spacing:.08em}
+.kpi.hot{background:var(--ink);color:#fff;border-color:var(--ink)}
+.kpi.hot b{color:var(--safety)} .kpi.hot span{color:#B9BEC4}
+main{max-width:1200px;margin:0 auto;padding:16px 24px 60px}
+.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.chip{border:1px solid var(--line);background:var(--surface);border-radius:20px;padding:5px 14px;cursor:pointer;font-size:13px;font-weight:500}
+.chip.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+select,input[type=search]{border:1px solid var(--line);border-radius:6px;padding:6px 10px;font:inherit;background:var(--surface)}
+input[type=search]{flex:1;min-width:140px}
+.count{font-family:var(--mono);font-size:12px;color:var(--steel);margin-bottom:8px}
+.lead{background:var(--surface);border:1px solid var(--line);border-radius:8px;margin-bottom:8px;overflow:hidden;cursor:pointer;transition:border-color .15s}
+.lead:hover{border-color:var(--steel)}
+.lead-top{display:grid;grid-template-columns:56px 1fr auto;gap:12px;align-items:center;padding:12px 14px}
+.badge{font-family:var(--mono);font-weight:600;font-size:15px;width:44px;height:44px;border-radius:6px;display:flex;align-items:center;justify-content:center;flex-direction:column;border:1px solid var(--line);color:var(--steel)}
+.badge i{font-style:normal;font-size:9px;letter-spacing:.05em}
+.badge.S{background:var(--safety);color:var(--ink);border:2px solid var(--ink);font-weight:700}
+.badge.A{background:var(--blue-soft);color:var(--blue);border-color:var(--blue)}
+.badge.B{background:var(--concrete)}
+.lead-name{font-weight:700;font-size:15px}
+.lead-meta{font-size:12px;color:var(--steel);display:flex;gap:10px;flex-wrap:wrap;margin-top:2px}
+.tag{background:var(--concrete);border-radius:4px;padding:1px 7px;font-size:11px}
+.tag.hire{background:var(--safety);color:var(--ink);font-weight:700}
+.channel{font-size:12px;font-weight:700;color:var(--blue);white-space:nowrap;text-align:right}
+.channel small{display:block;font-family:var(--mono);font-weight:600;color:var(--steel)}
+.lead-body{display:none;border-top:1px dashed var(--line);padding:12px 14px;background:#FBFCFC}
+.lead.open .lead-body{display:block}
+.note{font-size:13px;margin-bottom:8px}
+.note b{color:var(--blue)}
+.contact{font-family:var(--mono);font-size:12px;color:var(--steel);display:flex;gap:16px;flex-wrap:wrap}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;display:flex;margin:8px 0 4px;max-width:420px}
+.bar i{height:100%}
+.legend{font-size:10px;color:var(--steel);display:flex;gap:12px;font-family:var(--mono)}
+footer{text-align:center;font-size:11px;color:var(--steel);padding:20px}
+@media(max-width:640px){
+  main{padding:12px} header{padding:16px}
+  .lead-top{grid-template-columns:44px 1fr}
+  .channel{grid-column:2;text-align:left;margin-top:4px}
+  .badge{width:38px;height:38px;font-size:13px}
+}
+</style>
+</head>
+<body>
+<div class="stripe" aria-hidden="true"></div>
+<header>
+  <div class="hd-row">
+    <h1><small>ASHIBA AI SALES ENGINE / PHASE 1</small>足場AI営業エンジン — リード司令塔</h1>
+    <div class="asof" id="asof"></div>
+  </div>
+  <div class="kpis" id="kpis"></div>
+</header>
+<main>
+  <div class="filters">
+    <button class="chip on" data-rank="ALL">全ランク</button>
+    <button class="chip" data-rank="S">S</button>
+    <button class="chip" data-rank="A">A</button>
+    <button class="chip" data-rank="B">B</button>
+    <button class="chip" data-rank="C">C</button>
+    <select id="fChannel"><option value="">全チャネル</option></select>
+    <select id="fPref"><option value="">全地域</option></select>
+    <input type="search" id="fText" placeholder="会社名で検索">
+  </div>
+  <div class="count" id="count"></div>
+  <div id="list"></div>
+</main>
+<footer>データソース: サンプル200社（本番は建設業許可業者DB＋AIエンリッチメント） / スコアV1: 規模・デジタル度・成長・商流の4軸</footer>
+<script>
+const DATA = __DATA__;
+const TR = {tobi:"とび・土工", tosou:"塗装", kaitai:"解体"};
+let state = {rank:"ALL", channel:"", pref:"", text:""};
+
+function fmtTrades(t){return (t||"").split(",").filter(Boolean).map(x=>TR[x]||x).join("・")}
+
+function kpis(){
+  const s=DATA.filter(d=>d.rank==="S").length, a=DATA.filter(d=>d.rank==="A").length;
+  const hire=DATA.filter(d=>d.hiring_now).length;
+  const reach=DATA.filter(d=>["S","A"].includes(d.rank)).length;
+  document.getElementById("kpis").innerHTML = `
+    <div class="kpi"><b>${DATA.length}</b><span>総リード</span></div>
+    <div class="kpi hot"><b>${s}</b><span>Sランク（即接触）</span></div>
+    <div class="kpi"><b>${a}</b><span>Aランク</span></div>
+    <div class="kpi"><b>${hire}</b><span>求人出稿中</span></div>
+    <div class="kpi"><b>${reach}</b><span>初月接触対象（S+A）</span></div>`;
+  document.getElementById("asof").textContent = "AS OF " + new Date().toISOString().slice(0,10);
+}
+
+function options(){
+  const ch=[...new Set(DATA.map(d=>d.channel))];
+  document.getElementById("fChannel").innerHTML += ch.map(c=>`<option>${c}</option>`).join("");
+  const pf=[...new Set(DATA.map(d=>d.pref))].sort();
+  document.getElementById("fPref").innerHTML += pf.map(p=>`<option>${p}</option>`).join("");
+}
+
+function render(){
+  const rows = DATA.filter(d =>
+    (state.rank==="ALL"||d.rank===state.rank) &&
+    (!state.channel||d.channel===state.channel) &&
+    (!state.pref||d.pref===state.pref) &&
+    (!state.text||d.name.includes(state.text)));
+  document.getElementById("count").textContent = rows.length + " 社を表示（スコア降順）";
+  document.getElementById("list").innerHTML = rows.map((d,i)=>`
+  <div class="lead" data-i="${i}">
+    <div class="lead-top">
+      <div class="badge ${d.rank}">${d.rank}<i>${d.score.toFixed(0)}</i></div>
+      <div>
+        <div class="lead-name">${d.name}</div>
+        <div class="lead-meta">
+          <span>${d.pref}</span><span>${fmtTrades(d.trades)}</span>
+          <span>${d.est_employees??"?"}名規模</span>
+          ${d.hiring_now?'<span class="tag hire">求人出稿中</span>':""}
+          ${d.has_website?'<span class="tag">HPあり</span>':'<span class="tag">HPなし</span>'}
+        </div>
+      </div>
+      <div class="channel">${d.channel}<small>推奨チャネル</small></div>
+    </div>
+    <div class="lead-body">
+      <div class="note"><b>AI所見:</b> ${d.enrich_note||"未エンリッチ"}</div>
+      <div class="bar">
+        <i style="width:${d.detail_size??25}%;background:#16191D"></i>
+      </div>
+      <div class="contact">
+        <span>TEL ${d.phone||"-"}</span><span>FAX ${d.fax||"-"}</span>
+        <span>${d.license_type}許可</span><span>設立 ${d.founded_year||"-"}</span>
+        <span>資本金 ${(d.capital/1000).toLocaleString()}百万円</span>
+      </div>
+    </div>
+  </div>`).join("");
+  document.querySelectorAll(".lead").forEach(el=>
+    el.addEventListener("click",()=>el.classList.toggle("open")));
+}
+
+document.querySelectorAll(".chip").forEach(c=>c.addEventListener("click",()=>{
+  document.querySelectorAll(".chip").forEach(x=>x.classList.remove("on"));
+  c.classList.add("on"); state.rank=c.dataset.rank; render();
+}));
+document.getElementById("fChannel").addEventListener("change",e=>{state.channel=e.target.value;render()});
+document.getElementById("fPref").addEventListener("change",e=>{state.pref=e.target.value;render()});
+document.getElementById("fText").addEventListener("input",e=>{state.text=e.target.value;render()});
+
+kpis(); options(); render();
+</script>
+</body>
+</html>

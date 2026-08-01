@@ -1,0 +1,33 @@
+# 足場AI営業エンジン — 定期実行
+# 送信は営業時間内に限定する。深夜・早朝のFAXは苦情に直結する。
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+TZ=Asia/Tokyo
+
+# エンリッチメント: 毎日 深夜に500社ずつ。落ちても翌日続きから走る
+0 2 * * * cd /app && python3 enrich.py --limit 500 >> /app/out/cron.log 2>&1
+
+# スコアリング: エンリッチ後に再計算
+0 4 * * * cd /app && python3 scoring.py >> /app/out/cron.log 2>&1
+
+# 送信: 平日の9時と14時のみ。土日祝は送らない
+0 9,14 * * 1-5 cd /app && python3 senders.py 1 1 >> /app/out/cron.log 2>&1
+
+# フォローアップ: 平日10時。D+14/D+35の対象を生成して送る
+0 10 * * 1-5 cd /app && python3 followup.py --campaign 1 --step 2 >> /app/out/cron.log 2>&1
+
+# 学習: 週次。昇格ゲートを通ればV2に切り替わる
+0 3 * * 1 cd /app && python3 learn.py >> /app/out/cron.log 2>&1
+
+# 集計とIM更新: 毎日
+30 5 * * * cd /app && python3 metrics.py >> /app/out/cron.log 2>&1
+40 5 * * * cd /app && python3 im.py > /app/out/IM.md 2>> /app/out/cron.log
+
+# 法令遵守の監査: 毎日。異常があればログに残る
+0 6 * * * cd /app && python3 suppress_cli.py check >> /app/out/audit.log 2>&1
+
+# 休眠プールの再投入判定: 毎週月曜
+0 7 * * 1 cd /app && python3 dormant.py --campaign 1 --revive --dry >> /app/out/cron.log 2>&1
+
+# バックアップ: 毎日。SQLiteの場合はファイルコピーで足りる
+0 1 * * * cd /app && cp out/companies.db out/backup_$(date +\%u).db 2>/dev/null

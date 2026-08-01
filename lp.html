@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>図面を送るだけ。足場の積算が返ってくる。｜AshiBase</title>
+<meta name="description" content="足場の積算・部材拾いを自動化。図面を送るだけで必要部材と数量が出ます。メールアドレスだけで無料。">
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700;900&family=IBM+Plex+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#F7F8F8; --blueprint:#0F2A47; --blueprint-2:#16395E; --ink:#14181C;
+  --line:#D6DBDF; --safety:#F2C511; --rule:rgba(255,255,255,.16); --steel:#68727B;
+  --mono:'IBM Plex Mono',monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--paper);color:var(--ink);font-family:'IBM Plex Sans JP',sans-serif;font-size:16px;line-height:1.75;-webkit-font-smoothing:antialiased}
+.wrap{max-width:820px;margin:0 auto;padding:0 22px}
+h1,h2,h3{font-family:'Zen Kaku Gothic New';letter-spacing:.01em}
+
+/* ── ヘッダー ── */
+.bar{background:var(--blueprint);color:#fff;padding:11px 0;font-size:13px}
+.bar .wrap{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.logo{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:17px;letter-spacing:.02em}
+.logo em{font-style:normal;color:var(--safety)}
+.bar small{font-family:var(--mono);opacity:.7;font-size:11px;letter-spacing:.06em}
+
+/* ── ヒーロー: 図面グリッド背景 ── */
+.hero{background:var(--blueprint);color:#fff;padding:44px 0 40px;position:relative;overflow:hidden}
+.hero::before{content:"";position:absolute;inset:0;
+  background-image:linear-gradient(var(--rule) 1px,transparent 1px),linear-gradient(90deg,var(--rule) 1px,transparent 1px);
+  background-size:34px 34px;opacity:.5}
+.hero .wrap{position:relative}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;color:var(--safety);margin-bottom:14px}
+.hero h1{font-size:clamp(28px,7vw,46px);font-weight:900;line-height:1.28;margin-bottom:18px}
+.hero h1 u{text-decoration:none;background:linear-gradient(transparent 62%,rgba(242,197,17,.35) 62%)}
+.hero p{font-size:clamp(15px,3.4vw,17px);opacity:.9;max-width:34em}
+
+/* ── 変換デモ（署名要素） ── */
+.convert{display:grid;grid-template-columns:1fr 44px 1fr;gap:0;align-items:stretch;margin:30px 0 6px}
+.pane{background:rgba(255,255,255,.06);border:1px solid var(--rule);border-radius:8px;padding:14px;min-height:186px}
+.pane h4{font-family:var(--mono);font-size:10px;letter-spacing:.12em;opacity:.65;margin-bottom:10px;font-weight:500}
+.dwg{width:100%;height:132px}
+.dwg line,.dwg rect,.dwg path{stroke:#fff;fill:none;stroke-width:1.3;opacity:.85}
+.dwg .hl{stroke:var(--safety);stroke-width:2}
+.mid{display:flex;align-items:center;justify-content:center}
+.mid b{font-family:var(--mono);color:var(--safety);font-size:20px}
+.bom{font-family:var(--mono);font-size:11.5px;line-height:2.05}
+.bom div{display:flex;justify-content:space-between;border-bottom:1px dotted var(--rule);opacity:0;
+  animation:rise .5s forwards}
+.bom div:nth-child(1){animation-delay:.5s} .bom div:nth-child(2){animation-delay:.75s}
+.bom div:nth-child(3){animation-delay:1s}  .bom div:nth-child(4){animation-delay:1.25s}
+.bom div:nth-child(5){animation-delay:1.5s}
+.bom em{font-style:normal;color:var(--safety);font-weight:600}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:.92;transform:none}}
+@media(prefers-reduced-motion:reduce){.bom div{animation:none;opacity:.92}}
+
+/* ── フォーム ── */
+.form{background:#fff;color:var(--ink);border-radius:10px;padding:20px;margin-top:26px;
+  box-shadow:0 12px 34px rgba(15,42,71,.22)}
+.form h3{font-size:19px;font-weight:900;margin-bottom:4px}
+.form .sub{font-size:13px;color:var(--steel);margin-bottom:14px}
+.row{display:flex;gap:9px;flex-wrap:wrap}
+input[type=email]{flex:1;min-width:210px;border:1.5px solid var(--line);border-radius:7px;
+  padding:14px 14px;font:inherit;font-size:16px}
+input[type=email]:focus{outline:none;border-color:var(--blueprint);box-shadow:0 0 0 3px rgba(15,42,71,.1)}
+button{background:var(--safety);color:var(--ink);border:none;border-radius:7px;padding:14px 26px;
+  font-family:'Zen Kaku Gothic New';font-weight:900;font-size:16px;cursor:pointer;white-space:nowrap;
+  transition:transform .12s,filter .12s}
+button:hover{filter:brightness(1.06)} button:active{transform:translateY(1px)}
+button:focus-visible,input:focus-visible{outline:3px solid var(--blueprint);outline-offset:2px}
+.assure{font-size:12px;color:var(--steel);margin-top:11px;display:flex;gap:14px;flex-wrap:wrap}
+.assure span::before{content:"✓ ";color:#1E7A4D;font-weight:700}
+.done{display:none;background:#EAF6EF;border:1px solid #A9D8BF;border-radius:8px;padding:16px;font-size:14px}
+.done.on{display:block} .form.hide .row,.form.hide .assure,.form.hide h3,.form.hide .sub{display:none}
+
+/* ── 本文セクション ── */
+section{padding:44px 0}
+section.alt{background:#fff;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+h2{font-size:clamp(21px,5vw,28px);font-weight:900;margin-bottom:8px}
+.lead{color:var(--steel);margin-bottom:24px;font-size:15px}
+.steps{display:grid;gap:14px}
+.step{display:grid;grid-template-columns:46px 1fr;gap:14px;align-items:start}
+.step .no{font-family:var(--mono);font-weight:600;font-size:13px;color:var(--blueprint);
+  border:1.5px solid var(--blueprint);border-radius:50%;width:34px;height:34px;
+  display:flex;align-items:center;justify-content:center}
+.step h3{font-size:16px;font-weight:700;margin-bottom:2px}
+.step p{font-size:14px;color:var(--steel)}
+.qa{border-top:1px solid var(--line);padding:16px 0}
+.qa h3{font-size:15px;font-weight:700;margin-bottom:4px}
+.qa h3::before{content:"Q. ";font-family:var(--mono);color:var(--blueprint)}
+.qa p{font-size:14px;color:var(--steel)}
+.voice{background:var(--paper);border-left:3px solid var(--safety);padding:14px 16px;margin-bottom:12px;font-size:14px}
+.voice cite{display:block;font-style:normal;font-size:12px;color:var(--steel);margin-top:6px;font-family:var(--mono)}
+
+/* ── 末尾CTA ── */
+.tail{background:var(--blueprint-2);color:#fff;padding:40px 0;text-align:center}
+.tail h2{margin-bottom:6px}
+.tail p{opacity:.85;font-size:15px;margin-bottom:20px}
+.tail button{padding:16px 40px;font-size:17px}
+footer{background:var(--ink);color:#8D969E;font-size:12px;padding:22px 0;text-align:center}
+@media(max-width:620px){
+  .convert{grid-template-columns:1fr;gap:8px} .mid{height:26px} .mid b{transform:rotate(90deg)}
+  .pane{min-height:auto} section{padding:34px 0}
+}
+</style>
+</head>
+<body>
+<div class="bar"><div class="wrap">
+  <div class="logo">Ashi<em>Base</em></div>
+  <small>足場の積算ツール</small>
+</div></div>
+
+<div class="hero"><div class="wrap">
+  <div class="eyebrow">足場会社さま向け / 無料開放中</div>
+  <h1>図面を送るだけ。<br><u>部材と数量</u>が返ってくる。</h1>
+  <p>拾い出しに使っていた夜と日曜が、そのまま空きます。登録はメールアドレスだけ。費用は一切かかりません。</p>
+
+  <div class="convert">
+    <div class="pane">
+      <h4>INPUT — 図面</h4>
+      <svg class="dwg" viewBox="0 0 200 132" aria-label="建物の立面図">
+        <rect x="26" y="20" width="118" height="92"/>
+        <line x1="26" y1="43" x2="144" y2="43"/><line x1="26" y1="66" x2="144" y2="66"/>
+        <line x1="26" y1="89" x2="144" y2="89"/>
+        <line x1="65" y1="20" x2="65" y2="112"/><line x1="105" y1="20" x2="105" y2="112"/>
+        <path class="hl" d="M18 14 L152 14 L152 118 L18 118 Z" stroke-dasharray="5 4"/>
+        <line x1="18" y1="126" x2="152" y2="126" class="hl"/>
+        <path d="M160 20 L172 20 M166 20 L166 112 M160 112 L172 112"/>
+      </svg>
+    </div>
+    <div class="mid"><b>▶</b></div>
+    <div class="pane">
+      <h4>OUTPUT — 部材表</h4>
+      <div class="bom">
+        <div><span>建枠 1219</span><em>84枚</em></div>
+        <div><span>布板 1829</span><em>126枚</em></div>
+        <div><span>交叉筋かい</span><em>168本</em></div>
+        <div><span>ジャッキベース</span><em>28個</em></div>
+        <div><span>階段枠</span><em>8基</em></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="form" id="form">
+    <h3>無料で試す</h3>
+    <div class="sub">メールアドレスを入れると、すぐ使えるリンクをお送りします。</div>
+    <div class="row">
+      <input type="email" id="email" placeholder="mail@example.co.jp" autocomplete="email" inputmode="email">
+      <button id="submit">使ってみる</button>
+    </div>
+    <div class="assure">
+      <span>費用はかかりません</span><span>営業電話はしません</span><span>解約手続き不要</span>
+    </div>
+    <div class="done" id="done">
+      <b>受け付けました。</b><br>ご入力のアドレスに、すぐ使えるリンクをお送りしました。届かない場合は迷惑メールフォルダをご確認ください。
+    </div>
+  </div>
+</div></div>
+
+<section><div class="wrap">
+  <h2>使い方は3手だけ</h2>
+  <p class="lead">パソコンが苦手でも大丈夫なように、手順を極力減らしました。</p>
+  <div class="steps">
+    <div class="step"><div class="no">1</div><div>
+      <h3>図面を送る</h3><p>PDFでも、現場で撮った写真でも構いません。手書きの図面も読み取れます。</p></div></div>
+    <div class="step"><div class="no">2</div><div>
+      <h3>足場の種類を選ぶ</h3><p>くさび式・枠組・単管から選ぶだけ。段数や離れは初期値のままでも出ます。</p></div></div>
+    <div class="step"><div class="no">3</div><div>
+      <h3>部材表を受け取る</h3><p>必要部材と数量が一覧で出ます。そのまま見積や発注に使える形式です。</p></div></div>
+  </div>
+</div></section>
+
+<section class="alt"><div class="wrap">
+  <h2>使っていただいている声</h2>
+  <p class="lead">実際にお使いの足場会社さまからいただいたご意見です。</p>
+  <div class="voice">見積を出すまでが早くなった。今までは現場から帰ってから拾っていたので、その分が丸ごと空いた。
+    <cite>関東・従業員12名・くさび式中心</cite></div>
+  <div class="voice">数量の出し方が人によって違っていたのが揃った。若い社員に任せられるようになったのが大きい。
+    <cite>東海・従業員24名・枠組足場中心</cite></div>
+</div></section>
+
+<section><div class="wrap">
+  <h2>よくあるご質問</h2>
+  <div class="qa"><h3>本当に無料ですか</h3>
+    <p>はい。この積算ツールは無料でお使いいただけます。カード登録も不要です。より本格的な資材管理をご希望の場合のみ、有料のサービスをご案内しています。</p></div>
+  <div class="qa"><h3>営業の電話がかかってきませんか</h3>
+    <p>いたしません。ご案内はメールのみで、不要であれば1クリックで停止できます。</p></div>
+  <div class="qa"><h3>手書きの図面でも使えますか</h3>
+    <p>使えます。写真に撮って送っていただければ読み取ります。読み取りにくい場合はこちらで確認のうえご連絡します。</p></div>
+  <div class="qa"><h3>出てきた数量は正確ですか</h3>
+    <p>拾い出しの下地としてお使いいただく前提です。現場条件による調整は必要になりますので、最終確認は必ずお願いしています。</p></div>
+</div></section>
+
+<div class="tail"><div class="wrap">
+  <h2>まず1件、試してみてください</h2>
+  <p>手持ちの図面を1枚送るだけで、精度は判断できます。</p>
+  <button onclick="document.getElementById('email').focus();window.scrollTo({top:0,behavior:'smooth'})">無料で使ってみる</button>
+</div></div>
+
+<footer>AshiBase（足場ベース） / 足場業界向け資材管理・積算ツール</footer>
+
+<script>
+// ── 流入元の記録: touches.id と campaign_id をURLから拾って一緒に送る ──
+// 送信URL例: https://ashibase.jp/sekisan?t=8213&c=1&ch=mail&v=A
+const q = new URLSearchParams(location.search);
+const attribution = {
+  touch_id:   q.get("t"),        // touches.id → これで「誰に送った何が効いたか」が閉じる
+  campaign_id:q.get("c"),
+  channel:    q.get("ch"),
+  variant:    q.get("v"),
+  landed_at:  new Date().toISOString(),
+  referrer:   document.referrer || null,
+};
+
+document.getElementById("submit").addEventListener("click", async () => {
+  const email = document.getElementById("email").value.trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    document.getElementById("email").focus();
+    document.getElementById("email").style.borderColor = "#B4441F";
+    return;
+  }
+  const payload = { email, ...attribution };
+
+  // 本番: POST /api/signup → touches.responded=1, signed_up=1 を書き戻す
+  try {
+    await fetch("/api/signup", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+  } catch (e) {
+    console.log("[demo] 送信先未接続:", payload);  // プロトタイプでは到達しない
+  }
+  document.getElementById("form").classList.add("hide");
+  document.getElementById("done").classList.add("on");
+});
+document.getElementById("email").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("submit").click();
+});
+</script>
+</body>
+</html>

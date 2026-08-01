@@ -328,8 +328,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(port=8787):
-    srv = HTTPServer(("127.0.0.1", port), Handler)
-    print(f"APIサーバ起動: http://127.0.0.1:{port}")
+    # 起動時に1回だけスキーマを作成/更新する（migrate()は冪等）。これが無いと、真新しい
+    # DBファイルで起動した直後は「no such table: companies」等で全リクエストが失敗する
+    # （Stock Factory連携の疎通確認で発見）。
+    con = db.connect(); db.migrate(con); con.commit()
+
+    # 0.0.0.0 でListenする（従来は127.0.0.1限定）。外部公開の制御は
+    # docker-compose.yml の `ports: ["127.0.0.1:8787:8787"]`（ホストの127.0.0.1のみに
+    # 公開）が担っているため、コンテナ内部まで127.0.0.1限定にする必要はない——限定した
+    # ままだと、Docker経由の外部（ホスト上の他プロセス・同一ホスト上の他コンテナ）からの
+    # 接続がコンテナのloopbackに届かず、reset扱いになる（Stock Factory連携の疎通確認で
+    # 発見）。self_test()（ローカル専用の自己テスト）は127.0.0.1のままでよい。
+    srv = HTTPServer(("0.0.0.0", port), Handler)
+    print(f"APIサーバ起動: http://0.0.0.0:{port}")
     print("  POST /api/signup /api/activate /api/paid /api/optout")
     print("  GET  /t/<touch_id>  /health")
     print("  Stock Factory連携: GET /api/ops/status /api/ops/metrics  "

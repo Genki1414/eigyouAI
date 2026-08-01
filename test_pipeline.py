@@ -113,8 +113,15 @@ def main():
     import resilience as R
     check("レートリミッターがサービス別に定義されている",
           all(k in R.LIMITS for k in ["anthropic", "sendgrid", "fax_api", "sms"]))
-    check("再試行すべきエラーと諦めるべきエラーを区別できる",
-          R.is_retryable(RuntimeError("429 rate_limit")) and not R.is_retryable(R.Fatal("400")))
+    def _http_err(status):
+        e = RuntimeError(f"http {status}")
+        e.status_code = status
+        return e
+    check("再試行すべきエラーと諦めるべきエラーを区別できる(ステータスコード/型で判定)",
+          R.is_retryable(_http_err(429)) and not R.is_retryable(_http_err(400))
+          and not R.is_retryable(R.Fatal("400"))
+          # メッセージの文字列一致には頼らない(誤判定の実例があったため廃止した設計)
+          and not R.is_retryable(RuntimeError("500文字まで表示")))
 
     print("\n── オファー / テナント ──")
     import offers as OF

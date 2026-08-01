@@ -44,10 +44,17 @@ assert el >= 1.0, "レート制御が効いていない"
 print("  ✓ 上限を守っている")
 
 print("\n── リトライ ──")
+def _http_error(status):
+    """ステータスコード付きの例外(SDK例外の代わり)。文字列一致ではなく
+    status_code属性で判定されることを確認するテスト用ヘルパー。"""
+    e = RuntimeError(f"http error {status}")
+    e.status_code = status
+    return e
+
 calls = {"n": 0}
 def flaky():
     calls["n"] += 1
-    if calls["n"] < 3: raise RuntimeError("429 rate_limit")
+    if calls["n"] < 3: raise _http_error(429)
     return "ok"
 assert R.retry(flaky, base=0.05, job="test") == "ok" and calls["n"] == 3
 print(f"  ✓ 一時的な失敗から復帰 ({calls['n']}回目で成功)")
@@ -58,6 +65,20 @@ try:
     R.retry(fatal, attempts=5, base=0.01, job="test"); print("  ✗ 諦めていない")
 except R.Fatal:
     print("  ✓ 再試行しても無駄な失敗は即諦める")
+
+# メッセージにたまたま再試行対象っぽい数字列が含まれるだけの無関係な失敗は
+# 再試行されないことを確認する(過去に"raw[:500]="の"500"が誤って再試行対象に
+# 一致していた事故の再発防止)
+calls2 = {"n": 0}
+def looks_retryable_but_isnt():
+    calls2["n"] += 1
+    raise ValueError("JSON抽出失敗: raw[:500]='...'")
+try:
+    R.retry(looks_retryable_but_isnt, attempts=5, base=0.01, job="test")
+    print("  ✗ 無関係な失敗まで再試行している")
+except ValueError:
+    assert calls2["n"] == 1, f"再試行されないはずが{calls2['n']}回呼ばれた"
+    print("  ✓ メッセージの数字列(\"500\"等)だけでは再試行しない")
 
 print("\n── チェックポイント（再開） ──")
 ck = R.Checkpoint(con, "t")   # ここでテーブルが作られる

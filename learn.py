@@ -11,13 +11,15 @@ V1(手書きルール4軸)は「勘の言語化」でしかない。実際に送
 
 使い方: python3 learn.py
 """
-import json, re, sqlite3
+import json, sqlite3
 from pathlib import Path
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.metrics import roc_auc_score
+
+import db as D
 
 DB = Path(__file__).parent / "out" / "companies.db"
 OUT = Path(__file__).parent / "out" / "model_v2.json"
@@ -43,44 +45,6 @@ SELECT t.responded AS y,
 FROM touches t JOIN companies c ON c.id = t.company_id
 WHERE t.delivered = 1
 """
-
-
-def _license_seq(license_no):
-    """許可番号から連番部分を抜き出す。"第10000号"形式・末尾が素の数字の
-    形式のどちらにも対応。パース不能ならNone。"""
-    if not license_no:
-        return None
-    m = re.search(r"第(\d+)号", license_no)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"(\d+)\s*$", license_no)
-    if m:
-        return int(m.group(1))
-    nums = re.findall(r"\d+", license_no)
-    return int(nums[-1]) if nums else None
-
-
-def compute_license_seq_pct(con):
-    """許可番号の連番を都道府県内でパーセンタイル化する({company_id: 0〜1})。
-    許可番号は初回付与後、更新しても変わらない番号のため、5年ごとに更新される
-    founded_year(許可年月日)と違って社歴の代理変数として使える
-    (連番が小さい=古くから許可を持つ=社歴が長い、値が小さいほど社歴が長い)。
-    実データ(東京都名簿, n=13,897)で連番と資本金の間にSpearman rho=-0.35
-    (p≈0)の負の相関を確認済み。パース不能な許可番号は中央値0.5として扱う。"""
-    rows = con.execute("SELECT id, pref, license_no FROM companies").fetchall()
-    by_pref = {}
-    for r in rows:
-        by_pref.setdefault(r["pref"], []).append((r["id"], _license_seq(r["license_no"])))
-    pct = {}
-    for items in by_pref.values():
-        known = sorted((cid, seq) for cid, seq in items if seq is not None)
-        n = len(known)
-        for rank, (cid, _seq) in enumerate(known):
-            pct[cid] = rank / (n - 1) if n > 1 else 0.5
-        for cid, seq in items:
-            if seq is None:
-                pct[cid] = 0.5
-    return pct
 
 
 def featurize(r):
@@ -115,7 +79,7 @@ def main():
         print(f"学習データ不足({len(rows)}件)。まず接触数を増やしてください。")
         return
 
-    seq_pct = compute_license_seq_pct(con)
+    seq_pct = D.compute_license_seq_pct(con)
     rows = [dict(r, license_seq_pct=seq_pct.get(r["cid"], 0.5)) for r in rows]
 
     X = np.array([featurize(r) for r in rows], dtype=float)

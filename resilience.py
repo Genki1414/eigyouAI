@@ -6,7 +6,9 @@ resilience.py — 落ちない・止まらない・二重送信しないため�
 
 提供するもの:
   1. RateLimiter    … トークンバケット。API/送信APIの秒間・分間上限を守る
-  2. retry()        … 指数バックオフ + ジッター。429/5xxのみ再試行し、4xxは即諦める
+  2. retry()        … 指数バックオフ + ジッター。429/5xx等のみ再試行し、4xxは即諦める
+                      (HTTPステータスコード/例外型で判定。メッセージの文字列一致は
+                      誤判定を招くため使わない。呼び出し側はFatal/Retryableで明示可能)
   3. Checkpoint     … 処理済みIDをDBに刻む。再実行すると続きから走る
   4. Idempotency    … 同じ送信を二度実行しない鍵。二重送信は信用を一発で失う
 
@@ -71,18 +73,43 @@ class RateLimiter:
 
 # ── 2. リトライ ─────────────────────────────
 class Fatal(Exception):
-    """再試行しても無駄な失敗（400番台・入力不正など）"""
+    """再試行しても無駄な失敗（400番台・入力不正など）。呼び出し側が明示的に投げる。"""
 
 
-RETRYABLE_HINTS = ("429", "500", "502", "503", "504", "timeout", "timed out",
-                   "connection", "overloaded", "rate_limit")
+class Retryable(Exception):
+    """一時的な失敗として明示的に再試行させたい場合に、呼び出し側がこれで投げる/包む。"""
+
+
+# HTTPステータスコードでの再試行判定。429=レート制限、408/409=一時的な競合、
+# 5xx=サーバ側、529=Anthropic APIのoverloaded_error。
+_RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
+
+# ステータスコードを持たない(HTTPレスポンスが返る前に失敗する)例外は型名で判定する。
+# anthropicパッケージ等を無条件importしたくない(resilience.pyはsenders.py等
+# Anthropicと無関係な送信チャネルからも使われる)ため、クラス名の文字列一致にしている。
+_RETRYABLE_TYPE_NAMES = {"APIConnectionError", "APITimeoutError", "ConnectTimeout", "ReadTimeout"}
 
 
 def is_retryable(err: Exception) -> bool:
+    """再試行してよい失敗かをHTTPステータスコードか例外の型だけで判定する。
+
+    以前はエラーメッセージの文字列部分一致(例: "500" in str(err))で判定していたが、
+    メッセージにたまたま"500"などの数字列が含まれるだけの無関係な失敗まで再試行対象と
+    誤判定し、無駄なAPI呼び出し(＝無駄な課金)を生む実例が発生したため、この判定方式は
+    廃止した。判定できない例外は「再試行しない」側に倒す(安全側)。
+    """
     if isinstance(err, Fatal):
         return False
-    s = f"{type(err).__name__} {err}".lower()
-    return any(h in s for h in RETRYABLE_HINTS)
+    if isinstance(err, Retryable):
+        return True
+    if isinstance(err, (TimeoutError, ConnectionError)):
+        return True
+    status = getattr(err, "status_code", None)
+    if isinstance(status, int):
+        return status in _RETRYABLE_STATUS
+    if type(err).__name__ in _RETRYABLE_TYPE_NAMES:
+        return True
+    return False
 
 
 def retry(fn, attempts=5, base=1.0, cap=60.0, job="", on_retry=None):

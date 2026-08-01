@@ -4,6 +4,7 @@ db.py — スキーマ / マイグレーション / 接触ガード
 特に重要なのが can_contact(): 配信停止・接触上限・間隔を一箇所で判定する関門。
 どのスクリプトからも必ずここを通す設計にして、「うっかり送ってしまった」を構造的に防ぐ。
 """
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -150,6 +151,7 @@ def migrate(con):
         ("companies", "dedup_of", "INTEGER"), ("companies", "enriched_at", "TEXT"),
         ("companies", "email", "TEXT"),
         ("companies", "hiring_source", "TEXT"), ("companies", "is_target_business", "INTEGER"),
+        ("companies", "prescore_selected", "INTEGER"),  # prescore.pyの選出結果(0/1)
         ("touches", "step", "INTEGER DEFAULT 1"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
@@ -254,6 +256,47 @@ def contactable_ids(con, ids, allow_warm=False):
         else:
             blocked[why] = blocked.get(why, 0) + 1
     return ok, blocked
+
+
+# ── 許可番号の連番(社歴の代理変数) ──────────
+# learn.py(V2学習)とprescore.py(AI不要の事前絞込)の両方が使うため、
+# 重い依存(numpy/scikit-learn)を持つlearn.pyではなくここに置く。
+def _license_seq(license_no):
+    """許可番号から連番部分を抜き出す。"第10000号"形式・末尾が素の数字の
+    形式のどちらにも対応。パース不能ならNone。"""
+    if not license_no:
+        return None
+    m = re.search(r"第(\d+)号", license_no)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(\d+)\s*$", license_no)
+    if m:
+        return int(m.group(1))
+    nums = re.findall(r"\d+", license_no)
+    return int(nums[-1]) if nums else None
+
+
+def compute_license_seq_pct(con):
+    """許可番号の連番を都道府県内でパーセンタイル化する({company_id: 0〜1})。
+    許可番号は初回付与後、更新しても変わらない番号のため、5年ごとに更新される
+    founded_year(許可年月日)と違って社歴の代理変数として使える
+    (連番が小さい=古くから許可を持つ=社歴が長い、値が小さいほど社歴が長い)。
+    実データ(東京都名簿, n=13,897)で連番と資本金の間にSpearman rho=-0.35
+    (p≈0)の負の相関を確認済み。パース不能な許可番号は中央値0.5として扱う。"""
+    rows = con.execute("SELECT id, pref, license_no FROM companies").fetchall()
+    by_pref = {}
+    for r in rows:
+        by_pref.setdefault(r["pref"], []).append((r["id"], _license_seq(r["license_no"])))
+    pct = {}
+    for items in by_pref.values():
+        known = sorted((cid, seq) for cid, seq in items if seq is not None)
+        n = len(known)
+        for rank, (cid, _seq) in enumerate(known):
+            pct[cid] = rank / (n - 1) if n > 1 else 0.5
+        for cid, seq in items:
+            if seq is None:
+                pct[cid] = 0.5
+    return pct
 
 
 def log_run(con, step, status, detail=None, started=None):

@@ -22,11 +22,22 @@ import resilience as R
 DB = Path(__file__).parent / "out" / "companies.db"
 MODEL = "claude-sonnet-5"
 
+# $/1Mトークン。(入力, 出力)。Sonnet 5は2026-08-31まで導入価格が別にある。
+PRICING = {
+    "claude-sonnet-5":              {"intro": (2.0, 10.0), "standard": (3.0, 15.0)},
+    "claude-haiku-4-5-20251001":    {"intro": (1.0, 5.0),  "standard": (1.0, 5.0)},
+    "claude-haiku-4-5":             {"intro": (1.0, 5.0),  "standard": (1.0, 5.0)},
+}
+JPY_PER_USD = 150  # 概算。正確な為替は実行時に確認すること
+
 PROMPT = """あなたは建設業界の営業リサーチャーです。次の会社を調査してください。
 
 会社名: {name}
 所在地: {pref}{city}
 業種: {trades}
+
+Web検索は2回まで(1回目: 会社名+所在地で公式HP・基本情報を特定。2回目: 求人媒体で
+hiring_nowを確認)。3回目以降は使わず、その時点の情報で保守的に推定してください。
 
 Web検索とHPの内容から、以下をJSONのみで返してください(前置き・コードブロック禁止):
 {{
@@ -46,13 +57,15 @@ Web検索とHPの内容から、以下をJSONのみで返してください(前�
 }}
 確信が持てない項目は保守的に推定してください。"""
 
-def enrich_one(client, row):
+def enrich_one(client, row, model=MODEL):
     """1社分。呼び出し側で retry / rate limit / checkpoint に包まれる。"""
     msg = client.messages.create(
         # web検索を複数回はさむとJSON本体を書く前にmax_tokensを使い切ることがある
         # (実測: 1000だと出力の頭数十字で打ち切られるケースを確認)ため余裕を持たせる
-        model=MODEL, max_tokens=2000,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        model=model, max_tokens=2000,
+        # max_uses=2: 実測でweb検索平均4.9回/社が入力トークン(平均6.7万)の主因だった
+        # ため、プロンプトの検索方針(2回まで)と合わせてハード上限も設ける
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}],
         messages=[{"role": "user", "content": PROMPT.format(
             name=row["name"], pref=row["pref"] or "", city=row["city"] or "",
             trades=row["trades"])}],
@@ -83,6 +96,10 @@ def main():
     ap.add_argument("--sample", action="store_true",
                      help="資本金300万〜1億円のレンジからランダム抽出する"
                           "(capital DESCだと巨大企業ばかりになるため)")
+    ap.add_argument("--prescored-only", action="store_true",
+                     help="prescore.pyで選出された会社(prescore_selected=1)のみを対象にする")
+    ap.add_argument("--model", default=MODEL,
+                     help=f"使用モデル(既定: {MODEL})。例: claude-haiku-4-5-20251001")
     args = ap.parse_args()
 
     import anthropic  # pip install anthropic （本番のみ必要）
@@ -96,12 +113,16 @@ def main():
         q += " AND pref=?"; p.append(args.pref)
     if args.sample:
         q += " AND capital BETWEEN 3000 AND 100000"
+    if args.prescored_only:
+        q += " AND prescore_selected=1"
     q += " ORDER BY RANDOM() LIMIT ?"; p.append(args.limit)
     rows = {r["id"]: r for r in con.execute(q, p).fetchall()}
 
     # ── 耐障害化: レート制御 + 指数バックオフ + 中断からの再開 ──
     rl = R.limiter_for("anthropic")
-    ck = R.Checkpoint(con, job=f"enrich{':' + args.pref if args.pref else ''}")
+    # モデルを変えると同じ会社でも別実行として扱いたい(比較検証で両方の結果を残すため)
+    job_suffix = (':' + args.pref if args.pref else '') + (f':{args.model}' if args.model != MODEL else '')
+    ck = R.Checkpoint(con, job=f"enrich{job_suffix}")
     targets = ck.remaining(list(rows.keys()))
 
     done = failed = 0
@@ -110,7 +131,7 @@ def main():
         row = rows[cid]
         try:
             rl.acquire()
-            d = R.retry(lambda: enrich_one(client, row), job=f"enrich:{row['name']}")
+            d = R.retry(lambda: enrich_one(client, row, model=args.model), job=f"enrich:{row['name']}")
             u = d.pop("_usage", {})
             usage_totals["input_tokens"] += u.get("input_tokens", 0)
             usage_totals["output_tokens"] += u.get("output_tokens", 0)
@@ -142,14 +163,18 @@ def main():
         avg_in = usage_totals["input_tokens"] / done
         avg_out = usage_totals["output_tokens"] / done
         avg_search = usage_totals["web_search_requests"] / done
-        # Sonnet 5: 導入価格 $2/$10 per MTok(〜2026-08-31) / 標準価格 $3/$15。web検索 $10/1000件。
+        pricing = PRICING.get(args.model, PRICING[MODEL])
         def cost(inp_price, out_price):
             return avg_in / 1e6 * inp_price + avg_out / 1e6 * out_price + avg_search / 1000 * 10.0
-        cost_intro, cost_std = cost(2.0, 10.0), cost(3.0, 15.0)
-        print(f"\n実測コスト(成功{done}件平均・失敗分は含まず):")
+        cost_intro = cost(*pricing["intro"])
+        cost_std = cost(*pricing["standard"])
+        print(f"\n実測コスト(モデル={args.model} / 成功{done}件平均・失敗分は含まず):")
         print(f"  入力 {avg_in:.0f}トークン / 出力 {avg_out:.0f}トークン / web検索 {avg_search:.2f}回")
-        print(f"  1社あたり ${cost_intro:.5f}(導入価格) / ${cost_std:.5f}(2026-09-01以降の標準価格)")
-        print(f"  14,688社全件なら ${cost_intro * 14688:,.2f}(導入価格) / ${cost_std * 14688:,.2f}(標準価格)")
+        print(f"  1社あたり ${cost_intro:.5f}〜${cost_std:.5f}"
+              f"(概算{cost_intro*JPY_PER_USD:.1f}〜{cost_std*JPY_PER_USD:.1f}円、"
+              f"{JPY_PER_USD}円/$として概算。正確な為替は別途確認)")
+        print(f"  対象母数14,688社なら ${cost_intro*14688:,.0f}〜${cost_std*14688:,.0f}"
+              f" / 事前絞込後3,000社なら ${cost_intro*3000:,.0f}〜${cost_std*3000:,.0f}")
 
 if __name__ == "__main__":
     main()

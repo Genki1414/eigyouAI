@@ -172,6 +172,104 @@ def status(con):
     print()
 
 
+def status_dict(con):
+    """status()と同じ情報+運用サマリをJSON化できる形で返す。api.pyの
+    GET /api/ops/status(Stock Factory連携)がこれを呼ぶ。"""
+    steps = {}
+    for s in STEPS:
+        try:
+            steps[s["key"]] = bool(s["done"](con))
+        except Exception:
+            steps[s["key"]] = False
+    by_rank = {r: 0 for r in ["S", "A", "B", "C"]}
+    for row in con.execute(
+            "SELECT rank, COUNT(*) c FROM companies WHERE rank IS NOT NULL GROUP BY rank"):
+        if row["rank"] in by_rank:
+            by_rank[row["rank"]] = row["c"]
+    # campaignsテーブルにactive/inactiveの区別がないため、全キャンペーン数を暫定値とする
+    active_campaigns = con.execute(
+        "SELECT COUNT(*) c FROM sqlite_master WHERE name='campaigns'").fetchone()["c"] and \
+        con.execute("SELECT COUNT(*) c FROM campaigns").fetchone()["c"] or 0
+    last_run_at = con.execute("SELECT MAX(finished_at) m FROM run_log").fetchone()["m"]
+    return {
+        "companies_total": n_companies(con),
+        "companies_scored": n_scored(con),
+        "by_rank": by_rank,
+        "active_campaigns": active_campaigns,
+        "last_run_at": last_run_at,
+        "steps": steps,
+    }
+
+
+# ── Stock Factory等の外部オーケストレータ向けstep語彙 ──
+# STEPS(上のパイプライン全体)とは別に、外部から呼ばれる粒度の語彙(score/compose/
+# dedup/learn/send/followup)をここでマッピングする。send/followupは必ず
+# senders.send_campaign() 経由にする(=db.can_contact()を必ず通す。ここをバイパス
+# する新しい送信経路を作らないこと)。
+def run_op(con, step, campaign_id=None, dry_run=False):
+    """Stock Factory等の外部呼び出し用ディスパッチャ。api.pyのPOST /api/ops/run-stepが
+    これを呼ぶ。戻り値は必ず {"ok", "step", "affected_count", "details"} の形。"""
+    try:
+        if step == "dedup":
+            n = db.dedup(con)
+            return {"ok": True, "step": step, "affected_count": n, "details": f"重複{n}件を統合"}
+
+        if step == "score":
+            before = n_scored(con)
+            ok = sh(["scoring.py"])
+            after = n_scored(con)
+            return {"ok": ok, "step": step, "affected_count": after - before if ok else 0,
+                    "details": f"採点済み {before}→{after}件"}
+
+        if step == "compose":
+            if not campaign_id:
+                return {"ok": False, "step": step, "affected_count": 0,
+                        "details": "campaignIdが必要です"}
+            before = n_composed(con)
+            args = ["compose.py", "--campaign", str(campaign_id)]
+            if dry_run:
+                args.append("--offline")  # dryRun時はAI課金を避けテンプレ生成にする
+            ok = sh(args)
+            after = n_composed(con)
+            return {"ok": ok, "step": step, "affected_count": after - before if ok else 0,
+                    "details": f"文面生成 {before}→{after}件" + ("(dryRun: --offline)" if dry_run else "")}
+
+        if step == "learn":
+            ok = sh(["learn.py"])
+            return {"ok": ok, "step": step, "affected_count": None,
+                    "details": "learn.py実行完了" if ok else "learn.py失敗"}
+
+        if step in ("send", "followup"):
+            if not campaign_id:
+                return {"ok": False, "step": step, "affected_count": 0,
+                        "details": "campaignIdが必要です"}
+            import senders
+            if step == "send":
+                target_step = 1
+            else:
+                # 既に送信済みの最大stepの次を対象にする(未着手ならStep2から)
+                row = con.execute(
+                    "SELECT MAX(step) m FROM touches WHERE campaign_id=? AND sent_at IS NOT NULL",
+                    (campaign_id,)).fetchone()
+                target_step = min((row["m"] or 1) + 1, 3)
+                import followup
+                followup.build_step(con, campaign_id, target_step)
+            # ここが唯一の実送信経路。can_contact()はsend_campaign内部で必ず通る。
+            stats = senders.send_campaign(con, campaign_id, step=target_step, dry_run=dry_run)
+            if stats is None:  # 送信対象なし
+                return {"ok": True, "step": step, "affected_count": 0,
+                        "details": f"Step{target_step}: 送信対象がありません"}
+            return {"ok": True, "step": step, "affected_count": stats["sent"],
+                    "details": f"Step{target_step}: 送信{stats['sent']} / 失敗{stats['failed']} / "
+                               f"ガードで中止{stats['blocked']} / 配信停止{stats['suppressed']}"
+                               + ("（dryRun）" if dry_run else "")}
+
+        return {"ok": False, "step": step, "affected_count": 0,
+                "details": f"未対応のstep: {step}"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "step": step, "affected_count": 0, "details": str(e)[:300]}
+
+
 def run_all(con, demo, only=None):
     for s in STEPS:
         if only and s["key"] != only:

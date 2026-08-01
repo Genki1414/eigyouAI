@@ -39,13 +39,10 @@ def funnel(con, where, params):
         "ltv_cac": round((mrr * 24) / cost, 2) if cost and mrr else None,  # LTV=24ヶ月想定
     }
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--campaign", type=int, default=None)
-    a = ap.parse_args()
-    con = sqlite3.connect(DB)
-
-    where, params = ("campaign_id=?", [a.campaign]) if a.campaign else ("1=1", [])
+def compute(con, campaign=None):
+    """ファネル/CAC/LTV/MRRを集計してdictで返す。CLI(main)とapi.py(/api/ops/metrics)の
+    両方がこれを呼ぶ(集計ロジックを二重化しないため)。"""
+    where, params = ("campaign_id=?", [campaign]) if campaign else ("1=1", [])
     result = {"overall": funnel(con, where, params), "by_channel": {}, "by_variant": {},
               "by_rank": {}, "by_step": {}}
 
@@ -60,6 +57,16 @@ def main():
         result["by_rank"][rk] = funnel(
             con, f"{where} AND company_id IN (SELECT id FROM companies WHERE rank=?)",
             params + [rk])
+    return result
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--campaign", type=int, default=None)
+    a = ap.parse_args()
+    con = sqlite3.connect(DB)
+
+    result = compute(con, a.campaign)
 
     OUT.write_text(json.dumps(result, ensure_ascii=False, indent=1))
     o = result["overall"]

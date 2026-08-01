@@ -12,6 +12,13 @@ CACもチャネル別成績も出せない = 売り物にならない。
   GET  /t/<touch_id>  開封・クリック計測    → responded=1 してLPへリダイレクト
   GET  /health        死活監視
 
+  ── Stock Factory連携(社長のRuntimeから叩く運用API。Authorization: Bearer必須) ──
+  GET  /api/ops/status     run.py statusと同等のJSON
+  GET  /api/ops/metrics    metrics.pyの集計結果のJSON
+  POST /api/ops/run-step   {"step","campaignId","dryRun"} → run.run_op()に委譲
+                           step=send/followupは必ずsenders.send_campaign()経由になり、
+                           db.can_contact()をバイパスしない(HANDOFF.mdの原則を厳守)
+
 設計の要点:
   - touch_id で「どの接触が効いたか」を紐付ける。これが取れないと学習データにならない
   - touch_id が無い流入も受ける（自然流入・紹介）。company_id で照合し、
@@ -37,11 +44,18 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import db
+import metrics
+import run as R
 
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "dev-secret-change-me")
 LP_URL = os.environ.get("LP_URL", "https://ashibase.jp/sekisan")
 # touch_idが無い流入を、直近何日以内の接触に帰属させるか
 ATTRIBUTION_WINDOW_DAYS = 45
+
+# Stock Factory等の運用API(/api/ops/*)専用のキー。WEBHOOK_SECRETと違い、
+# 実送信(send/followup)まで叩ける強い権限のため既定値を持たせない
+# (未設定なら誰にも一致しない=常に401、というフェイルセーフにする)。
+SALES_ENGINE_API_KEY = os.environ.get("SALES_ENGINE_API_KEY")
 
 
 # ── 冪等性 ──────────────────────────────────
@@ -199,6 +213,18 @@ def sign(raw: bytes) -> str:
     return hmac.new(WEBHOOK_SECRET.encode(), raw, hashlib.sha256).hexdigest()
 
 
+def verify_ops_bearer(auth_header: str) -> bool:
+    """/api/ops/* 用。Authorization: Bearer <SALES_ENGINE_API_KEY> を検証する。
+    SALES_ENGINE_API_KEYが未設定なら常にFalse(=常に401)にして、
+    デフォルト値での事故(誰でも実送信APIを叩けてしまう)を防ぐ。"""
+    if not SALES_ENGINE_API_KEY:
+        return False
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return False
+    token = auth_header[len("Bearer "):]
+    return hmac.compare_digest(token, SALES_ENGINE_API_KEY)
+
+
 # ── HTTPサーバ ──────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def _json(self, status, obj):
@@ -227,8 +253,23 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return self._json(400, {"error": "JSONが不正です"})
 
-        con = self._con()
         path = urllib.parse.urlparse(self.path).path
+
+        if path == "/api/ops/run-step":
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                step = data.get("step")
+                if not step:
+                    return self._json(400, {"error": "stepは必須です"})
+                res = R.run_op(con, step, campaign_id=data.get("campaignId"),
+                               dry_run=bool(data.get("dryRun")))
+                return self._json(200 if res.get("ok") else 500, res)
+            finally:
+                con.close()
+
+        con = self._con()
         try:
             if path == "/api/signup":
                 st, res = h_signup(con, data)
@@ -249,6 +290,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(u.query)
+
+        if u.path in ("/api/ops/status", "/api/ops/metrics"):
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                if u.path == "/api/ops/status":
+                    return self._json(200, R.status_dict(con))
+                campaign = qs.get("campaignId", [None])[0]
+                return self._json(200, metrics.compute(con, int(campaign) if campaign else None))
+            finally:
+                con.close()
+
         con = self._con()
         try:
             if u.path == "/health":
@@ -278,6 +332,10 @@ def serve(port=8787):
     print(f"APIサーバ起動: http://127.0.0.1:{port}")
     print("  POST /api/signup /api/activate /api/paid /api/optout")
     print("  GET  /t/<touch_id>  /health")
+    print("  Stock Factory連携: GET /api/ops/status /api/ops/metrics  "
+          "POST /api/ops/run-step  (要 SALES_ENGINE_API_KEY)")
+    if not SALES_ENGINE_API_KEY:
+        print("  ⚠ SALES_ENGINE_API_KEY 未設定のため /api/ops/* は常に401を返します")
     srv.serve_forever()
 
 
@@ -386,6 +444,80 @@ def self_test(port=8899):
                   (cid,)).fetchone()[0] == 0, f"取消前{before}件")
     allowed, why = db.can_contact(con, cid)
     t("以後 can_contact が拒否する", (not allowed) and "配信停止" in why)
+
+    print("\n── Stock Factory連携（運用API） ──")
+    global SALES_ENGINE_API_KEY
+    import uuid as _uuid
+    SALES_ENGINE_API_KEY = "test-ops-" + _uuid.uuid4().hex
+    ops_key = SALES_ENGINE_API_KEY
+
+    def get_auth(path, token=None):
+        req = urllib.request.Request(
+            base + path, headers={"Authorization": f"Bearer {token}"} if token else {})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def post_auth(path, obj, token=None):
+        praw = json.dumps(obj, ensure_ascii=False).encode()
+        req = urllib.request.Request(
+            base + path, data=praw,
+            headers={"Content-Type": "application/json",
+                     **({"Authorization": f"Bearer {token}"} if token else {})})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    st, r = get_auth("/api/ops/status")
+    t("認証ヘッダなしのGET /api/ops/statusは401", st == 401)
+    st, r = get_auth("/api/ops/status", token="wrong-key")
+    t("誤ったキーは401", st == 401)
+    st, r = get_auth("/api/ops/status", token=ops_key)
+    t("正しいキーでGET /api/ops/status", st == 200 and "companies_total" in r)
+    st, r = get_auth("/api/ops/metrics", token=ops_key)
+    t("GET /api/ops/metrics", st == 200 and "overall" in r)
+    st, r = post_auth("/api/ops/run-step", {"step": "dedup"})
+    t("POST /api/ops/run-stepも認証必須(401)", st == 401)
+    st, r = post_auth("/api/ops/run-step", {"step": "dedup"}, token=ops_key)
+    t("POST /api/ops/run-step: dedup", st == 200 and r.get("ok"))
+
+    print("\n── can_contact()バイパス防止の検証（最重要） ──")
+    # 配信停止されていない会社を1社選び、未送信の接触を1件作ってから配信停止する。
+    # run_op("send")経由でも実際にブロックされることを直接確認する
+    # (=このAPIがcan_contact()を素通りする新しい送信経路になっていないことの証拠)
+    comp = con.execute("""SELECT id FROM companies
+                          WHERE id NOT IN (SELECT company_id FROM suppression) LIMIT 1""").fetchone()
+    if comp:
+        test_company = comp["id"]
+        cur = con.execute(
+            "INSERT INTO campaigns (name, started_at, target_rule) VALUES (?,?,?)",
+            ("test-ops-send", datetime.now().isoformat(timespec="seconds"), "ALL"))
+        test_cid = cur.lastrowid
+        con.execute("""INSERT INTO touches (campaign_id, company_id, channel, variant, step,
+                       body, unit_cost_yen) VALUES (?,?,?,?,?,?,?)""",
+                    (test_cid, test_company, "メール", "A", 1, "テスト本文", 1))
+        db.suppress(con, test_company, "optout", source="test-ops")
+        con.commit()
+
+        st, r = post_auth("/api/ops/run-step",
+                          {"step": "send", "campaignId": test_cid, "dryRun": True}, token=ops_key)
+        t("配信停止済み会社へのsendはブロックされる(can_contact()バイパスなし)",
+          st == 200 and r.get("ok") and "ガードで中止1" in (r.get("details") or ""),
+          f"details={r.get('details')}")
+        t("実際には送信されていない(sent_atが立っていない)",
+          con.execute("SELECT sent_at FROM touches WHERE campaign_id=?",
+                      (test_cid,)).fetchone()[0] is None)
+
+        con.execute("DELETE FROM suppression WHERE company_id=?", (test_company,))
+        con.execute("DELETE FROM touches WHERE campaign_id=?", (test_cid,))
+        con.execute("DELETE FROM campaigns WHERE id=?", (test_cid,))
+        con.commit()
+    else:
+        t("can_contact()バイパス防止の検証", False, "テスト用の会社が見つからずスキップ")
 
     srv.shutdown()
     # 後片付け

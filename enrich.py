@@ -17,7 +17,7 @@ import db
 import resilience as R
 
 DB = Path(__file__).parent / "out" / "companies.db"
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"
 
 PROMPT = """あなたは建設業界の営業リサーチャーです。次の会社を調査してください。
 

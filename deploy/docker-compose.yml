@@ -1,11 +1,16 @@
 services:
   api:
     build: { context: .., dockerfile: deploy/Dockerfile }
+    container_name: eigyouai-api
     env_file: [../.env]
     ports: ["127.0.0.1:8787:8787"]
     volumes: ["engine-data:/app/out"]
     restart: unless-stopped
     depends_on: { postgres: { condition: service_healthy } }
+    # Stock Factory Runtime（同一ホスト上の別コンテナ）から http://eigyouai-api:8787
+    # で到達できるようにする。ホストの127.0.0.1限定publish（上のports）は
+    # ホスト自身からの疎通確認用にそのまま残す——外部公開範囲は広げない。
+    networks: [default, stockfactory-shared]
 
   # バッチ（cronで定期実行）
   worker:
@@ -30,3 +35,11 @@ services:
     restart: unless-stopped
 
 volumes: { engine-data: {}, pgdata: {} }
+
+networks:
+  default: {}
+  # stockfactory-officeのdeploy側（scripts/deploy.sh）が同名で事前作成する外部ネットワーク。
+  # ここでは作成せず参加するだけ（external: true）——どちらのスクリプトを先に実行しても
+  # 動くように、両スクリプトが「無ければ作る」を冪等に行う。
+  stockfactory-shared:
+    external: true

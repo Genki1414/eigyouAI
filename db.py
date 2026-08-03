@@ -152,6 +152,7 @@ def migrate(con):
         ("companies", "email", "TEXT"),
         ("companies", "hiring_source", "TEXT"), ("companies", "is_target_business", "INTEGER"),
         ("companies", "prescore_selected", "INTEGER"),  # prescore.pyの選出結果(0/1)
+        ("companies", "stratum", "TEXT"),  # prescore.pyの層("honmei"=本命/"control"=対照)
         ("touches", "step", "INTEGER DEFAULT 1"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}

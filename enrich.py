@@ -4,14 +4,19 @@ enrich.py — AIエンリッチメント層
 
 必要環境変数: ANTHROPIC_API_KEY
 コスト実測(2026-08、資本金300万〜1億円のサンプル73社平均。旧見積もりの「1社2〜4円」は
-実態と大きく乖離していたため実測値に置き換え): 1社あたり入力6.7万トークン/出力1,400トークン/
-web検索4.9回 ≈ $0.20(導入価格)〜$0.27(標準価格) ≈ 30〜40円。都道府県14,688社フルなら
-概算$2,900〜4,000(実行時のAPI残高を要確認)。
-まずは rank対象のS/A候補(資本金・許可種別で事前絞込)から回すのが定石。
+実態と大きく乖離していたため実測値に置き換え):
+  同期実行  1社あたり入力2.1万トークン/出力1,000トークン/web検索2.0回
+            ≈ $0.07〜$0.10 ≈ 10.8〜14.6円
+  --batch   Message Batches APIはトークン課金が半額(web検索の$10/1000件分は対象外)。
+            同じ使用量なら ≈ $0.05〜$0.06 ≈ 6.9〜8.8円。処理は非同期(最大24時間、
+            通常1時間以内)になるが、この用途はリアルタイム性が不要なため実質デメリットなし。
+            事前絞込3,000社なら概算$138〜177(--batchなしの$215〜293から約35%減)。
+まずは prescore.py で事前絞込んだ会社(--prescored-only)から回すのが定石。
 
 使い方:
   python3 enrich.py --limit 100                    # 未エンリッチの100社を処理(既定は無作為抽出)
   python3 enrich.py --pref 東京都 --sample --limit 500  # 資本金300万〜1億円から無作為抽出
+  python3 enrich.py --prescored-only --batch        # prescore.py選出分をBatches APIで(安い)
 """
 import argparse, json, os, sqlite3, time
 from pathlib import Path
@@ -57,9 +62,11 @@ Web検索とHPの内容から、以下をJSONのみで返してください(前�
 }}
 確信が持てない項目は保守的に推定してください。"""
 
-def enrich_one(client, row, model=MODEL):
-    """1社分。呼び出し側で retry / rate limit / checkpoint に包まれる。"""
-    msg = client.messages.create(
+def build_request(row, model=MODEL):
+    """1社分のmessages.create()向けkwargs。同期呼び出しとBatches APIの両方で使う
+    (client.messages.create(**kw) にも MessageCreateParamsNonStreaming(**kw) にも
+    そのまま渡せる形)。"""
+    return dict(
         # web検索を複数回はさむとJSON本体を書く前にmax_tokensを使い切ることがある
         # (実測: 1000だと出力の頭数十字で打ち切られるケースを確認)ため余裕を持たせる
         model=model, max_tokens=2000,
@@ -70,6 +77,10 @@ def enrich_one(client, row, model=MODEL):
             name=row["name"], pref=row["pref"] or "", city=row["city"] or "",
             trades=row["trades"])}],
     )
+
+
+def parse_response(msg):
+    """レスポンスからJSON+使用量を取り出す。同期/バッチ両方で共有するロジック。"""
     text = "".join(b.text for b in msg.content if b.type == "text")
     text = text.replace("```json", "").replace("```", "").strip()
     try:
@@ -89,6 +100,74 @@ def enrich_one(client, row, model=MODEL):
     }
     return d
 
+
+def enrich_one(client, row, model=MODEL):
+    """1社分(同期)。呼び出し側で retry / rate limit / checkpoint に包まれる。"""
+    msg = client.messages.create(**build_request(row, model))
+    return parse_response(msg)
+
+
+def apply_result(con, cid, d):
+    """パース済みの1社分をcompaniesへ書き込む。"""
+    con.execute(
+        """UPDATE companies SET has_website=?, website_url=?, website_quality=?,
+           hiring_now=?, hiring_source=?, est_employees=?, is_target_business=?,
+           prime_ratio=?, enrich_note=?, enriched_at=datetime('now')
+           WHERE id=?""",
+        (d["has_website"], d.get("website_url"), d["website_quality"],
+         d["hiring_now"], d.get("hiring_source"), d["est_employees"],
+         d["is_target_business"], d["prime_ratio"], d["enrich_note"], cid))
+    con.commit()
+
+
+def run_batch(con, client, ck, rows, targets, model, poll_interval=30):
+    """Message Batches APIでまとめて処理する。トークン課金が半額になる代わりに
+    非同期(最大24時間、通常1時間以内)。この用途はリアルタイム性が不要なため
+    デメリットは実質ない。1バッチ最大10万件なので3,000件程度なら1回で収まる。"""
+    from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+    from anthropic.types.messages.batch_create_params import Request
+
+    requests = [Request(custom_id=str(cid),
+                         params=MessageCreateParamsNonStreaming(**build_request(rows[cid], model)))
+                for cid in targets]
+    batch = client.messages.batches.create(requests=requests)
+    print(f"バッチ投入: {len(requests)}件 batch_id={batch.id}")
+
+    while batch.processing_status != "ended":
+        time.sleep(poll_interval)
+        batch = client.messages.batches.retrieve(batch.id)
+        c = batch.request_counts
+        print(f"  処理中: 完了{c.succeeded + c.errored + c.canceled + c.expired}/{len(requests)}"
+              f" (成功{c.succeeded} 失敗{c.errored} 処理中{c.processing})")
+
+    done = failed = 0
+    usage_totals = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
+    for result in client.messages.batches.results(batch.id):
+        cid = int(result.custom_id)
+        row = rows[cid]
+        if result.result.type == "succeeded":
+            try:
+                d = parse_response(result.result.message)
+                u = d.pop("_usage", {})
+                usage_totals["input_tokens"] += u.get("input_tokens", 0)
+                usage_totals["output_tokens"] += u.get("output_tokens", 0)
+                usage_totals["web_search_requests"] += u.get("web_search_requests", 0)
+                apply_result(con, cid, d)
+                ck.done(cid)
+                done += 1
+            except Exception as e:
+                ck.failed(cid, e)
+                failed += 1
+                print(f"  ✗ {row['name']}: {str(e)[:100]}")
+        else:
+            err = getattr(result.result, "error", None)
+            detail = getattr(err, "message", None) or result.result.type
+            ck.failed(cid, f"batch_{result.result.type}: {detail}")
+            failed += 1
+            print(f"  ✗ {row['name']}: batch_{result.result.type} {detail}")
+
+    return done, failed, usage_totals
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=50)
@@ -100,6 +179,9 @@ def main():
                      help="prescore.pyで選出された会社(prescore_selected=1)のみを対象にする")
     ap.add_argument("--model", default=MODEL,
                      help=f"使用モデル(既定: {MODEL})。例: claude-haiku-4-5-20251001")
+    ap.add_argument("--batch", action="store_true",
+                     help="Message Batches APIを使う(トークン課金半額。非同期で最大24時間"
+                          "かかりうるが、この用途はリアルタイム性が不要なため実質デメリットなし)")
     args = ap.parse_args()
 
     import anthropic  # pip install anthropic （本番のみ必要）
@@ -118,41 +200,36 @@ def main():
     q += " ORDER BY RANDOM() LIMIT ?"; p.append(args.limit)
     rows = {r["id"]: r for r in con.execute(q, p).fetchall()}
 
-    # ── 耐障害化: レート制御 + 指数バックオフ + 中断からの再開 ──
-    rl = R.limiter_for("anthropic")
     # モデルを変えると同じ会社でも別実行として扱いたい(比較検証で両方の結果を残すため)
     job_suffix = (':' + args.pref if args.pref else '') + (f':{args.model}' if args.model != MODEL else '')
     ck = R.Checkpoint(con, job=f"enrich{job_suffix}")
     targets = ck.remaining(list(rows.keys()))
 
-    done = failed = 0
-    usage_totals = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
-    for cid in targets:
-        row = rows[cid]
-        try:
-            rl.acquire()
-            d = R.retry(lambda: enrich_one(client, row, model=args.model), job=f"enrich:{row['name']}")
-            u = d.pop("_usage", {})
-            usage_totals["input_tokens"] += u.get("input_tokens", 0)
-            usage_totals["output_tokens"] += u.get("output_tokens", 0)
-            usage_totals["web_search_requests"] += u.get("web_search_requests", 0)
-            con.execute(
-                """UPDATE companies SET has_website=?, website_url=?, website_quality=?,
-                   hiring_now=?, hiring_source=?, est_employees=?, is_target_business=?,
-                   prime_ratio=?, enrich_note=?, enriched_at=datetime('now')
-                   WHERE id=?""",
-                (d["has_website"], d.get("website_url"), d["website_quality"],
-                 d["hiring_now"], d.get("hiring_source"), d["est_employees"],
-                 d["is_target_business"], d["prime_ratio"], d["enrich_note"], cid))
-            con.commit()
-            ck.done(cid)
-            done += 1
-            if done % 25 == 0:
-                print(f"  {done}/{len(targets)} 完了")
-        except Exception as e:
-            ck.failed(cid, e)
-            failed += 1
-            print(f"  ✗ {row['name']}: {str(e)[:100]}")
+    if args.batch:
+        done, failed, usage_totals = run_batch(con, client, ck, rows, targets, args.model)
+    else:
+        # ── 耐障害化: レート制御 + 指数バックオフ + 中断からの再開 ──
+        rl = R.limiter_for("anthropic")
+        done = failed = 0
+        usage_totals = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
+        for cid in targets:
+            row = rows[cid]
+            try:
+                rl.acquire()
+                d = R.retry(lambda: enrich_one(client, row, model=args.model), job=f"enrich:{row['name']}")
+                u = d.pop("_usage", {})
+                usage_totals["input_tokens"] += u.get("input_tokens", 0)
+                usage_totals["output_tokens"] += u.get("output_tokens", 0)
+                usage_totals["web_search_requests"] += u.get("web_search_requests", 0)
+                apply_result(con, cid, d)
+                ck.done(cid)
+                done += 1
+                if done % 25 == 0:
+                    print(f"  {done}/{len(targets)} 完了")
+            except Exception as e:
+                ck.failed(cid, e)
+                failed += 1
+                print(f"  ✗ {row['name']}: {str(e)[:100]}")
 
     print(f"\nエンリッチメント完了: 成功 {done} / 失敗 {failed}")
     if failed:
@@ -164,11 +241,15 @@ def main():
         avg_out = usage_totals["output_tokens"] / done
         avg_search = usage_totals["web_search_requests"] / done
         pricing = PRICING.get(args.model, PRICING[MODEL])
+        # Batches APIはトークン課金のみ半額(web検索の$10/1000件は対象外)
+        tok_discount = 0.5 if args.batch else 1.0
         def cost(inp_price, out_price):
-            return avg_in / 1e6 * inp_price + avg_out / 1e6 * out_price + avg_search / 1000 * 10.0
+            return (avg_in / 1e6 * inp_price + avg_out / 1e6 * out_price) * tok_discount \
+                   + avg_search / 1000 * 10.0
         cost_intro = cost(*pricing["intro"])
         cost_std = cost(*pricing["standard"])
-        print(f"\n実測コスト(モデル={args.model} / 成功{done}件平均・失敗分は含まず):")
+        print(f"\n実測コスト(モデル={args.model}{' / batch' if args.batch else ''} "
+              f"/ 成功{done}件平均・失敗分は含まず):")
         print(f"  入力 {avg_in:.0f}トークン / 出力 {avg_out:.0f}トークン / web検索 {avg_search:.2f}回")
         print(f"  1社あたり ${cost_intro:.5f}〜${cost_std:.5f}"
               f"(概算{cost_intro*JPY_PER_USD:.1f}〜{cost_std*JPY_PER_USD:.1f}円、"

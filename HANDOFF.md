@@ -117,6 +117,11 @@ curl http://127.0.0.1:8787/health
 ```
 - APIの前段にTLS終端（nginx / Cloudflare）を置く。`api.py` は127.0.0.1のみ待受
 - cronは `deploy/crontab` をそのまま使う
+- `senders.py`の`FormSender`(問い合わせフォーム自動送信)は`playwright install --with-deps
+  chromium`が必要（Dockerfileに追加済み）。この開発セッションの環境は外部サイトへの
+  疎通が許可リスト方式のプロキシ経由に制限されており実サイトでの動作確認ができて
+  いない。**本番デプロイ後、`dry_run=False`で少数の実企業サイトに対して動かし、
+  成功率と誤入力の有無を確認してから本格運用に入ること**
 
 ### T8. Stock Factory連携【完了・2026-08-01】
 `stockfactory-office`（`src/execution/adapters/sales-engine.ts`）から叩けるよう、

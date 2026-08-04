@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# FormSender(senders.py)用。ChromiumとOS依存ライブラリを一括インストール
+RUN playwright install --with-deps chromium
 
 COPY . .
 RUN mkdir -p /app/out /app/data

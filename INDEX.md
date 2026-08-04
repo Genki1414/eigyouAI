@@ -42,6 +42,8 @@ IM.md・console.html に出ている数字を、そのまま買い手や顧客�
 | `storage.py` | SQLite⇔Postgres 方言吸収 | 移行時のみ |
 | `resilience.py` | レート制御 / 再試行 / 再開 / 冪等 | 触らない |
 | `ingest.py` | 都道府県別許可業者名簿Excel取込（県ごとの差は`parsers/<pref>.py`） | **T1で実装** |
+| `ingest_mikomeru.py` | mikomeru CSV取込（既存社にはURL情報のみ書き足し・新規は追加） | **T9で実装** |
+| `prescore.py` | AI不要の事前絞込（資本金/連番/層化サンプリング） | 触らない |
 | `enrich.py` | AIエンリッチメント（HP/求人/レビュー） | APIキー設定のみ |
 | `offers.py` | テナント・オファー定義（マルチプロダクト） | オファー追加時 |
 | `scoring.py` | スコアV1（4軸100点） | 触らない |

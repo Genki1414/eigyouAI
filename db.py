@@ -153,6 +153,10 @@ def migrate(con):
         ("companies", "hiring_source", "TEXT"), ("companies", "is_target_business", "INTEGER"),
         ("companies", "prescore_selected", "INTEGER"),  # prescore.pyの選出結果(0/1)
         ("companies", "stratum", "TEXT"),  # prescore.pyの層("honmei"=本命/"control"=対照)
+        ("companies", "contact_url", "TEXT"),  # 問い合わせフォームURL(mikomeru由来)
+        ("companies", "has_contact_form", "INTEGER"),  # 問い合わせフォーム有無(mikomeru由来)
+        ("companies", "corporate_no", "TEXT"),  # 法人番号(国税庁13桁)。mikomeru取込で判明した分のみ
+        ("companies", "data_source", "TEXT"),  # NULL=国交省名簿(既定) / "mikomeru"=mikomeru由来の新規追加
         ("touches", "step", "INTEGER DEFAULT 1"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
@@ -171,7 +175,8 @@ def migrate(con):
 
 
 # ── 名寄せ ────────────────────────────────
-_STRIP = ["株式会社", "有限会社", "合同会社", "(株)", "(有)", "㈱", "㈲", " ", "　"]
+_STRIP = ["株式会社", "有限会社", "合同会社", "(株)", "(有)", "(合)",
+          "（株）", "（有）", "（合）", "㈱", "㈲", " ", "　"]
 
 def normalize_name(name: str) -> str:
     """商号の表記ゆれを吸収。同一社が複数の許可番号で登録されているケースを潰す。"""
@@ -183,9 +188,11 @@ def normalize_name(name: str) -> str:
 
 
 def dedup(con):
-    """同一都道府県・同一正規化商号を重複とみなし、代表1件に寄せる"""
-    con.execute("UPDATE companies SET name_norm = NULL WHERE name_norm = ''")
-    for r in con.execute("SELECT id, name FROM companies WHERE name_norm IS NULL").fetchall():
+    """同一都道府県・同一正規化商号を重複とみなし、代表1件に寄せる。
+    name_normは毎回フル再計算する(NULLのみ埋める方式だとnormalize_name()の
+    ロジック変更が既存行のキャッシュ値に反映されず、古い基準のまま重複判定して
+    しまう事故が起きるため)。"""
+    for r in con.execute("SELECT id, name FROM companies").fetchall():
         con.execute("UPDATE companies SET name_norm=? WHERE id=?", (normalize_name(r["name"]), r["id"]))
     con.commit()
     dupes = con.execute("""

@@ -57,7 +57,10 @@ def main():
     con = db.connect()
     db.migrate(con)
 
-    q = "SELECT id, name, pref, trades, capital, license_no FROM companies WHERE dedup_of IS NULL AND capital <= ?"
+    # capital IS NULLも候補に含める(mikomeru由来の自由記述資本金がパース不能だった分。
+    # 不明を「対象外」ではなく「除外しない」扱いにする。0円=一人親方層と同じ考え方)
+    q = ("SELECT id, name, pref, trades, capital, license_no FROM companies "
+         "WHERE dedup_of IS NULL AND (capital <= ? OR capital IS NULL)")
     p = [CAPITAL_HI]
     if args.pref:
         q += " AND pref=?"; p.append(args.pref)
@@ -96,11 +99,12 @@ def main():
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1))
 
     n_capital0 = sum(1 for r in rows if r["capital"] == 0)
+    n_capital_null = sum(1 for r in rows if r["capital"] is None)
     n_honmei_tobi = sum(1 for r in honmei if is_tobi(r))
     n_control_tobi = sum(1 for r in control if is_tobi(r))
-    print(f"候補(資本金3,000万円以下・下限なし): {len(rows)}社 "
+    print(f"候補(資本金3,000万円以下・下限なし・不明も含む): {len(rows)}社 "
           f"(うちtobi保有 {len(tobi_group)}社 / それ以外 {len(other_group)}社 / "
-          f"資本金0円 {n_capital0}社)")
+          f"資本金0円 {n_capital0}社 / 資本金不明 {n_capital_null}社)")
     print(f"本命層(honmei): {len(honmei)}社 (うちtobi保有 {n_honmei_tobi}社)")
     print(f"対照層(control): {len(control)}社 (うちtobi保有 {n_control_tobi}社、無作為抽出)")
     print(f"合計選出: {len(honmei) + len(control)}社")

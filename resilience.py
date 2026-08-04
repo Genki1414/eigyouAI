@@ -229,6 +229,7 @@ LIMITS = {
     "sendgrid":   dict(per_minute=600),
     "fax_api":    dict(per_minute=30),    # FAXは物理的に遅い
     "sms":        dict(per_minute=120),
+    "form_submit": dict(per_minute=15),   # 相手サイトへの負荷・bot判定回避のため意図的に低め
 }
 
 

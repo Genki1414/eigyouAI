@@ -304,7 +304,7 @@ def _submit_form(url, sender, subject, body):
               "phone": "", "subject": subject or "", "message": body}
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(executable_path="/opt/pw-browsers/chromium")
+            browser = p.chromium.launch()
             try:
                 page = browser.new_page()
                 page.goto(url, timeout=20000, wait_until="domcontentloaded")
@@ -541,7 +541,7 @@ if __name__ == "__main__":
                     </form>"""),
             ]
             with sync_playwright() as p:
-                browser = p.chromium.launch(executable_path="/opt/pw-browsers/chromium")
+                browser = p.chromium.launch()
                 page = browser.new_page()
                 for label, html in samples:
                     page.set_content(html)

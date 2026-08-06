@@ -5,7 +5,10 @@ PATH=/usr/local/bin:/usr/bin:/bin
 TZ=Asia/Tokyo
 
 # エンリッチメント: 毎日 深夜に500社ずつ。落ちても翌日続きから走る
-0 2 * * * cd /app && python3 enrich.py --limit 500 >> /app/out/cron.log 2>&1
+# ※一時的に無効化中(2026-08-05)。実際にAnthropic APIを叩いて課金が発生するため、
+#   まず手動で--limit 5等の少数実行→実測コスト確認を行ってから有効化すること。
+#   詳細はHANDOFF.mdの運用ルール参照。
+# 0 2 * * * cd /app && python3 enrich.py --limit 500 >> /app/out/cron.log 2>&1
 
 # スコアリング: エンリッチ後に再計算
 0 4 * * * cd /app && python3 scoring.py >> /app/out/cron.log 2>&1

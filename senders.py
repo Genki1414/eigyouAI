@@ -309,7 +309,7 @@ def _submit_form(url, sender, subject, body):
             browser = p.chromium.launch(args=["--disable-http2"])
             try:
                 page = browser.new_page()
-                page.goto(url, timeout=20000, wait_until="domcontentloaded")
+                page.goto(url, timeout=45000, wait_until="domcontentloaded")
 
                 if page.query_selector(
                         "iframe[src*='recaptcha'], iframe[src*='hcaptcha'], .g-recaptcha"):

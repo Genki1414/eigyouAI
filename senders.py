@@ -304,9 +304,7 @@ def _submit_form(url, sender, subject, body):
               "phone": "", "subject": subject or "", "message": body}
     try:
         with sync_playwright() as p:
-            # --disable-http2: 一部サイトのHTTP/2実装とヘッドレスChromiumの相性問題で
-            # ERR_HTTP2_PROTOCOL_ERRORになるケースがあるため、HTTP/1.1に固定する
-            browser = p.chromium.launch(args=["--disable-http2"])
+            browser = p.chromium.launch()
             try:
                 page = browser.new_page()
                 page.goto(url, timeout=45000, wait_until="domcontentloaded")

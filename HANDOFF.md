@@ -188,6 +188,36 @@ mikomeruの「リスト取得」機能で業種(とび・土工工事/解体工�
   (対象プールが2.6倍になったため、次に実行する際は`--pref`指定なしで全国を
   対象にするか要相談)。`enrich.py`も未実行
 
+### T10. FormSenderのPlaywright強化(β版・進行中)
+8/31リリースに向け、`senders.py`のFormSenderが「1件も実サイト送信に成功していない」
+状態を解消するための改修。責務分離: `senders.FormSender`=送信対象決定・接触ガード・
+履歴管理、`form_navigator.py`=Playwrightによる実ブラウザ操作、という分担にした。
+
+- `form_navigator.py`(新規): `navigate_and_submit(url, values)`が本体。
+  問い合わせページ探索(トップページしか無い場合に1階層だけ辿る)、フィールド判定
+  (name/id/placeholder/aria-label/label文言/周辺テキストの同義語マッチ。会社名/氏名/
+  姓・名分割/メール/メール確認/電話/郵便番号/住所/件名/本文に対応)、確認画面対応、
+  CAPTCHA検知(自動突破はしない)、営業禁止文言・採用専用・会員専用フォームの検知、
+  `SUCCESS`/`SKIP_*`/`FAILED_RETRYABLE`/`FAILED_UNSUPPORTED`のステータス分類を担当。
+  企業管理・テナント管理には一切触れない設計
+- `db.py`: `form_send_log`テーブルを追加(1試行=1行。company_id/tenant_id/offer_id/
+  target_url/contact_url/status/reason_code/detected_fields/filled_fields/
+  submit_attempted/success_evidence/error_message/retryable/playwright_run_id。
+  本文そのものは個人情報配慮のため保存しない)
+- `senders.py`: `FormSender._deliver()`は`form_navigator.navigate_and_submit()`を
+  呼ぶだけの薄い層に変更。`SKIP_*`/`FAILED_UNSUPPORTED`は`permanent=False`(会社では
+  なくチャネルの問題なので配信停止には入れない)。`FAILED_RETRYABLE`は
+  `R.Retryable`として投げ、既存の`R.retry()`(4回リトライ)に乗せる
+- `offers.py init`が未実行だっただけで、テナント/オファーのスキーマ自体は完成済み
+  だったと判明。実行したところ`test_pipeline.py`の失敗が4件→1件(is_target_business
+  除外の想定内挙動のみ)に減った
+- `batch_form_test.py`(新規、旧`manual_form_test.py`を置き換え): 複数社をまとめて
+  検証しSUCCESS/SKIP/FAILED内訳を集計するツール。
+  `python3 batch_form_test.py --n 10 --run-label step1`
+- 現状: β版検証のStep1(10社)〜Step4(100社)は**未実施**(次のアクション)。
+  cronのペーシング上限・多重起動防止ロックは、Step1〜2で仕組みが機能すると
+  確認できてから着手する方針(先に検証、後から運用制御)
+
 ---
 
 ## 3. やってはいけないこと

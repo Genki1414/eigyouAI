@@ -217,152 +217,48 @@ class PostSender(BaseSender):
 
 
 # ── 問い合わせフォーム自動送信 ─────────────────
-# サイトごとにフィールド構成が違うため、name/id/placeholder/labelの文言を
-# ヒューリスティックで見て用途を推定する。完全な保証はできない前提の設計。
-# reCAPTCHA等を検出したら自動突破はせず諦める(そのまま失敗として記録し、人手 or
-# 他チャネルに任せる。permanent=Falseなので配信停止には入らない＝再挑戦の余地は残す)。
-_FIELD_HINTS = {
-    "email": ["メール", "eメール", "e-mail", "email"],
-    "phone": ["電話", "tel", "phone"],
-    "message": ["お問い合わせ内容", "ご質問", "ご相談内容", "メッセージ", "本文", "message", "内容", "詳細"],
-    "company": ["会社名", "法人名", "貴社名", "御社名", "company"],
-    "subject": ["件名", "題名", "subject"],
-    "name": ["お名前", "氏名", "担当者", "ご担当者", "name"],
-}
-_CONSENT_HINTS = ["プライバシー", "個人情報", "利用規約", "同意"]
-_SUCCESS_HINTS = ("ありがとうございます", "送信が完了", "受け付け", "受付ました", "thank you")
+# 実際のブラウザ操作(探索・検出・入力・送信・判定)はform_navigator.pyが専任で担当する。
+# ここ(FormSender)は対象決定・接触ガード・履歴管理という送信アダプタ本来の責務のみを持ち、
+# Playwrightの詳細には立ち入らない。
+_SKIP_STATUSES = {"SKIP_CAPTCHA", "SKIP_NO_SOLICIT", "SKIP_RECRUIT_ONLY", "SKIP_SUPPORT_ONLY"}
 
 
-def _label_for(page, el):
-    """input要素のラベル文言を推定する(label[for]優先、無ければ祖先/直前要素)。"""
-    try:
-        el_id = el.get_attribute("id")
-        if el_id:
-            lbl = page.query_selector(f'label[for="{el_id}"]')
-            if lbl:
-                return lbl.inner_text()
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        return el.evaluate("""e => {
-            const p = e.closest('label');
-            if (p) return p.innerText;
-            const prev = e.previousElementSibling;
-            if (prev && prev.tagName === 'LABEL') return prev.innerText;
-            return '';
-        }""") or ""
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-def _classify_field(el, label_text):
-    """input/textarea要素の用途を name/id/placeholder/autocomplete/label文言から推定する。"""
-    text = " ".join(filter(None, [
-        el.get_attribute("name") or "", el.get_attribute("id") or "",
-        el.get_attribute("placeholder") or "", el.get_attribute("autocomplete") or "",
-        label_text or ""])).lower()
-    itype = (el.get_attribute("type") or "").lower()
-    tag = (el.evaluate("e => e.tagName") or "").lower()
-    if itype == "email" or any(h in text for h in _FIELD_HINTS["email"]):
-        return "email"
-    if itype == "tel" or any(h in text for h in _FIELD_HINTS["phone"]):
-        return "phone"
-    if tag == "textarea" or any(h in text for h in _FIELD_HINTS["message"]):
-        return "message"
-    if any(h in text for h in _FIELD_HINTS["company"]):
-        return "company"
-    if any(h in text for h in _FIELD_HINTS["subject"]):
-        return "subject"
-    if any(h in text for h in _FIELD_HINTS["name"]):
-        return "name"
-    return None
-
-
-def _click_submit(page):
-    """送信ボタンらしき要素を探してクリックする。見つかればTrue。
-    入力→確認→送信の2段階フォームでは、確認画面でこれをもう一度呼べば送信まで進む。"""
-    for sel in ("button[type=submit]", "input[type=submit]"):
-        btn = page.query_selector(sel)
-        if btn and btn.is_visible():
-            btn.click()
-            return True
-    for el in page.query_selector_all("button, a"):
-        if not el.is_visible():
-            continue
-        text = (el.inner_text() or "").strip()
-        if re.search(r"送信|確認する|この内容で送信|submit", text, re.I):
-            el.click()
-            return True
-    return False
-
-
-def _submit_form(url, sender, subject, body):
-    """Playwrightで問い合わせフォームへ実際に入力・送信する。dry_run=Falseの本番経路のみ。"""
-    from playwright.sync_api import sync_playwright
-
-    values = {"company": sender.name, "name": sender.name, "email": sender.email,
-              "phone": "", "subject": subject or "", "message": body}
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            try:
-                page = browser.new_page()
-                page.goto(url, timeout=45000, wait_until="domcontentloaded")
-
-                if page.query_selector(
-                        "iframe[src*='recaptcha'], iframe[src*='hcaptcha'], .g-recaptcha"):
-                    return SendResult(ok=False, error="CAPTCHA検出のため自動送信不可",
-                                       permanent=False)
-
-                fields = page.query_selector_all(
-                    "input[type=text], input[type=email], input[type=tel], "
-                    "input:not([type]), textarea")
-                filled = 0
-                for el in fields:
-                    if not el.is_visible():
-                        continue
-                    kind = _classify_field(el, _label_for(page, el))
-                    if kind and values.get(kind):
-                        el.fill(values[kind])
-                        filled += 1
-                if filled == 0:
-                    return SendResult(ok=False, error="入力欄を検出できず", permanent=False)
-
-                for cb in page.query_selector_all("input[type=checkbox]"):
-                    if not cb.is_visible() or cb.is_checked():
-                        continue
-                    if any(h in (_label_for(page, cb) or "") for h in _CONSENT_HINTS):
-                        cb.check()
-
-                if not _click_submit(page):
-                    return SendResult(ok=False, error="送信ボタンを検出できず", permanent=False)
-                page.wait_for_load_state("networkidle", timeout=15000)
-
-                # 入力→確認→送信の2段階フォーム対応。確認画面が無ければ2回目は何も起きない
-                if _click_submit(page):
-                    page.wait_for_load_state("networkidle", timeout=15000)
-
-                page_text = page.inner_text("body")
-                if any(k in page_text for k in _SUCCESS_HINTS):
-                    return SendResult(ok=True, provider_id=f"form_{uuid.uuid4().hex[:10]}",
-                                       raw={"final_url": page.url})
-                return SendResult(ok=False, error="送信完了の確認ができず(要目視確認)",
-                                   permanent=False, raw={"final_url": page.url})
-            finally:
-                browser.close()
-    except Exception as e:  # noqa: BLE001
-        # ページ読込失敗等は一時的な可能性があるため再試行対象として投げる
-        raise R.Retryable(f"フォーム送信中にエラー: {type(e).__name__}: {e}") from e
+def _log_form_send(con, company_id, result, target_url, tenant_id=None, offer_id=None,
+                    started_at=None, keep_debug_fields=False):
+    """form_send_logへ1試行分を記録する。個人情報配慮のため入力内容そのものは残さない。
+    keep_debug_fields=Trueの間だけfinal_url/page_titleを保存する(検証中のみ想定)。"""
+    con.execute("""INSERT INTO form_send_log
+        (company_id, tenant_id, offer_id, target_url, contact_url, started_at, finished_at,
+         status, reason_code, detected_fields, filled_fields, submit_attempted,
+         success_evidence, error_message, retryable, playwright_run_id, final_url, page_title)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (company_id, tenant_id, offer_id, target_url, result.contact_url_used,
+         started_at or datetime.now().isoformat(timespec="seconds"),
+         datetime.now().isoformat(timespec="seconds"),
+         result.status, result.reason_code,
+         json.dumps(result.detected_fields, ensure_ascii=False),
+         json.dumps(result.filled_fields, ensure_ascii=False),
+         1 if result.submit_attempted else 0, result.success_evidence, result.error_message,
+         1 if result.status == "FAILED_RETRYABLE" else 0, result.run_id,
+         result.final_url if keep_debug_fields else None,
+         result.page_title if keep_debug_fields else None))
+    con.commit()
 
 
 class FormSender(BaseSender):
-    """問い合わせフォームへのPlaywright自動入力・送信。
-    宛先ごとにフィールド構成が異なるため成功を保証できない。CAPTCHA・未検出系の
-    失敗はpermanent=False(配信停止に入れない)で記録し、他チャネルや人手に委ねる。"""
+    """問い合わせフォームへの自動入力・送信。ブラウザ操作はform_navigator.pyに委譲する。
+    宛先ごとにフィールド構成が異なるため成功を保証できない。SKIP系(CAPTCHA・営業禁止等)は
+    「会社がダメ」ではなく「このチャネルがダメ」なので配信停止には入れない(permanent=False)。"""
     channel = "フォーム"
     unit_cost_yen = 0
     rate_service = "form_submit"
     URL_RE = re.compile(r"^https?://", re.I)
+
+    def __init__(self, con, dry_run=True, tenant_id=None, offer_id=None, keep_debug_fields=False):
+        super().__init__(con, dry_run=dry_run)
+        self.tenant_id = tenant_id
+        self.offer_id = offer_id
+        self.keep_debug_fields = keep_debug_fields
 
     def validate(self, to):
         if not to.contact_url:
@@ -379,7 +275,27 @@ class FormSender(BaseSender):
     def _deliver(self, to, sender, subject, body):
         if self.dry_run:
             return SendResult(ok=True, provider_id=f"mock_form_{uuid.uuid4().hex[:10]}")
-        return _submit_form(to.contact_url, sender, subject, body)
+
+        import form_navigator as FN
+        started_at = datetime.now().isoformat(timespec="seconds")
+        values = {"company": sender.name, "name": sender.name, "email": sender.email,
+                  "phone": "", "subject": subject or "", "message": body}
+        result = FN.navigate_and_submit(to.contact_url, values)
+        _log_form_send(self.con, to.company_id, result, to.contact_url,
+                        tenant_id=self.tenant_id, offer_id=self.offer_id,
+                        started_at=started_at, keep_debug_fields=self.keep_debug_fields)
+
+        if result.status == "SUCCESS":
+            return SendResult(ok=True, provider_id=f"form_{result.run_id}",
+                               raw={"final_url": result.final_url, "reason_code": result.reason_code})
+        if result.status == "FAILED_RETRYABLE":
+            # R.retry()に任せて呼び出し側の再試行ループに乗せる
+            raise R.Retryable(result.error_message or result.reason_code or "一時的な失敗")
+        # SKIP_* / FAILED_UNSUPPORTED はここで確定させる。いずれもpermanent=Falseとし、
+        # 「会社を止める」のではなく「このチャネルでは通らなかった」事実だけ記録する。
+        label = "対象外(SKIP)" if result.status in _SKIP_STATUSES else "未対応の構造"
+        return SendResult(ok=False, error=f"{label}: {result.reason_code}", permanent=False,
+                           raw={"status": result.status, "reason_code": result.reason_code})
 
 
 REGISTRY = {s.channel: s for s in (MailSender, FaxSender, SmsSender, PostSender, FormSender)}
@@ -517,46 +433,7 @@ if __name__ == "__main__":
         frcp = Recipient(1, "テスト", contact_url="https://example.co.jp/contact/")
         fres = fm.send(frcp, s, "件名", "本文", "test:form:1")
         print(f"  {'✓' if fres.ok else '✗'} dry runで成功応答 (provider_id={fres.provider_id})")
-
-        print("\n── フォーム自動送信: フィールド検出ヒューリスティック ──")
-        try:
-            from playwright.sync_api import sync_playwright
-            samples = [
-                ("標準的な日本語フォーム", """
-                    <form>
-                      <label for="c">会社名</label><input id="c" name="company">
-                      <label for="n">お名前</label><input id="n" name="your-name">
-                      <label for="e">メールアドレス</label><input id="e" type="email">
-                      <label for="t">電話番号</label><input id="t" type="tel">
-                      <label for="m">お問い合わせ内容</label><textarea id="m"></textarea>
-                      <input type="checkbox" id="agree"><label for="agree">プライバシーポリシーに同意する</label>
-                      <button type="submit">送信する</button>
-                    </form>"""),
-                ("placeholder頼みのフォーム", """
-                    <form>
-                      <input name="field1" placeholder="貴社名をご記入ください">
-                      <input name="field2" placeholder="メールアドレス">
-                      <textarea name="field3" placeholder="ご相談内容をご記入ください"></textarea>
-                      <input type="submit" value="確認する">
-                    </form>"""),
-            ]
-            with sync_playwright() as p:
-                browser = p.chromium.launch()
-                page = browser.new_page()
-                for label, html in samples:
-                    page.set_content(html)
-                    kinds = []
-                    for el in page.query_selector_all("input, textarea"):
-                        if (el.get_attribute("type") or "") == "checkbox":
-                            continue
-                        kinds.append(_classify_field(el, _label_for(page, el)))
-                    has_message = "message" in kinds
-                    has_email = "email" in kinds
-                    print(f"  {'✓' if has_message and has_email else '✗'} {label}: "
-                          f"検出結果={kinds}")
-                browser.close()
-        except Exception as e:  # noqa: BLE001
-            print(f"  ⚠ Playwright未使用のためスキップ ({type(e).__name__}: {e})")
+        print("  (フィールド検出ヒューリスティックの検証は python3 form_navigator.py test を参照)")
     else:
         cid = int(sys.argv[1]) if len(sys.argv) > 1 else 1
         step = int(sys.argv[2]) if len(sys.argv) > 2 else 1

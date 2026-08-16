@@ -20,6 +20,8 @@ CREATE INDEX IF NOT EXISTS idx_namenorm ON companies(name_norm, pref);
 CREATE INDEX IF NOT EXISTS idx_touch_camp ON touches(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_touch_step ON touches(campaign_id, step);
 CREATE INDEX IF NOT EXISTS idx_touch_co   ON touches(company_id);
+CREATE INDEX IF NOT EXISTS idx_formlog_co ON form_send_log(company_id);
+CREATE INDEX IF NOT EXISTS idx_formlog_status ON form_send_log(status);
 """
 
 SCHEMA = """
@@ -80,6 +82,32 @@ CREATE TABLE IF NOT EXISTS run_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   step TEXT NOT NULL, status TEXT NOT NULL,
   detail TEXT, started_at TEXT, finished_at TEXT
+);
+
+-- フォーム自動送信(FormSender)の詳細ログ。touchesは1社1件だが、こちらは
+-- 試行のたびに1行残す(同じ会社に複数回トライしうるため1:多)。
+-- SUCCESS/SKIP/FAILEDの内訳を後から集計できるようにするための表。
+-- 個人情報配慮のため、本文そのものは保存しない(検出結果と成功根拠のみ)。
+CREATE TABLE IF NOT EXISTS form_send_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL,
+  tenant_id INTEGER,
+  offer_id INTEGER,
+  target_url TEXT,              -- 開始URL(companies.website_url等)
+  contact_url TEXT,             -- 実際にフォームが見つかったページ
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  status TEXT NOT NULL,         -- SUCCESS / SKIP_* / FAILED_RETRYABLE / FAILED_UNSUPPORTED
+  reason_code TEXT,
+  detected_fields TEXT,         -- JSON: {"email":1,"message":1,...}
+  filled_fields TEXT,           -- JSON: ["email","message",...]
+  submit_attempted INTEGER DEFAULT 0,
+  success_evidence TEXT,
+  error_message TEXT,
+  retryable INTEGER DEFAULT 0,
+  playwright_run_id TEXT,
+  final_url TEXT,               -- 開発・検証中のみ埋める想定
+  page_title TEXT
 );
 """
 

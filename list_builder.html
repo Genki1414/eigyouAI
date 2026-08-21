@@ -83,11 +83,15 @@ footer{text-align:center;font-size:11px;color:var(--steel);padding:24px}
     <div class="chips" id="fAreas"></div>
     <label style="margin-top:10px">都道府県(複数選択可)</label>
     <div class="chips" id="fPrefs"></div>
-    <div class="row" style="margin-top:10px">
-      <div>
-        <label>資本金の上限(円・任意)</label>
-        <input type="number" id="fCapital" placeholder="例: 3000000">
-      </div>
+    <label style="margin-top:10px">資本金の上限</label>
+    <div class="chips" id="fCapital">
+      <label class="chip"><input type="radio" name="fCapital" value="3000000">300万円以下</label>
+      <label class="chip"><input type="radio" name="fCapital" value="5000000">500万円以下</label>
+      <label class="chip"><input type="radio" name="fCapital" value="10000000">1,000万円以下</label>
+      <label class="chip"><input type="radio" name="fCapital" value="30000000">3,000万円以下</label>
+      <label class="chip"><input type="radio" name="fCapital" value="50000000">5,000万円以下</label>
+      <label class="chip"><input type="radio" name="fCapital" value="100000000">1億円以下</label>
+      <label class="chip on"><input type="radio" name="fCapital" value="" checked>指定しない</label>
     </div>
     <label>業種</label>
     <div class="chips" id="fTrades">
@@ -222,6 +226,14 @@ document.querySelectorAll("#fTrades, #fRanks, #fToggles").forEach(wrap => {
   });
 });
 
+// 資本金の上限は単一選択(radio)。選ばれなかった側は個別にchangeが来ないため、
+// グループ全体を毎回見た目だけ再同期する
+document.getElementById("fCapital").addEventListener("change", e => {
+  document.querySelectorAll("#fCapital .chip").forEach(chip => {
+    chip.classList.toggle("on", chip.querySelector("input").checked);
+  });
+});
+
 let API = "", KEY = "";
 const $ = id => document.getElementById(id);
 
@@ -263,7 +275,8 @@ function currentFilters() {
   if (prefs.length) f.prefs = prefs;
   if (trades.length) f.trades = trades;
   if (ranks.length) f.ranks = ranks;
-  if ($("fCapital").value) f.capital_max = Number($("fCapital").value);
+  const capVal = document.querySelector('input[name="fCapital"]:checked').value;
+  if (capVal) f.capital_max = Number(capVal);
   if ($("fHiring").checked) f.hiring_now = true;
   if ($("fWebsite").checked) f.has_website = true;
   if ($("fContact").checked) f.contact_ready = true;

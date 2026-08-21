@@ -14,7 +14,9 @@ TZ=Asia/Tokyo
 0 4 * * * cd /app && python3 scoring.py >> /app/out/cron.log 2>&1
 
 # 送信: 平日の9時と14時のみ。土日祝は送らない
-0 9,14 * * 1-5 cd /app && python3 senders.py 1 1 >> /app/out/cron.log 2>&1
+# flock -n: 前回の実行がまだ終わっていない場合は待たずに即座に諦める(多重起動防止)。
+# 実サイトへのフォーム送信は取り消せないため、二重実行より「今回はスキップ」の方が安全
+0 9,14 * * 1-5 cd /app && flock -n /tmp/eigyouai_send.lock python3 senders.py 1 1 >> /app/out/cron.log 2>&1
 
 # フォローアップ: 平日10時。D+14/D+35の対象を生成して送る
 0 10 * * 1-5 cd /app && python3 followup.py --campaign 1 --step 2 >> /app/out/cron.log 2>&1

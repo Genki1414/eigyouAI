@@ -58,3 +58,11 @@ SENDER_INFO = {
 MAX_LIFETIME_TOUCHES = 6
 # 同一社への最短再接触間隔（日）
 MIN_TOUCH_INTERVAL_DAYS = 10
+
+# ── フォーム自動送信のペーシング(β版) ─────────
+# 相手サイトへの負荷・bot判定回避・不具合時の被害抑制のため、
+# 件数の上限は保守的な値から始める。実績を見てから引き上げる想定。
+FORM_MAX_PER_RUN = 50              # 1回の実行(cron/API呼び出し1回)あたりの上限
+FORM_MAX_PER_HOUR = 20             # 直近1時間の試行数上限(成否問わずカウント)
+FORM_MAX_PER_DAY = 100             # 直近24時間の試行数上限
+FORM_MAX_PER_TENANT_PER_DAY = 100  # テナントごとの直近24時間の試行数上限

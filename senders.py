@@ -22,7 +22,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import resilience as R
@@ -263,6 +263,40 @@ class FormSender(BaseSender):
         self.tenant_id = tenant_id
         self.offer_id = offer_id
         self.keep_debug_fields = keep_debug_fields
+        self._run_count = 0  # このインスタンス(=1回の実行)での試行数
+
+    def _check_quota(self):
+        """cron/API呼び出し1回あたり・直近1時間・直近24時間・テナット別の上限を見る。
+        件数は成否を問わず試行数でカウントする(失敗でも相手サイトへの負荷は発生するため)。
+        上限に達したら(False, 理由)を返し、Playwrightは一切起動しない。"""
+        import config as C
+
+        self._run_count += 1
+        if self._run_count > C.FORM_MAX_PER_RUN:
+            return False, f"1回の実行あたりの上限({C.FORM_MAX_PER_RUN}件)に到達"
+
+        now = datetime.now()
+        hour_ago = (now - timedelta(hours=1)).isoformat(timespec="seconds")
+        day_ago = (now - timedelta(hours=24)).isoformat(timespec="seconds")
+
+        n_hour = self.con.execute(
+            "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ?", (hour_ago,)).fetchone()[0]
+        if n_hour >= C.FORM_MAX_PER_HOUR:
+            return False, f"直近1時間の上限({C.FORM_MAX_PER_HOUR}件)に到達"
+
+        n_day = self.con.execute(
+            "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ?", (day_ago,)).fetchone()[0]
+        if n_day >= C.FORM_MAX_PER_DAY:
+            return False, f"直近24時間の上限({C.FORM_MAX_PER_DAY}件)に到達"
+
+        if self.tenant_id is not None:
+            n_tenant = self.con.execute(
+                "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
+                (day_ago, self.tenant_id)).fetchone()[0]
+            if n_tenant >= C.FORM_MAX_PER_TENANT_PER_DAY:
+                return False, f"テナント別・直近24時間の上限({C.FORM_MAX_PER_TENANT_PER_DAY}件)に到達"
+
+        return True, None
 
     def validate(self, to):
         if not to.contact_url:
@@ -279,6 +313,14 @@ class FormSender(BaseSender):
     def _deliver(self, to, sender, subject, body):
         if self.dry_run:
             return SendResult(ok=True, provider_id=f"mock_form_{uuid.uuid4().hex[:10]}")
+
+        quota_ok, quota_reason = self._check_quota()
+        if not quota_ok:
+            # 上限に達した場合はPlaywrightを一切起動しない(相手サイトへのアクセス自体が
+            # 発生しないので form_send_log には残さない)。permanent=Falseなので次回以降は
+            # 通常通り試行できる
+            return SendResult(ok=False, error=f"送信ペーシング上限: {quota_reason}", permanent=False,
+                               raw={"status": "SKIP_QUOTA_EXCEEDED", "reason_code": quota_reason})
 
         import form_navigator as FN
         started_at = datetime.now().isoformat(timespec="seconds")
@@ -439,6 +481,21 @@ if __name__ == "__main__":
         fres = fm.send(frcp, s, "件名", "本文", "test:form:1")
         print(f"  {'✓' if fres.ok else '✗'} dry runで成功応答 (provider_id={fres.provider_id})")
         print("  (フィールド検出ヒューリスティックの検証は python3 form_navigator.py test を参照)")
+
+        print("\n── フォーム送信ペーシング上限 ──")
+        import config as C
+        orig_max_per_run = C.FORM_MAX_PER_RUN
+        C.FORM_MAX_PER_RUN = 2
+        try:
+            fq = FormSender(con, dry_run=False)  # _check_quota()自体はPlaywrightを起動しない
+            r1 = fq._check_quota()
+            r2 = fq._check_quota()
+            r3 = fq._check_quota()
+            ok = r1[0] and r2[0] and not r3[0]
+            print(f"  {'✓' if ok else '✗'} 1回目:{r1[0]} 2回目:{r2[0]} "
+                  f"3回目:{r3[0]}(上限{C.FORM_MAX_PER_RUN}のため False が正しい)")
+        finally:
+            C.FORM_MAX_PER_RUN = orig_max_per_run
     else:
         cid = int(sys.argv[1]) if len(sys.argv) > 1 else 1
         step = int(sys.argv[2]) if len(sys.argv) > 2 else 1

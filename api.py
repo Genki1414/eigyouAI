@@ -627,12 +627,12 @@ def self_test(port=8899):
     tid_a, key_a = OF.add_tenant(con, "test-tenant-A", "a@example.co.jp")
     tid_b, key_b = OF.add_tenant(con, "test-tenant-B", "b@example.co.jp")
 
-    st, r = post_auth("/api/tenant/lists/preview", {"filters": {"pref": "東京都"}})
+    st, r = post_auth("/api/tenant/lists/preview", {"filters": {"prefs": ["東京都"]}})
     t("認証ヘッダなしのPOST /api/tenant/lists/previewは401", st == 401)
-    st, r = post_auth("/api/tenant/lists/preview", {"filters": {"pref": "東京都"}}, token=key_a)
+    st, r = post_auth("/api/tenant/lists/preview", {"filters": {"prefs": ["東京都"]}}, token=key_a)
     t("正しいキーでプレビュー取得", st == 200 and "count" in r)
 
-    st, r = post_auth("/api/tenant/lists", {"name": "テストA_東京都", "filters": {"pref": "東京都"}},
+    st, r = post_auth("/api/tenant/lists", {"name": "テストA_東京都", "filters": {"prefs": ["東京都"]}},
                       token=key_a)
     t("POST /api/tenant/lists: フィルタ型リスト作成", st == 200 and bool(r.get("list_id")))
     list_a_id = r.get("list_id")
@@ -655,7 +655,7 @@ def self_test(port=8899):
     st, r = get_auth(f"/api/tenant/lists/{list_a_id}", token=key_b)
     t("逆方向も同様に404", st == 404)
 
-    st, r = post_auth("/api/tenant/lists/preview", {"filters": {"pref": "福岡県"}}, token=key_a)
+    st, r = post_auth("/api/tenant/lists/preview", {"filters": {"prefs": ["福岡県"]}}, token=key_a)
     t("他テナントがCSVで持ち込んだ非公開企業はフィルタにも出てこない",
       st == 200 and not any(s["name"] == "テナントB専用企業" for s in r.get("sample", [])))
 

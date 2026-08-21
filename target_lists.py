@@ -50,6 +50,15 @@ MAX_CSV_ROWS = 20000
 # フィルタ項目の許可リスト。顧客からの入力を直接SQLへ混ぜないための唯一の入口。
 _ALLOWED_TRADES = set(C.TARGET_TRADES.values())  # {"tobi","tosou","kaitai"}
 _ALLOWED_RANKS = {"S", "A", "B", "C"}
+_ALLOWED_PREFS = {
+    "北海道", "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県",
+    "茨城県", "栃木県", "群馬県", "埼玉県", "千葉県", "東京都", "神奈川県",
+    "新潟県", "富山県", "石川県", "福井県", "山梨県", "長野県",
+    "岐阜県", "静岡県", "愛知県", "三重県", "滋賀県", "京都府", "大阪府",
+    "兵庫県", "奈良県", "和歌山県", "鳥取県", "島根県", "岡山県", "広島県",
+    "山口県", "徳島県", "香川県", "愛媛県", "高知県", "福岡県", "佐賀県",
+    "長崎県", "熊本県", "大分県", "宮崎県", "鹿児島県", "沖縄県",
+}
 
 
 def _base_where(tenant_id):
@@ -65,9 +74,15 @@ def build_filter_sql(tenant_id, filters):
     where, params = _base_where(tenant_id)
     clauses = [where]
 
-    pref = filters.get("pref")
-    if pref:
-        clauses.append("pref=?"); params.append(str(pref)[:20])
+    # 都道府県は複数選択(チェックボックス)。エリア単位の一括選択はフロント側で
+    # 都道府県のチェックへ展開してから送られてくる(サーバ側にエリアの概念は持たない)
+    prefs = filters.get("prefs") or []
+    if isinstance(prefs, str):
+        prefs = [prefs]
+    prefs = [p for p in prefs if p in _ALLOWED_PREFS]
+    if prefs:
+        clauses.append("(" + " OR ".join(["pref=?"] * len(prefs)) + ")")
+        params.extend(prefs)
 
     trades = filters.get("trades") or []
     if isinstance(trades, str):
@@ -221,7 +236,8 @@ if __name__ == "__main__":
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
     p = sub.add_parser("preview")
-    p.add_argument("--pref"); p.add_argument("--trade", action="append", default=[])
+    p.add_argument("--pref", action="append", default=[])
+    p.add_argument("--trade", action="append", default=[])
     p.add_argument("--rank", action="append", default=[])
     args = ap.parse_args()
 
@@ -235,7 +251,7 @@ if __name__ == "__main__":
         for l in list_lists(con, tenant["id"]):
             print(f"  [{l['id']}] {l['name']} ({l['source']}) {l['company_count']}社 {l['created_at']}")
     elif args.cmd == "preview":
-        filters = {"pref": args.pref, "trades": args.trade, "ranks": args.rank}
+        filters = {"prefs": args.pref, "trades": args.trade, "ranks": args.rank}
         res = preview_filter(con, tenant["id"], filters)
         print(f"該当 {res['count_before_cap']}社" + ("(上限20,000件でカット)" if res["capped"] else ""))
         for s in res["sample"]:

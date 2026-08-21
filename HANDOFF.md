@@ -618,6 +618,12 @@ DNSが未反映のまま起動すると、Caddyは証明書取得に失敗して
     Privacy Protection・画像自動読込・セキュリティソフト等の影響)。
     実装時はUI表現を「開封検知」「推定開封率」等にとどめ、成果指標としては
     返信 > クリック > 開封検知 の順で信頼性が高いものとして扱うこと
+- **原価・粗利レポート(管理者専用CLI)**: `cost_report_cli.py`を新設。
+  `form_send_log`の`total_estimated_cost_yen`等を集計するだけで、新しい
+  集計用テーブルは作らない。`overall`(全体・今月/累計)、`by-tenant`
+  (テナント別・今月)、`profit --tenant --monthly-fee`(1テナントの
+  月額売上に対する粗利試算)の3コマンド。原価情報は顧客向け画面
+  (list_builder.html)には一切露出していない(このCLIのみで見る)
 
 ---
 

@@ -30,6 +30,7 @@ CREATE INDEX IF NOT EXISTS idx_sendtmpl_tenant ON sender_templates(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_staff_tenant ON staff(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tlm_status ON target_list_members(send_status);
 CREATE INDEX IF NOT EXISTS idx_formlog_list ON form_send_log(list_id);
+CREATE INDEX IF NOT EXISTS idx_emailtok_touch ON email_tracking_tokens(touch_id);
 """
 
 SCHEMA = """
@@ -151,6 +152,22 @@ CREATE TABLE IF NOT EXISTS tenant_kill_switch (
   reason TEXT,
   updated_at TEXT NOT NULL,
   updated_by TEXT
+);
+
+-- メール開封・クリック計測用のトラッキングトークン(P2: データ構造のみ)。
+-- token単体からtenant/campaign/company/recipientを推測できないよう、
+-- 十分に推測困難なランダム値にする(生成はsecrets.token_urlsafe()想定)。
+-- 将来 GET /track/open/{token} → touches.email_opened_at等を更新して1x1透明
+-- 画像を返す、GET /track/click/{token} → touches.email_clicked_at等を更新して
+-- 本来のURLへ302リダイレクト、という2エンドポイントをapi.pyに追加する想定。
+-- 今夜はメール送信機能自体が無いため、テーブルの器だけ用意する。
+CREATE TABLE IF NOT EXISTS email_tracking_tokens (
+  token TEXT PRIMARY KEY,
+  touch_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,  -- 'open' | 'click'
+  target_url TEXT,     -- kind='click'の場合の本来のリダイレクト先
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(touch_id) REFERENCES touches(id)
 );
 
 -- 監査ログ: 誰がいつ何を実行したか。デューデリで運用実態を示す材料になる。
@@ -307,6 +324,21 @@ def migrate(con):
         ("form_send_log", "external_api_cost_yen", "REAL DEFAULT 0"),
         ("form_send_log", "estimated_server_cost_yen", "REAL DEFAULT 0"),
         ("form_send_log", "total_estimated_cost_yen", "REAL DEFAULT 0"),
+        # メール開封・クリック計測(P2: データ構造のみ。メール送信機能自体は未実装)。
+        # 開封検知は実際に読んだことの証明にはならない(Apple Mail Privacy
+        # Protection・画像自動読込等の影響を受ける)ため、UIでは「開封検知」
+        # 「推定開封」等の表現にとどめ、返信>クリック>開封の順で信頼する設計とする。
+        ("touches", "email_sent_at", "TEXT"),
+        ("touches", "email_delivered_at", "TEXT"),
+        ("touches", "email_opened_at", "TEXT"),
+        ("touches", "email_first_opened_at", "TEXT"),
+        ("touches", "email_last_opened_at", "TEXT"),
+        ("touches", "email_open_count", "INTEGER DEFAULT 0"),
+        ("touches", "email_clicked_at", "TEXT"),
+        ("touches", "email_click_count", "INTEGER DEFAULT 0"),
+        ("touches", "email_bounced_at", "TEXT"),
+        ("touches", "email_bounce_type", "TEXT"),
+        ("touches", "email_unsubscribed_at", "TEXT"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:

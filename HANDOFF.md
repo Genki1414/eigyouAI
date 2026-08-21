@@ -601,6 +601,23 @@ DNSが未反映のまま起動すると、Caddyは証明書取得に失敗して
   最近の営業履歴(送信ログの直近10件の再利用)を表示。既存の
   `form_send_log`/`target_list_members`から集計するだけで、新しい集計用の
   巨大なデータ構造は作っていない
+- **P2 メール開封・クリック計測(データ構造のみ。メール送信機能自体は
+  未実装のため、追跡エンドポイントは今夜は実装していない)**:
+  - `touches`に`email_sent_at`〜`email_unsubscribed_at`の11列を追加
+    (送信/配信/開封(初回・最終・回数)/クリック(日時・回数)/バウンス/配信停止)
+  - `email_tracking_tokens`テーブルを新設(token主キー、`touch_id`、
+    `kind`('open'|'click')、`target_url`)。tokenはtenant/campaign/company/
+    受信者を直接推測できない、十分に推測困難なランダム値にする設計
+    (`secrets.token_urlsafe()`想定。実装時にDBへ保存する値そのものを
+    ランダムにする、という方針だけ決めており、生成関数はまだ書いていない)
+  - 将来メール送信機能を実装する際の想定エンドポイント(未実装):
+    `GET /track/open/{token}` → `touches.email_opened_at`等を更新して
+    1x1透明画像を返す。`GET /track/click/{token}` → `email_clicked_at`等を
+    更新後、`email_tracking_tokens.target_url`へ302リダイレクト
+  - **開封検知は「確実に読んだ」ことの証明にはならない**(Apple Mail
+    Privacy Protection・画像自動読込・セキュリティソフト等の影響)。
+    実装時はUI表現を「開封検知」「推定開封率」等にとどめ、成果指標としては
+    返信 > クリック > 開封検知 の順で信頼性が高いものとして扱うこと
 
 ---
 

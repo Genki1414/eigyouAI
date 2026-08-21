@@ -130,6 +130,27 @@ CREATE TABLE IF NOT EXISTS announcements (
   created_at TEXT NOT NULL
 );
 
+-- Kill Switch(全体停止)。異常検知時に管理者が全送信を即時停止するための1行だけの
+-- テーブル(id=1固定)。senders.send_campaign()が全送信経路(手動送信/cron/
+-- Stock Factory運用API)の唯一の合流点なので、そこ1箇所でこのフラグを見れば
+-- 全経路に効く。dry_runの送信はここでブロックしない(実サイトへ触れないため)。
+CREATE TABLE IF NOT EXISTS kill_switch (
+  id INTEGER PRIMARY KEY CHECK (id=1),
+  stopped INTEGER NOT NULL DEFAULT 0,
+  reason TEXT,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT
+);
+
+-- Kill Switch(テナント別停止)。特定テナントだけ送信を止めたい場合。行が
+-- 存在する=停止中(tenant_exclusionsと同じ「存在=適用」パターン)。
+CREATE TABLE IF NOT EXISTS tenant_kill_switch (
+  tenant_id INTEGER PRIMARY KEY,
+  reason TEXT,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT
+);
+
 -- 監査ログ: 誰がいつ何を実行したか。デューデリで運用実態を示す材料になる。
 CREATE TABLE IF NOT EXISTS run_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -260,6 +281,12 @@ def migrate(con):
     con.execute("""INSERT INTO meta (key, value) VALUES ('schema_version', ?)
                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
                 (str(SCHEMA_VERSION),))
+    # Kill Switchの初期値は「停止中」(安全側)。テーブルがまだ無い(=初回起動)場合のみ
+    # 作る。本番送信を許可するには、必ず人間が明示的にkill_switch_cli.py resumeで
+    # 解除する必要がある(黙って有効化されることはない)。
+    con.execute("""INSERT OR IGNORE INTO kill_switch (id, stopped, reason, updated_at, updated_by)
+        VALUES (1, 1, '初期値:人間による解除待ち(kill_switch_cli.py resume)', ?, 'system')""",
+        (datetime.now().isoformat(timespec="seconds"),))
     con.commit()
     return SCHEMA_VERSION
 
@@ -470,6 +497,53 @@ def set_announcement_published(con, announcement_id, published):
                        (1 if published else 0, announcement_id))
     con.commit()
     return cur.rowcount > 0
+
+
+# ── Kill Switch(異常時の即時送信停止) ──
+def kill_switch_status(con, tenant_id=None):
+    """(stopped: bool, reason: str|None) を返す。全体停止が最優先、
+    次にテナント別停止を見る。senders.send_campaign()が実送信の直前(dry_run=False
+    の行のみ)でこれを呼ぶことで、手動送信・cron・Stock Factory運用APIの
+    すべての経路に同時に効く(=新しい送信経路を作らない限りバイパスできない)。"""
+    g = con.execute("SELECT stopped, reason FROM kill_switch WHERE id=1").fetchone()
+    if g and g["stopped"]:
+        return True, g["reason"] or "全体停止中"
+    if tenant_id is not None:
+        t = con.execute("SELECT reason FROM tenant_kill_switch WHERE tenant_id=?",
+                         (tenant_id,)).fetchone()
+        if t:
+            return True, t["reason"] or "このテナントは停止中"
+    return False, None
+
+
+def set_global_kill_switch(con, stopped, reason=None, updated_by=None):
+    now = datetime.now().isoformat(timespec="seconds")
+    con.execute("""INSERT INTO kill_switch (id, stopped, reason, updated_at, updated_by)
+        VALUES (1,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET stopped=excluded.stopped, reason=excluded.reason,
+            updated_at=excluded.updated_at, updated_by=excluded.updated_by""",
+        (1 if stopped else 0, reason, now, updated_by))
+    con.commit()
+
+
+def set_tenant_kill_switch(con, tenant_id, stopped, reason=None, updated_by=None):
+    now = datetime.now().isoformat(timespec="seconds")
+    if stopped:
+        con.execute("""INSERT INTO tenant_kill_switch (tenant_id, reason, updated_at, updated_by)
+            VALUES (?,?,?,?)
+            ON CONFLICT(tenant_id) DO UPDATE SET reason=excluded.reason,
+                updated_at=excluded.updated_at, updated_by=excluded.updated_by""",
+            (tenant_id, reason, now, updated_by))
+    else:
+        con.execute("DELETE FROM tenant_kill_switch WHERE tenant_id=?", (tenant_id,))
+    con.commit()
+
+
+def list_tenant_kill_switches(con):
+    rows = con.execute("""SELECT k.tenant_id, t.name tenant_name, k.reason, k.updated_at
+        FROM tenant_kill_switch k LEFT JOIN tenants t ON t.id = k.tenant_id
+        ORDER BY k.updated_at DESC""").fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── 許可番号の連番(社歴の代理変数) ──────────

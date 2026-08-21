@@ -18,6 +18,11 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/ops/run-step   {"step","campaignId","dryRun"} → run.run_op()に委譲
                            step=send/followupは必ずsenders.send_campaign()経由になり、
                            db.can_contact()をバイパスしない(HANDOFF.mdの原則を厳守)
+  GET  /api/ops/kill-switch    全体・テナント別のKill Switch状態一覧
+  POST /api/ops/kill-switch    {"scope":"global"|"tenant","stopped":bool,
+                           "tenant_id"(scope=tenantのみ),"reason"} → 停止/解除。
+                           全送信経路の合流点であるsenders.send_campaign()側で
+                           必ずチェックされる(kill_switch_cli.pyでも操作可能)
 
   ── 送信先リスト(SaaSとして他社に販売する側。テナントごとのapi_keyで認証) ──
   POST /api/tenant/lists/preview  {"filters"} → 該当件数のプレビュー(保存しない)
@@ -56,6 +61,9 @@ CACもチャネル別成績も出せない = 売り物にならない。
   GET  /api/tenant/activity-log   自テナントの操作履歴(リスト作成・送信開始を
                            時系列でまとめたもの。新規テーブルは持たず、
                            target_lists/campaignsを突き合わせて作る)
+  GET  /api/tenant/kill-switch    自テナントの送信が現在止められているかだけを
+                           確認する読み取り専用エンドポイント(他テナントの
+                           状態や制御権限は渡さない。操作は/api/ops/*のみ)
   ※ Authorization: Bearer <tenant.api_key または staff.api_key>。テナントIDは
     このキーからサーバ側で解決し、リクエストボディのtenant_idは一切信用しない
     (offers.resolve_tenant_by_key。担当者ごとのキーでもテナント全体のキーでも
@@ -491,6 +499,37 @@ def verify_ops_bearer(auth_header: str) -> bool:
     return hmac.compare_digest(token, SALES_ENGINE_API_KEY)
 
 
+# ── Kill Switch(異常時の即時送信停止。運用専用API) ──
+def h_ops_kill_switch_get(con):
+    g = con.execute("SELECT stopped, reason, updated_at, updated_by FROM kill_switch WHERE id=1").fetchone()
+    return 200, {"global": dict(g) if g else {"stopped": False},
+                 "tenants": db.list_tenant_kill_switches(con)}
+
+
+def h_ops_kill_switch_set(con, data):
+    scope = data.get("scope")
+    stopped = data.get("stopped")
+    if scope not in ("global", "tenant") or not isinstance(stopped, bool):
+        return 400, {"error": "scope('global'|'tenant')とstopped(真偽値)は必須です"}
+    reason = (data.get("reason") or "").strip() or None
+    updated_by = (data.get("updated_by") or "").strip() or None
+    if scope == "global":
+        db.set_global_kill_switch(con, stopped, reason=reason, updated_by=updated_by)
+    else:
+        tenant_id = data.get("tenant_id")
+        if not isinstance(tenant_id, int):
+            return 400, {"error": "scope='tenant'の場合tenant_id(整数)が必須です"}
+        db.set_tenant_kill_switch(con, tenant_id, stopped, reason=reason, updated_by=updated_by)
+    return 200, {"ok": True}
+
+
+def h_tenant_kill_switch_status(con, tenant_id):
+    """テナント自身が「今、自分の送信が止められているか」だけを確認できる、
+    読み取り専用のエンドポイント。他テナントの状態や制御権限は一切渡さない。"""
+    stopped, reason = db.kill_switch_status(con, tenant_id=tenant_id)
+    return 200, {"stopped": stopped, "reason": reason}
+
+
 # ── HTTPサーバ ──────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def _json(self, status, obj):
@@ -532,6 +571,16 @@ class Handler(BaseHTTPRequestHandler):
                 res = R.run_op(con, step, campaign_id=data.get("campaignId"),
                                dry_run=bool(data.get("dryRun")))
                 return self._json(200 if res.get("ok") else 500, res)
+            finally:
+                con.close()
+
+        if path == "/api/ops/kill-switch":
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                st, res = h_ops_kill_switch_set(con, data)
+                return self._json(st, res)
             finally:
                 con.close()
 
@@ -654,13 +703,16 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return self.wfile.write(body)
 
-        if u.path in ("/api/ops/status", "/api/ops/metrics"):
+        if u.path in ("/api/ops/status", "/api/ops/metrics", "/api/ops/kill-switch"):
             if not verify_ops_bearer(self.headers.get("Authorization")):
                 return self._json(401, {"error": "unauthorized"})
             con = self._con()
             try:
                 if u.path == "/api/ops/status":
                     return self._json(200, R.status_dict(con))
+                if u.path == "/api/ops/kill-switch":
+                    st, res = h_ops_kill_switch_get(con)
+                    return self._json(st, res)
                 campaign = qs.get("campaignId", [None])[0]
                 return self._json(200, metrics.compute(con, int(campaign) if campaign else None))
             finally:
@@ -674,7 +726,8 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/sender-templates"
                 or u.path == "/api/tenant/staff"
                 or u.path == "/api/tenant/announcements"
-                or u.path == "/api/tenant/activity-log"):
+                or u.path == "/api/tenant/activity-log"
+                or u.path == "/api/tenant/kill-switch"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -696,6 +749,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_announcements_list(con)
                 elif u.path == "/api/tenant/activity-log":
                     st, res = h_tenant_activity_log(con, tenant["id"], qs)
+                elif u.path == "/api/tenant/kill-switch":
+                    st, res = h_tenant_kill_switch_status(con, tenant["id"])
                 elif u.path == "/api/tenant/lists":
                     st, res = h_tenant_lists_list(con, tenant["id"])
                 else:
@@ -964,6 +1019,46 @@ def self_test(port=8899):
                       {"subject": "x", "body": "y"}, token=key_a)
     t("他テナントのリストへは送信できない(404)", st == 404)
 
+    print("\n── リスト送信の同時リクエストでの競合(campaign_idの二重生成防止) ──")
+    # 同じリストへ2つの同時送信リクエスト(ボタン連打・2人の担当者)が来ても、
+    # 別々のcampaignが二重に作られて二重送信にならないことを確認する。
+    st, r = post_auth("/api/tenant/lists", {"name": "テストA_競合検証", "filters": {"prefs": ["東京都"]}},
+                      token=key_a)
+    race_list_id = r.get("list_id")
+    race_results = []
+
+    def _send_race_worker():
+        con_t = db.connect()  # 別スレッド=別HTTPリクエストを模す
+        race_results.append(TL.send_list(con_t, tid_a, race_list_id, "件名", "本文", dry_run=True))
+        con_t.close()
+
+    threads = [threading.Thread(target=_send_race_worker) for _ in range(3)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    campaign_ids_used = {r["campaign_id"] for r in race_results if r}
+    t("3スレッド同時送信でも採用されるcampaign_idは1つだけ", len(campaign_ids_used) == 1,
+      f"campaign_ids={campaign_ids_used}")
+    if campaign_ids_used:
+        won_cid = next(iter(campaign_ids_used))
+        touch_count = con.execute("SELECT COUNT(*) FROM touches WHERE campaign_id=?",
+                                   (won_cid,)).fetchone()[0]
+        t("採用されたcampaignのtouchesは重複していない(リスト企業数と一致)",
+          touch_count == race_results[0]["target_count"], f"touches={touch_count}")
+    # このテストで作られたcampaign(勝者・敗者とも)を名前で特定して片付ける。
+    # campaigns.idが正しい列名(campaign_idという列は存在しない。以前ここで
+    # 誤って"campaign_id"を指定し、SQLiteが外側touches.campaign_idへの相関参照と
+    # 解釈してtouches全件を消してしまった事故があったため、必ずcampaigns.idを使うこと)
+    race_cids = [row["id"] for row in con.execute(
+        "SELECT id FROM campaigns WHERE name=?", ("[リスト送信] テストA_競合検証",)).fetchall()]
+    for cid_ in race_cids:
+        con.execute("DELETE FROM touches WHERE campaign_id=?", (cid_,))
+        con.execute("DELETE FROM campaigns WHERE id=?", (cid_,))
+    con.execute("DELETE FROM target_list_members WHERE list_id=?", (race_list_id,))
+    con.execute("DELETE FROM target_lists WHERE id=?", (race_list_id,))
+    con.commit()
+
     print("\n── その他ログ(活動履歴) ──")
     st, r = get_auth("/api/tenant/activity-log")
     t("認証ヘッダなしのGET /api/tenant/activity-logは401", st == 401)
@@ -976,6 +1071,12 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/activity-log", token=key_b)
     t("他テナントのリスト作成イベントは見えない(テナント分離)",
       st == 200 and all("テストA_東京都" not in e["detail"] for e in r.get("log", [])))
+
+    print("\n── 自テナント向けKill Switch状態確認 ──")
+    st, r = get_auth("/api/tenant/kill-switch")
+    t("認証ヘッダなしのGET /api/tenant/kill-switchは401", st == 401)
+    st, r = get_auth("/api/tenant/kill-switch", token=key_a)
+    t("GET /api/tenant/kill-switchで自テナントの状態が取れる", st == 200 and "stopped" in r)
 
     print("\n── 自動送信ログ ──")
     # dry_runはform_send_logへ書かない(Playwrightに触れないため)ので、
@@ -1010,6 +1111,9 @@ def self_test(port=8899):
     st, r = get_auth(f"/api/tenant/companies/search?q={excl_name_part}", token=key_a)
     t("2文字以上の検索で企業が引ける",
       st == 200 and any(c["id"] == excl_company_id for c in r.get("companies", [])))
+    st, r = get_auth("/api/tenant/companies/search?q=" + urllib.parse.quote("テナントB専用"), token=key_a)
+    t("【テナント分離監査】他テナントの非公開企業は除外設定の検索にも出てこない",
+      st == 200 and all(c["name"] != "テナントB専用企業" for c in r.get("companies", [])))
 
     st, r = post_auth("/api/tenant/exclusions", {"company_id": "not-an-int"}, token=key_a)
     t("company_idが整数でないと400", st == 400)
@@ -1205,6 +1309,76 @@ def self_test(port=8899):
         con.commit()
     else:
         t("can_contact()バイパス防止の検証", False, "テスト用の会社が見つからずスキップ")
+
+    print("\n── Kill Switch(異常時の即時送信停止) ──")
+    g0 = con.execute("SELECT stopped, reason FROM kill_switch WHERE id=1").fetchone()
+    orig_global_stopped = bool(g0["stopped"]) if g0 else True
+    orig_global_reason = g0["reason"] if g0 else None
+    t("初期状態(db.migrate()直後)ではKill Switchが全体停止になっている(安全側)",
+      db.kill_switch_status(con)[0] is True)
+
+    db.set_global_kill_switch(con, True, reason="test-kill-switch", updated_by="test")
+    # メールアドレス未設定の会社を選ぶ: Kill Switch解除後の検証で、実チャネルの
+    # validate()に弾かれる(=_deliver()に到達せず実送信は起きない)状態を作るため
+    comp2 = con.execute("""SELECT id FROM companies
+        WHERE id NOT IN (SELECT company_id FROM suppression) AND email IS NULL LIMIT 1""").fetchone()
+    if comp2:
+        ks_company = comp2["id"]
+        cur = con.execute("INSERT INTO campaigns (name, started_at, target_rule) VALUES (?,?,?)",
+                           ("test-kill-switch", datetime.now().isoformat(timespec="seconds"), "ALL"))
+        ks_cid = cur.lastrowid
+        con.execute("""INSERT INTO touches (campaign_id, company_id, channel, variant, step,
+                       body, unit_cost_yen) VALUES (?,?,?,?,?,?,?)""",
+                    (ks_cid, ks_company, "メール", "A", 1, "テスト本文", 1))
+        con.commit()
+
+        st, r = post_auth("/api/ops/run-step",
+                          {"step": "send", "campaignId": ks_cid, "dryRun": False}, token=ops_key)
+        row = con.execute("SELECT sent_at, note FROM touches WHERE campaign_id=?", (ks_cid,)).fetchone()
+        t("Kill Switch有効時はdry_run=falseでも実送信されない",
+          st == 200 and r.get("ok") and row["sent_at"] is None)
+        t("送信していない理由がtouchesに残る(Kill Switchで中止)",
+          "Kill Switch" in (row["note"] or ""))
+
+        db.set_global_kill_switch(con, False, updated_by="test")
+        t("解除後はkill_switch_status()がFalseを返す", db.kill_switch_status(con)[0] is False)
+        st, r = post_auth("/api/ops/run-step",
+                          {"step": "send", "campaignId": ks_cid, "dryRun": False}, token=ops_key)
+        row2 = con.execute("SELECT sent_at, note FROM touches WHERE campaign_id=?", (ks_cid,)).fetchone()
+        t("解除後はKill Switchでは止まらない(実チャネルの検証まで進む)",
+          "Kill Switch" not in (row2["note"] or "") and row2["sent_at"] is None,
+          f"note={row2['note']}")
+
+        con.execute("DELETE FROM touches WHERE campaign_id=?", (ks_cid,))
+        con.execute("DELETE FROM campaigns WHERE id=?", (ks_cid,))
+        con.commit()
+    else:
+        t("Kill Switchの検証(全体)", False, "メール未設定の会社が見つからずスキップ")
+
+    db.set_tenant_kill_switch(con, 999999, True, reason="test")
+    t("テナント別停止: 指定テナントはstopped=Trueになる",
+      db.kill_switch_status(con, tenant_id=999999)[0] is True)
+    t("テナント別停止: 他テナントには影響しない",
+      db.kill_switch_status(con, tenant_id=888888)[0] is False)
+    db.set_tenant_kill_switch(con, 999999, False)
+    t("テナント別停止を解除するとFalseに戻る",
+      db.kill_switch_status(con, tenant_id=999999)[0] is False)
+
+    st, r = get_auth("/api/ops/kill-switch")
+    t("認証ヘッダなしのGET /api/ops/kill-switchは401", st == 401)
+    st, r = get_auth("/api/ops/kill-switch", token=ops_key)
+    t("GET /api/ops/kill-switchで状態が取れる", st == 200 and "global" in r and "tenants" in r)
+    st, r = post_auth("/api/ops/kill-switch", {"scope": "global", "stopped": True})
+    t("認証ヘッダなしのPOST /api/ops/kill-switchは401", st == 401)
+    st, r = post_auth("/api/ops/kill-switch",
+                      {"scope": "global", "stopped": True, "reason": "audit-test"}, token=ops_key)
+    t("POST /api/ops/kill-switchで全体停止を操作できる",
+      st == 200 and r.get("ok") and db.kill_switch_status(con)[0] is True)
+
+    # 元の状態(基本は安全側の「停止中」)へ確実に戻す。テストが実際のDBの
+    # 運用状態を変えっぱなしにしないため
+    db.set_global_kill_switch(con, orig_global_stopped, reason=orig_global_reason,
+                              updated_by="test-restore")
 
     srv.shutdown()
     # 後片付け

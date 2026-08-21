@@ -3,18 +3,31 @@ services:
     build: { context: .., dockerfile: deploy/Dockerfile }
     container_name: eigyouai-api
     env_file: [../.env]
-    ports: ["8787:8787"]
+    # 2026-08-21のHTTPS化により127.0.0.1限定へ戻した。外部からはcaddy(80/443)
+    # 経由でのみ到達する。8787をインターネットへ直接公開する構成には戻さないこと
+    # (HANDOFF.md T12参照)。Stock Factory Runtime（同一ホスト上の別コンテナ）
+    # からは引き続き http://eigyouai-api:8787 で到達できる(コンテナ間通信は
+    # ポート公開の設定に関係なく機能する)。
+    ports: ["127.0.0.1:8787:8787"]
     volumes: ["engine-data:/app/out"]
     restart: unless-stopped
     depends_on: { postgres: { condition: service_healthy } }
-    # Stock Factory Runtime（同一ホスト上の別コンテナ）から http://eigyouai-api:8787
-    # で到達できるようにする。
-    # ⚠ 暫定措置(2026-08-21): list_builder.py(送信先リストSaaS)の動作確認のため、
-    #   一時的に 0.0.0.0:8787 で外部公開している(以前は127.0.0.1限定)。
-    #   TLSが無いため、Authorization: Bearerのテナントapi_keyが平文で流れる。
-    #   実際の顧客に使わせる前に、リバースプロキシ経由のHTTPS化に必ず戻すこと
-    #   (HANDOFF.md T12参照)。それまでは動作確認用途に限定する。
     networks: [default, stockfactory-shared]
+
+  # HTTPS終端。EIGYOUAI_DOMAINへのアクセスをapiコンテナへ転送する。
+  # 証明書はLet's Encryptから自動取得(Caddy標準機能)。
+  caddy:
+    image: caddy:2-alpine
+    container_name: eigyouai-caddy
+    env_file: [../.env]
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+    depends_on: [api]
+    networks: [default]
 
   # バッチ（cronで定期実行）
   worker:
@@ -38,7 +51,7 @@ services:
       retries: 5
     restart: unless-stopped
 
-volumes: { engine-data: {}, pgdata: {} }
+volumes: { engine-data: {}, pgdata: {}, caddy-data: {}, caddy-config: {} }
 
 networks:
   default: {}

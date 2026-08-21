@@ -1,0 +1,15 @@
+# HTTPS終端。api コンテナへリバースプロキシするだけの最小構成。
+# ドメインは環境変数 EIGYOUAI_DOMAIN(.env で設定)から読む。
+# Caddyは初回アクセス時にLet's Encryptで自動的に証明書を取得・更新する
+# (ポート80での certbot 相当のACMEチャレンジをCaddyが自分で処理する。
+#  そのため80/443の両方を外部公開しておく必要がある)。
+{$EIGYOUAI_DOMAIN} {
+	reverse_proxy eigyouai-api:8787
+
+	# list_builder.html は同一オリジンでAPIも配信するので追加設定は不要。
+	# アクセスログはCaddy標準のJSON形式でstdoutに出す(docker logsで見られる)。
+	log {
+		output stdout
+		format json
+	}
+}

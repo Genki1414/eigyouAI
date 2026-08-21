@@ -84,14 +84,23 @@ class BaseSender:
                 f"{sender.email}\n配信停止: {sender.optout_url}")
 
     def send(self, to: Recipient, sender: Sender, subject, body, idem_key) -> SendResult:
-        # 1. 二重送信の防止
-        if self.con.execute("SELECT 1 FROM idempotency WHERE key=?", (idem_key,)).fetchone():
-            return SendResult(ok=True, provider_id="skipped", error="送信済み（冪等キー一致）")
-
-        # 2. 宛先の検証
+        # 1. 宛先の検証(無効な宛先はそもそも「試行」として占有しない)
         why = self.validate(to)
         if why:
             return SendResult(ok=False, error=why, permanent=True)
+
+        # 2. 二重送信の防止。SELECTしてから後でINSERTする2段階のチェックだと、
+        #    同じキーへの2つの同時リクエスト(例: list_builder.htmlのボタン連打、
+        #    2人の担当者が同じリストを同時に送信)が両方とも「未送信」と判定してしまい、
+        #    同じ会社へ二重に実送信してしまう恐れがある(SUCCESS確定前後の競合)。
+        #    idempotency.keyはPRIMARY KEYなので、INSERT OR IGNOREの成否だけで
+        #    原子的に排他制御できる(SQLiteが書き込みをシリアライズするため安全)。
+        claimed = self.con.execute(
+            "INSERT OR IGNORE INTO idempotency (key, created_at) VALUES (?,?)",
+            (idem_key, datetime.now().isoformat(timespec="seconds"))).rowcount
+        self.con.commit()
+        if not claimed:
+            return SendResult(ok=True, provider_id="skipped", error="送信済み（冪等キー一致）")
 
         # 3. レート制御
         self.rl.acquire()
@@ -102,14 +111,24 @@ class BaseSender:
             res = R.retry(lambda: self._deliver(to, sender, subject, full_body),
                           attempts=4, job=f"{self.channel}:{to.name}")
         except Exception as e:  # noqa: BLE001
+            # 占有を解放する(失敗は再試行できないと詰むため。占有したまま
+            # 失敗で終わると、以後ずっと「送信済み」扱いになってしまう)
+            self.con.execute("DELETE FROM idempotency WHERE key=?", (idem_key,))
+            self.con.commit()
             return SendResult(ok=False, error=str(e)[:200],
                               permanent=isinstance(e, R.Fatal))
 
-        # 5. 成功したら冪等キーを記録
+        # 5. 成功したら占有を確定記録として残す。失敗は占有を解放して再試行を許す
         if res.ok:
-            self.idem.record(idem_key, {"provider_id": res.provider_id,
-                                        "at": datetime.now().isoformat(timespec="seconds")})
+            self.con.execute("UPDATE idempotency SET result=? WHERE key=?",
+                             (json.dumps({"provider_id": res.provider_id,
+                                          "at": datetime.now().isoformat(timespec="seconds")},
+                                         ensure_ascii=False), idem_key))
+            self.con.commit()
             res.cost_yen = self.unit_cost_yen
+        else:
+            self.con.execute("DELETE FROM idempotency WHERE key=?", (idem_key,))
+            self.con.commit()
         return res
 
 
@@ -384,7 +403,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
         return
 
     print(f"送信対象 {len(rows)}件 / {'DRY RUN（実送信しません）' if dry_run else '★本番送信★'}")
-    stats = {"sent": 0, "failed": 0, "blocked": 0, "suppressed": 0}
+    stats = {"sent": 0, "failed": 0, "blocked": 0, "suppressed": 0, "stopped": 0}
     cost = 0
 
     for r in rows:
@@ -395,6 +414,17 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
             stats["blocked"] += 1
             con.execute("UPDATE touches SET note=? WHERE id=?", (f"送信中止: {why}", r["tid"]))
             continue
+
+        # Kill Switch: 異常検知時に管理者が停止していれば実送信はここで止める
+        # (dry_runは実サイトへ触れないので対象外。kill_switch_cli.py参照)。
+        # ここが全送信経路(手動送信/cron/Stock Factory運用API)の唯一の合流点。
+        if not dry_run:
+            stopped, stop_reason = db.kill_switch_status(con, tenant_id=r["tenant_id"])
+            if stopped:
+                stats["stopped"] += 1
+                con.execute("UPDATE touches SET note=? WHERE id=?",
+                            (f"送信中止: Kill Switch — {stop_reason}", r["tid"]))
+                continue
 
         sender = Sender(
             name=r["sname"] or "AshiBase（足場ベース）",
@@ -432,7 +462,8 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
                 (cost, campaign_id))
     con.commit()
     print(f"  送信 {stats['sent']} / 失敗 {stats['failed']} / "
-          f"ガードで中止 {stats['blocked']} / 恒久エラーで配信停止 {stats['suppressed']}")
+          f"ガードで中止 {stats['blocked']} / 恒久エラーで配信停止 {stats['suppressed']} / "
+          f"Kill Switchで中止 {stats['stopped']}")
     print(f"  実費 {cost:,}円")
     return stats
 
@@ -479,6 +510,40 @@ if __name__ == "__main__":
         print(f"  1回目: {r1.provider_id}")
         print(f"  2回目: {r2.provider_id}  {'✓ 送信されない' if r2.provider_id=='skipped' else '✗ 二重送信'}")
         con.execute("DELETE FROM idempotency WHERE key LIKE 'test:%'"); con.commit()
+
+        print("\n── 二重送信の防止(同時リクエストでの競合) ──")
+        # ボタン連打や2人の担当者による同時送信を想定し、同じ冪等キーへ複数スレッドから
+        # 本物のHTTPリクエストのように「別コネクション」で同時にsend()を呼ぶ。
+        # _deliver()にわずかな遅延を入れて競合が起きやすい状況を作る(dry_run=trueなので
+        # 実サイトへは触れない)。修正前は複数スレッドが揃って「未送信」と判定してしまい
+        # 実送信扱いが複数件になり得た(SELECTしてから後でINSERTする2段階チェックのため)
+        import threading
+        import time as _time
+
+        class _SlowMailSender(MailSender):
+            def _deliver(self, to, sender, subject, body):
+                _time.sleep(0.05)
+                return super()._deliver(to, sender, subject, body)
+
+        con.execute("DELETE FROM idempotency WHERE key LIKE 'test:race:%'"); con.commit()
+        race_results = []
+
+        def _race_worker():
+            con_t = db.connect()  # 別スレッド=別HTTPリクエストを模すため別コネクション
+            sm = _SlowMailSender(con_t, dry_run=True)
+            rcp2 = Recipient(1, "テスト", email="race@test.co.jp")
+            race_results.append(sm.send(rcp2, s, "件名", "本文", "test:race:1"))
+            con_t.close()
+
+        threads = [threading.Thread(target=_race_worker) for _ in range(5)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        sent_count = sum(1 for r in race_results if r.provider_id != "skipped")
+        print(f"  5スレッド同時送信 → 実送信扱い{sent_count}件 / スキップ{5 - sent_count}件")
+        print(f"  {'✓' if sent_count == 1 else '✗'} 5スレッド同時でも実際に送るのは1回だけ")
+        con.execute("DELETE FROM idempotency WHERE key LIKE 'test:race:%'"); con.commit()
 
         print("\n── フォーム自動送信(dry run) ──")
         fm = FormSender(con, dry_run=True)

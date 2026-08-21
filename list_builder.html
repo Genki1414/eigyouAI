@@ -151,6 +151,7 @@ tr.clickable:hover{background:var(--blue-soft)}
       <h1 id="pageTitle">ホーム</h1>
       <span id="connStatus" class="status off">未接続</span>
     </div>
+    <div id="killSwitchBanner" style="display:none;background:var(--warn);color:#fff;padding:10px 24px;font-weight:700;font-size:13px"></div>
     <div class="content">
 
       <section class="page active" data-page="home">
@@ -638,11 +639,30 @@ $("btnConnect").addEventListener("click", async () => {
     ["btnSaveFilter", "btnUploadCsv"].forEach(id => $(id).disabled = false);
     runPreview();
     refreshHomeStats();
+    refreshKillSwitch();
   } catch (e) {
     connected = false;
     setConnStatus("接続失敗: " + e.message, "off");
   }
 });
+
+let killSwitchStopped = false;
+async function refreshKillSwitch() {
+  const banner = $("killSwitchBanner");
+  try {
+    const r = await call("/api/tenant/kill-switch");
+    killSwitchStopped = !!r.stopped;
+    if (killSwitchStopped) {
+      banner.textContent = `⚠ 現在、本番送信は停止されています(${r.reason || "理由未記入"})。ドライランは引き続き利用できます。`;
+      banner.style.display = "block";
+    } else {
+      banner.style.display = "none";
+    }
+  } catch (e) {
+    killSwitchStopped = false;
+    banner.style.display = "none";
+  }
+}
 
 function refreshHomeStats() {
   const totalCompanies = lastLists.reduce((a, l) => a + l.company_count, 0);
@@ -1008,6 +1028,7 @@ async function refreshLists() {
 async function showDetail(id) {
   const el = $("detailWrap");
   el.innerHTML = `<div class="empty">読み込み中...</div>`;
+  await refreshKillSwitch();
   try {
     const r = await call(`/api/tenant/lists/${id}?limit=50`);
     el.innerHTML = `<h2>このリストへ送信 <span>SEND</span></h2>
@@ -1050,6 +1071,11 @@ async function showDetail(id) {
       dryRunLabel.style.color = dryRunBox.checked ? "" : "var(--warn)";
       dryRunLabel.style.fontWeight = dryRunBox.checked ? "400" : "700";
     });
+    if (killSwitchStopped) {
+      dryRunBox.checked = true;
+      dryRunBox.disabled = true;
+      dryRunLabel.textContent = "ドライラン(本番送信は現在Kill Switchで停止されています)";
+    }
 
     $("btnSend").addEventListener("click", async () => {
       const subject = $("sendSubject").value.trim();

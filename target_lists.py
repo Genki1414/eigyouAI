@@ -267,12 +267,28 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True):
     if lst["campaign_id"]:
         campaign_id = lst["campaign_id"]
     else:
+        # 「まだcampaign_idが無ければ作る」はcheck-then-actなので、同じリストへの
+        # 2つの同時リクエスト(ボタン連打・2人の担当者)が両方とも「無い」と判定して
+        # 別々のcampaignを作り、結果的に同じ企業へ二重に実送信してしまう恐れがある。
+        # campaign行の作成自体は先にしてよいが、target_lists側への「採用」は
+        # UPDATE...WHERE campaign_id IS NULLで原子的に行い、負けた側は自分の
+        # campaignを捨てて勝者のcampaign_idを使う(負けたcampaign行はtouchesが
+        # 紐付かないまま残るだけで実害は無い)。
         now = datetime.now().isoformat(timespec="seconds")
         cur = con.execute("""INSERT INTO campaigns (name, started_at, target_rule, offer_id)
             VALUES (?,?,?,?)""",
             (f"[リスト送信] {lst['name']}", now, f"target_list:{list_id}", offer["id"]))
-        campaign_id = cur.lastrowid
-        con.execute("UPDATE target_lists SET campaign_id=? WHERE id=?", (campaign_id, list_id))
+        new_campaign_id = cur.lastrowid
+        con.commit()
+        claimed = con.execute(
+            "UPDATE target_lists SET campaign_id=? WHERE id=? AND campaign_id IS NULL",
+            (new_campaign_id, list_id)).rowcount
+        con.commit()
+        if claimed:
+            campaign_id = new_campaign_id
+        else:
+            campaign_id = con.execute("SELECT campaign_id FROM target_lists WHERE id=?",
+                                       (list_id,)).fetchone()["campaign_id"]
 
     for m in members:
         con.execute("""INSERT OR IGNORE INTO touches

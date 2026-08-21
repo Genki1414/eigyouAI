@@ -467,13 +467,95 @@ mikomeruの「リスト取得」機能で業種(とび・土工工事/解体工�
     - バックエンドの変更なし(静的なガイド文とCSSのみ)
 - 未対応(次フェーズ): 顧客の新規登録・課金・自分でのAPIキー発行UI
 
-**⚠ 暫定措置・要対応(2026-08-21)**: `list_builder.html`の動作確認のため、
-`deploy/docker-compose.yml`のapiサービスを`127.0.0.1:8787`限定公開から
-`0.0.0.0:8787`(外部公開)へ一時的に変更した。TLSが無いため、テナント
-`api_key`がAuthorization: Bearerヘッダに平文で流れる。**実際の顧客に
-`list_builder.html`を使わせる前に、必ずリバースプロキシ経由のHTTPS化
-(サブドメイン+証明書、または既存のstockfactory側インフラ活用)に戻すこと。**
-それまでは動作確認・デモ用途に限定する。
+**✅ HTTPS化(2026-08-21夜、β版リリース準備の一環で対応)**:
+`deploy/docker-compose.yml`のapiサービスを`127.0.0.1:8787`限定公開へ戻し、
+代わりに`caddy`サービス(Caddy 2、`deploy/Caddyfile`)を追加して80/443を
+公開する構成にした。**8787を直接インターネットへ公開する構成には戻さないこと。**
+Caddyは初回アクセス時にLet's Encryptで自動的に証明書を取得・更新する
+(Caddy標準機能。certbotの手動運用は不要)。list_builder.htmlはapi.py自身が
+同一オリジンで配信し続けるので、Caddy導入によるフロント側のコード変更は無い
+(`location.origin`がそのまま`https://<ドメイン>`になるだけ)。
+
+**⚠ 人間側で必要な作業(この先へ進むために必須)**:
+1. **ドメイン/サブドメインを1つ用意する**(例: `app.ashibase.jp`)。
+   Claude Code側では推測・決定しない
+2. そのドメインのDNS Aレコードを、Hetznerサーバーのグローバル**IPv4**アドレスへ
+   向ける(`curl -s -4 ifconfig.me`で確認できる値)。反映まで数分〜数時間かかる
+   ことがある
+3. `.env`に`EIGYOUAI_DOMAIN=app.ashibase.jp`のように設定する(`.env.example`に
+   項目を追加済み)
+4. サーバーのファイアウォール(ufw等を使っていれば)で80/443番ポートを開放する。
+   8787番は外部に開放したままにしない(内部通信のみで足りる)
+
+**⚠ 設定後にClaude Code側(またはサーバー上)で実行すること**:
+```
+cd /app/deploy   # サーバー上のリポジトリのdeploy/ディレクトリ
+docker compose down          # 一旦停止(ポート設定変更を反映させるため)
+docker compose up -d --build
+docker compose logs -f caddy # 証明書取得ログを確認。エラーが出なければOK
+curl -I https://<設定したドメイン>/health   # 200が返れば成功
+```
+DNSが未反映のまま起動すると、Caddyは証明書取得に失敗してリトライを続ける
+(サービス自体は落ちない)。DNS反映後に`docker compose restart caddy`すれば
+すぐ再試行される。
+
+### T13. β版リリース準備(2026-08-21夜)
+
+第三者のβユーザーに安全に使わせられる状態へ近づける回。**今夜は実在企業への
+本番フォーム送信を行っていない**(すべてdry_runまたはPlaywright/実チャネルに
+到達しない状態でテスト)。
+
+- **P0-2 テナント分離の監査**: 企業リスト・保存済みリスト・CSV・送信文章/
+  送信元テンプレート・担当者・送信除外・オファー・送信履歴・その他ログ・
+  お知らせ・FormSender関連データのすべてで、認証は`Authorization: Bearer`から
+  サーバ側で解決した`tenant_id`のみを信用し、クライアントが指定した`tenant_id`
+  を一切信用しない設計になっていることを確認(`grep`で全endpoint走査)。
+  ギャップを1件発見・修正: `GET /api/tenant/companies/search`の他テナント
+  非公開企業リークを確認するテストが無かったため追加(実装自体は元から安全)。
+  オファーはテナント向けの直接読み取りエンドポイントが無く、内部処理は
+  すべて`WHERE tenant_id=?`で絞り込まれているため、追加のリーク面は無い
+- **P0-3 Kill Switch**: `kill_switch`(全体・id=1固定1行)と`tenant_kill_switch`
+  (テナント別。行の存在=停止中)を新設。`senders.send_campaign()`が
+  全送信経路(手動送信/list_builder.htmlからの送信/cron/Stock Factory運用API)
+  の唯一の合流点であることを確認した上で、そこ1箇所(dry_run=Falseの行のみ)
+  でチェックするようにした。**初期値は「全体停止中」**(`db.migrate()`が
+  安全側で自動投入。本番送信には人間の明示的な解除が必須)
+  - 新規CLI: `kill_switch_cli.py`(status/stop/resume、`--tenant`で個別指定可)
+  - 新規API: `GET/POST /api/ops/kill-switch`(運用専用)、
+    `GET /api/tenant/kill-switch`(自テナントの状態を見るだけの読み取り専用。
+    他テナントの状態や制御権限は渡さない)
+  - `list_builder.html`に停止中バナーを表示し、本番送信チェックボックスを
+    強制的にドライラン固定・disabled化する(UIは補助。強制力はサーバ側)
+- **P0-4 cron/二重送信安全性の監査**: 監査の過程で2件の実在するTOCTOU競合を
+  発見・修正した(いずれも「重複送信0件」の最重要条件に直結するため)
+  1. `senders.py`の`BaseSender.send()`: 冪等キーの重複チェックが
+     「SELECTで確認→delivery後にINSERT」の2段階だったため、同じキーへの
+     2つの同時リクエスト(ボタン連打・2人の担当者の同時送信)が両方とも
+     「未送信」と判定し、実チャネルへの配信まで二重に進んでしまう恐れが
+     あった。`idempotency.key`(PRIMARY KEY)への`INSERT OR IGNORE`を
+     delivery**前**に行う原子的な「claim」方式に変更。失敗時はclaimを
+     解放して再試行を許す(占有したまま失敗すると永久にスキップ扱いに
+     なってしまうため)。5スレッド同時実行で実送信1回になることを
+     `senders.py test`に追加して確認
+  2. `target_lists.py`の`send_list()`: `if lst["campaign_id"]: ... else: 新規作成`
+     も同型のTOCTOUで、同じリストへの2つの同時送信リクエストが別々の
+     campaignを作ってしまう恐れがあった。`UPDATE target_lists SET
+     campaign_id=? WHERE id=? AND campaign_id IS NULL`による原子的な
+     「先着1件だけ採用」方式に変更(負けた側が作ったcampaign行は
+     touchesが紐付かないまま残るだけで実害なし)。3スレッド同時実行で
+     採用されるcampaign_idが1つだけになることを`api.py test`に追加して確認
+  - cronの`0 9,14 * * 1-5 flock -n /tmp/eigyouai_send.lock python3 senders.py 1 1`
+    は既に多重起動防止済み(確認のみ、変更なし)。ただし現状`senders.py`の
+    CLIは`dry_run=True`固定のため、この cron 自体はまだ実送信していない
+  - **既知の残課題(未対応・低リスクと判断)**: (a) `followup.py`が
+    `db.connect()`(storage.py経由)ではなく`sqlite3.connect()`を直接使っており、
+    将来Postgresへ移行した際にAPI/cronと別のデータベースを見てしまう
+    可能性がある。現状はSQLite運用のため実害なしだが、Postgres移行時は
+    要修正。(b) サーバーがidempotencyキーをclaimした直後(delivery前)に
+    クラッシュすると、そのキーは「占有されたまま」残り、以後そのtouchは
+    自動では再試行されない。危険な方向(二重送信)ではなく安全な方向
+    (未送信のまま止まる)の失敗モードなので許容したが、運用上は
+    `idempotency`テーブルの古い未確定行を定期的に監視するとよい
 
 ---
 

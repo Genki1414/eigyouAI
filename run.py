@@ -261,7 +261,8 @@ def run_op(con, step, campaign_id=None, dry_run=False):
                         "details": f"Step{target_step}: 送信対象がありません"}
             return {"ok": True, "step": step, "affected_count": stats["sent"],
                     "details": f"Step{target_step}: 送信{stats['sent']} / 失敗{stats['failed']} / "
-                               f"ガードで中止{stats['blocked']} / 配信停止{stats['suppressed']}"
+                               f"ガードで中止{stats['blocked']} / 配信停止{stats['suppressed']} / "
+                               f"Kill Switchで中止{stats.get('stopped', 0)}"
                                + ("（dryRun）" if dry_run else "")}
 
         return {"ok": False, "step": step, "affected_count": 0,

@@ -26,6 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_companies_owner ON companies(owner_tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tlist_tenant ON target_lists(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tlm_list ON target_list_members(list_id);
 CREATE INDEX IF NOT EXISTS idx_msgtmpl_tenant ON message_templates(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_sendtmpl_tenant ON sender_templates(tenant_id);
 """
 
 SCHEMA = """
@@ -101,6 +102,20 @@ CREATE TABLE IF NOT EXISTS message_templates (
   name TEXT NOT NULL,
   subject TEXT NOT NULL,
   body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- テナントが登録できる送信元(送信者表示名・返信先・住所・配信停止URL)の
+-- 複数パターン。「有効にする」を押すと tenants.sender_* を上書きする形で
+-- 反映する(senders.send_campaign()側のテナント解決ロジックは変更しない)。
+CREATE TABLE IF NOT EXISTS sender_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  sender_name TEXT NOT NULL,
+  sender_email TEXT NOT NULL,
+  sender_address TEXT,
+  optout_url TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -378,6 +393,48 @@ def delete_message_template(con, tenant_id, template_id):
                        (template_id, tenant_id))
     con.commit()
     return cur.rowcount > 0
+
+
+# ── 送信元テンプレート(送信者名・返信先等のパターン登録) ──
+def add_sender_template(con, tenant_id, name, sender_name, sender_email,
+                         sender_address="", optout_url=None):
+    cur = con.execute("""INSERT INTO sender_templates
+        (tenant_id, name, sender_name, sender_email, sender_address, optout_url, created_at)
+        VALUES (?,?,?,?,?,?,?)""",
+        (tenant_id, name, sender_name, sender_email, sender_address, optout_url,
+         datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    return cur.lastrowid
+
+
+def list_sender_templates(con, tenant_id):
+    rows = con.execute("""SELECT id, name, sender_name, sender_email, sender_address,
+        optout_url, created_at FROM sender_templates
+        WHERE tenant_id=? ORDER BY created_at DESC""", (tenant_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_sender_template(con, tenant_id, template_id):
+    cur = con.execute("DELETE FROM sender_templates WHERE id=? AND tenant_id=?",
+                       (template_id, tenant_id))
+    con.commit()
+    return cur.rowcount > 0
+
+
+def activate_sender_template(con, tenant_id, template_id):
+    """指定テンプレートの内容をtenants.sender_*へ反映する。
+    送信時の送信者解決はsenders.send_campaign()がtenantsから読むだけなので、
+    送信ロジック側には一切手を入れずに反映できる。"""
+    row = con.execute("""SELECT sender_name, sender_email, sender_address, optout_url
+        FROM sender_templates WHERE id=? AND tenant_id=?""", (template_id, tenant_id)).fetchone()
+    if not row:
+        return False
+    con.execute("""UPDATE tenants SET sender_name=?, sender_email=?, sender_address=?,
+        optout_url=? WHERE id=?""",
+        (row["sender_name"], row["sender_email"], row["sender_address"], row["optout_url"],
+         tenant_id))
+    con.commit()
+    return True
 
 
 # ── 許可番号の連番(社歴の代理変数) ──────────

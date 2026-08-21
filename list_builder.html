@@ -195,8 +195,39 @@ tr.clickable:hover{background:var(--blue-soft)}
 
       <section class="page" data-page="tmpl-sender">
         <h2>送信元テンプレート <span>SENDER TEMPLATES</span></h2>
-        <div class="card"><p class="hint">準備中の機能です。送信者名・返信先メールアドレス等を
-          複数パターン登録して使い分けられるようにする予定です。</p></div>
+        <div class="card">
+          <p class="hint">送信者名・返信先メールアドレス等を複数パターン登録し、
+            使い分けられます。「有効にする」を押したテンプレートが、以後の
+            すべての送信でこのテナントの送信者情報として使われます。</p>
+          <div class="row" style="margin-top:10px">
+            <div>
+              <label>テンプレート名</label>
+              <input type="text" id="sName" placeholder="例: 本社">
+            </div>
+            <div>
+              <label>送信者名(特定電子メール法の表示名)</label>
+              <input type="text" id="sSenderName" placeholder="例: 株式会社〇〇 営業部">
+            </div>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <div>
+              <label>返信先メールアドレス</label>
+              <input type="text" id="sSenderEmail" placeholder="例: sales@example.co.jp">
+            </div>
+            <div>
+              <label>住所(任意)</label>
+              <input type="text" id="sSenderAddress" placeholder="例: 東京都千代田区1-1-1">
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label>配信停止案内URL(任意。未指定なら現在の設定を維持)</label>
+            <input type="text" id="sOptoutUrl" placeholder="例: https://example.co.jp/optout">
+          </div>
+          <div class="btnrow"><button id="btnSaveSenderTemplate">保存</button></div>
+          <div id="sTmplResult"></div>
+        </div>
+        <h2 style="margin-top:20px">登録済み送信元 <span>SAVED</span></h2>
+        <div id="sTmplListWrap"><div class="empty">接続すると表示されます</div></div>
       </section>
 
       <section class="page" data-page="exclude">
@@ -362,6 +393,7 @@ function goPage(pageId) {
   if (pageId === "sendlog") refreshSendLog();
   if (pageId === "exclude") refreshExclusions();
   if (pageId === "tmpl-body") refreshTemplates();
+  if (pageId === "tmpl-sender") refreshSenderTemplates();
 }
 document.querySelectorAll(".navitem").forEach(item => {
   if (item.id === "navLogout") return; // ログアウトは専用ハンドラ(下)で扱う
@@ -631,6 +663,62 @@ $("btnSaveTemplate").addEventListener("click", async () => {
     el.innerHTML = `<div class="result ok">保存しました</div>`;
     $("tName").value = ""; $("tSubject").value = ""; $("tBody").value = "";
     await refreshTemplates();
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+});
+
+async function refreshSenderTemplates() {
+  if (!connected) return;
+  const r = await call("/api/tenant/sender-templates");
+  const el = $("sTmplListWrap");
+  if (!r.templates.length) { el.innerHTML = `<div class="empty">登録済みの送信元はありません</div>`; return; }
+  el.innerHTML = `<table><tr><th>名前</th><th>送信者名</th><th>返信先</th><th></th></tr>` +
+    r.templates.map(x => `<tr><td>${x.name}</td><td>${x.sender_name}</td><td>${x.sender_email}</td>
+      <td><button class="sActivateBtn" data-id="${x.id}">有効にする</button>
+      <button class="ghost sDeleteBtn" data-id="${x.id}">削除</button></td></tr>`).join("") +
+    `</table>`;
+  el.querySelectorAll(".sActivateBtn").forEach(btn => {
+    btn.addEventListener("click", () => activateSenderTemplate(Number(btn.dataset.id)));
+  });
+  el.querySelectorAll(".sDeleteBtn").forEach(btn => {
+    btn.addEventListener("click", () => deleteSenderTemplate(Number(btn.dataset.id)));
+  });
+}
+
+async function activateSenderTemplate(id) {
+  try {
+    await call("/api/tenant/sender-templates/activate", { method: "POST", body: JSON.stringify({ template_id: id }) });
+    $("sTmplResult").innerHTML = `<div class="result ok">有効にしました。以後の送信に反映されます</div>`;
+  } catch (e) {
+    $("sTmplResult").innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+async function deleteSenderTemplate(id) {
+  try {
+    await call("/api/tenant/sender-templates/delete", { method: "POST", body: JSON.stringify({ template_id: id }) });
+    await refreshSenderTemplates();
+  } catch (e) {
+    $("sTmplListWrap").innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+$("btnSaveSenderTemplate").addEventListener("click", async () => {
+  const name = $("sName").value.trim();
+  const sender_name = $("sSenderName").value.trim();
+  const sender_email = $("sSenderEmail").value.trim();
+  const sender_address = $("sSenderAddress").value.trim();
+  const optout_url = $("sOptoutUrl").value.trim();
+  const el = $("sTmplResult");
+  if (!name || !sender_name || !sender_email) { el.innerHTML = `<div class="result err">テンプレート名・送信者名・返信先メールアドレスは必須です</div>`; return; }
+  try {
+    await call("/api/tenant/sender-templates",
+      { method: "POST", body: JSON.stringify({ name, sender_name, sender_email, sender_address, optout_url }) });
+    el.innerHTML = `<div class="result ok">保存しました</div>`;
+    $("sName").value = ""; $("sSenderName").value = ""; $("sSenderEmail").value = "";
+    $("sSenderAddress").value = ""; $("sOptoutUrl").value = "";
+    await refreshSenderTemplates();
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }

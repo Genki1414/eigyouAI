@@ -366,7 +366,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
     q = """SELECT t.id tid, t.channel, t.subject, t.body, t.company_id, t.step,
                   c.name, c.email, c.fax, c.phone, c.address, c.contact_url,
                   o.id offer_id, tn.id tenant_id,
-                  tn.name sname, tn.sender_email, tn.sender_address, tn.optout_url
+                  tn.sender_name sname, tn.sender_email, tn.sender_address, tn.optout_url
            FROM touches t
            JOIN companies c ON c.id = t.company_id
            LEFT JOIN campaigns cp ON cp.id = t.campaign_id

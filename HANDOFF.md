@@ -399,6 +399,27 @@ mikomeruの「リスト取得」機能で業種(とび・土工工事/解体工�
       保存済みリストの送信フォームへの`<select id="sendTemplate">`追加
     - api.py testに保存・一覧・テナント分離・削除(自テナント/他テナント)の
       確認を追加
+  - **送信元テンプレート**(3/7): 実装の前に既存バグを発見して修正した——
+    `tenants.sender_name`列は`offers.add_tenant()`が保存していたが、
+    `senders.send_campaign()`の送信者解決クエリは`tn.name`(テナントの
+    内部管理名。例:「自社（AshiBase）」)を見ており、`sender_name`(例:
+    「AshiBase（足場ベース）」)は一度も読まれていなかった。そのため
+    テンプレートで送信者名を切り替える機能を作っても実際の送信には
+    反映されないはずだった。`senders.py`のSELECT文を`tn.sender_name sname`
+    に修正(1行)。senders.py test/api.py testとも green のまま
+    - `sender_templates`テーブル(id, tenant_id, name, sender_name,
+      sender_email, sender_address, optout_url, created_at)を新設。
+      「有効にする」を押すと`db.activate_sender_template()`が
+      `UPDATE tenants SET sender_name=...`する。送信側のロジックは
+      1文字も変えていない(元々tenantsのその列を読む設計だったものを
+      正しく読むようにしただけ)
+    - 新規API: `GET/POST /api/tenant/sender-templates`,
+      `POST /api/tenant/sender-templates/delete`,
+      `POST /api/tenant/sender-templates/activate`(すべてテナント分離を
+      `WHERE tenant_id=?`で担保。他テナントの操作は404)
+    - `list_builder.html`の`tmpl-sender`ページ(保存・一覧・有効化・削除)を実装
+    - api.py testに、保存・一覧・テナント分離・有効化後に実際に
+      `tenants.sender_*`へ反映されること・削除の確認を追加
 - 未対応(次フェーズ): 顧客の新規登録・課金・自分でのAPIキー発行UI
 
 **⚠ 暫定措置・要対応(2026-08-21)**: `list_builder.html`の動作確認のため、

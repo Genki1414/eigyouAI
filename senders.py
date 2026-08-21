@@ -220,7 +220,8 @@ class PostSender(BaseSender):
 # 実際のブラウザ操作(探索・検出・入力・送信・判定)はform_navigator.pyが専任で担当する。
 # ここ(FormSender)は対象決定・接触ガード・履歴管理という送信アダプタ本来の責務のみを持ち、
 # Playwrightの詳細には立ち入らない。
-_SKIP_STATUSES = {"SKIP_CAPTCHA", "SKIP_NO_SOLICIT", "SKIP_RECRUIT_ONLY", "SKIP_SUPPORT_ONLY"}
+_SKIP_STATUSES = {"SKIP_CAPTCHA", "SKIP_NO_SOLICIT", "SKIP_RECRUIT_ONLY", "SKIP_SUPPORT_ONLY",
+                   "SKIP_BOT_CHALLENGE"}
 
 
 def _log_form_send(con, company_id, result, target_url, tenant_id=None, offer_id=None,
@@ -282,7 +283,8 @@ class FormSender(BaseSender):
         import form_navigator as FN
         started_at = datetime.now().isoformat(timespec="seconds")
         values = {"company": sender.name, "name": sender.name, "email": sender.email,
-                  "phone": "", "subject": subject or "", "message": body}
+                  "phone": "", "subject": subject or "", "message": body,
+                  "furigana": "アシベース"}
         result = FN.navigate_and_submit(to.contact_url, values)
         _log_form_send(self.con, to.company_id, result, to.contact_url,
                         tenant_id=self.tenant_id, offer_id=self.offer_id,

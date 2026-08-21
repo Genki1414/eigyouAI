@@ -46,6 +46,7 @@ _FIELD_HINTS = {
     "last_name": ["姓", "苗字", "last name", "family name"],
     "first_name": ["名", "first name", "given name"],
     "name": ["お名前", "氏名", "担当者名", "ご担当者", "ご担当者名", "your name", "name"],
+    "furigana": ["フリガナ", "ふりがな", "カナ", "かな", "kana"],
 }
 
 _CONSENT_HINTS = ["プライバシー", "個人情報", "利用規約", "同意します", "同意する", "agree", "privacy"]
@@ -76,6 +77,9 @@ _NO_SOLICIT_HINTS = [
 
 _RECRUIT_ONLY_HINTS = ["採用に関するお問い合わせ専用", "採用エントリー", "新卒採用専用", "中途採用専用"]
 _SUPPORT_ONLY_HINTS = ["既存のお客様専用", "契約者様専用", "サポート専用窓口", "会員専用"]
+
+# Cloudflare等のボット検証チャレンジ画面。CAPTCHAと同じく自動突破の対象にはしない
+_BOT_CHALLENGE_TITLE_HINTS = ["just a moment", "attention required", "checking your browser"]
 
 _SUBMIT_TEXT_RE = re.compile(r"送信|確認する|この内容で送信|次へ進む|送信する|submit", re.I)
 _CONFIRM_TEXT_RE = re.compile(r"確認画面|入力内容を確認|内容を確認|次へ|確認する", re.I)
@@ -166,6 +170,8 @@ def _classify_field(page, el):
         return "company"
     if any(h in text for h in _FIELD_HINTS["subject"]):
         return "subject"
+    if any(h in text for h in _FIELD_HINTS["furigana"]):
+        return "furigana"
     if any(h in text for h in _FIELD_HINTS["last_name"]):
         return "last_name"
     if any(h in text for h in _FIELD_HINTS["first_name"]):
@@ -185,6 +191,16 @@ def _has_fillable_form(page):
     try:
         return page.query_selector("input[type=text], input[type=email], "
                                     "input:not([type]), textarea") is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _looks_like_real_contact_form(page):
+    """『トップページに検索窓やニュースレター登録欄があるだけ』を問い合わせフォームと
+    誤認しないための強めの判定。textarea(お問い合わせ本文欄)の存在を必須にする
+    (検索窓・メール登録欄は通常textareaを持たないが、問い合わせフォームはほぼ必ず持つ)。"""
+    try:
+        return page.query_selector("textarea") is not None
     except Exception:  # noqa: BLE001
         return False
 
@@ -212,8 +228,9 @@ def _find_contact_link(page):
 
 def _resolve_contact_page(page, start_url):
     """トップページ等しか無い場合に、問い合わせページへ1階層だけ辿る。
-    既に問い合わせページらしいURL、またはフォームが直接見つかればそのまま使う。"""
-    if _looks_like_contact_page(start_url) or _has_fillable_form(page):
+    既に問い合わせページらしいURL、または『本物の』問い合わせフォームが直接見つかれば
+    そのまま使う。単なる入力欄(検索窓等)の存在だけでは早期確定しない。"""
+    if _looks_like_contact_page(start_url) or _looks_like_real_contact_form(page):
         return page.url, None
 
     found = _find_contact_link(page)
@@ -256,6 +273,14 @@ def _detect_recruit_only(text):
 
 def _detect_support_only(text):
     return any(h in text for h in _SUPPORT_ONLY_HINTS)
+
+
+def _detect_bot_challenge(page):
+    try:
+        title = (page.title() or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+    return any(h in title for h in _BOT_CHALLENGE_TITLE_HINTS)
 
 
 # ── 送信ボタン ───────────────────────────
@@ -327,6 +352,10 @@ def navigate_and_submit(start_url, values, *, headless=True):
 
                 page_text = _page_text(page)
 
+                if _detect_bot_challenge(page):
+                    result.status = "SKIP_BOT_CHALLENGE"
+                    result.reason_code = "bot_challenge_detected"
+                    return result
                 if _detect_captcha(page):
                     result.status = "SKIP_CAPTCHA"
                     result.reason_code = "captcha_detected"
@@ -369,6 +398,14 @@ def navigate_and_submit(start_url, values, *, headless=True):
                     if fill_value:
                         try:
                             el.fill(fill_value, timeout=ACTION_TIMEOUT_MS)
+                            # .fill()はinput/changeイベントを発火するはずだが、Vue/React等の
+                            # 独自バインディングがそれを拾わず「未入力」表示のまま残るサイトが
+                            # あったため、念のため明示的にも発火させておく
+                            try:
+                                el.dispatch_event("input")
+                                el.dispatch_event("change")
+                            except Exception:  # noqa: BLE001
+                                pass
                             filled.append(kind)
                         except Exception:  # noqa: BLE001
                             pass

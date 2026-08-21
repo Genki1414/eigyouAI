@@ -27,6 +27,9 @@ CACもチャネル別成績も出せない = 売り物にならない。
   GET  /api/tenant/lists/<id>     リスト詳細(自テナントのものだけ。他社分は404)
   ※ Authorization: Bearer <tenant.api_key>。テナントIDはこのキーからサーバ側で
     解決し、リクエストボディのtenant_idは一切信用しない(offers.resolve_tenant_by_key)
+  GET  / , /list_builder.html  操作画面(list_builder.html)をこのサーバ自身から配信。
+                           別ドメインから配信すると、このAPIがまだ平文HTTPのため
+                           ブラウザの混在コンテンツ制限でfetch()がブロックされるための対応
 
 設計の要点:
   - touch_id で「どの接触が効いたか」を紐付ける。これが取れないと学習データにならない
@@ -51,6 +54,7 @@ import threading
 import urllib.parse
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 import db
 import metrics
@@ -67,6 +71,12 @@ ATTRIBUTION_WINDOW_DAYS = 45
 # 実送信(send/followup)まで叩ける強い権限のため既定値を持たせない
 # (未設定なら誰にも一致しない=常に401、というフェイルセーフにする)。
 SALES_ENGINE_API_KEY = os.environ.get("SALES_ENGINE_API_KEY")
+
+# list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
+# 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
+# ブラウザの混在コンテンツ制限でfetch()がブロックされてしまうための対応。
+_STATIC_PAGES = {"/list_builder.html": "list_builder.html", "/": "list_builder.html"}
+_BASE_DIR = Path(__file__).parent
 
 
 # ── 冪等性 ──────────────────────────────────
@@ -374,6 +384,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(u.query)
+
+        if u.path in _STATIC_PAGES:
+            f = _BASE_DIR / _STATIC_PAGES[u.path]
+            body = f.read_bytes() if f.exists() else b"not found"
+            self.send_response(200 if f.exists() else 404)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
 
         if u.path in ("/api/ops/status", "/api/ops/metrics"):
             if not verify_ops_bearer(self.headers.get("Authorization")):

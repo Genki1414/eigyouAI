@@ -169,7 +169,9 @@ document.querySelectorAll(".chip").forEach(chip => {
 let API = "", KEY = "";
 const $ = id => document.getElementById(id);
 
-$("apiBase").value = localStorage.getItem("eigyouai_api_base") || "";
+// このページがapi.py自身から配信されている場合は、同一オリジンを既定値にする
+$("apiBase").value = localStorage.getItem("eigyouai_api_base") ||
+  (location.protocol.startsWith("http") && location.port ? location.origin : "");
 $("apiKey").value = localStorage.getItem("eigyouai_api_key") || "";
 
 async function call(path, opts) {

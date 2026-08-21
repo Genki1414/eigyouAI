@@ -226,12 +226,14 @@ _SKIP_STATUSES = {"SKIP_CAPTCHA", "SKIP_NO_SOLICIT", "SKIP_RECRUIT_ONLY", "SKIP_
 def _log_form_send(con, company_id, result, target_url, tenant_id=None, offer_id=None,
                     started_at=None, keep_debug_fields=False):
     """form_send_logへ1試行分を記録する。個人情報配慮のため入力内容そのものは残さない。
-    keep_debug_fields=Trueの間だけfinal_url/page_titleを保存する(検証中のみ想定)。"""
+    keep_debug_fields=Trueの間だけfinal_url/page_title/page_text_snippetを保存する
+    (検証中のみ想定。page_text_snippetは成功判定できなかった原因調査用)。"""
     con.execute("""INSERT INTO form_send_log
         (company_id, tenant_id, offer_id, target_url, contact_url, started_at, finished_at,
          status, reason_code, detected_fields, filled_fields, submit_attempted,
-         success_evidence, error_message, retryable, playwright_run_id, final_url, page_title)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+         success_evidence, error_message, retryable, playwright_run_id, final_url, page_title,
+         page_text_snippet)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (company_id, tenant_id, offer_id, target_url, result.contact_url_used,
          started_at or datetime.now().isoformat(timespec="seconds"),
          datetime.now().isoformat(timespec="seconds"),
@@ -241,7 +243,8 @@ def _log_form_send(con, company_id, result, target_url, tenant_id=None, offer_id
          1 if result.submit_attempted else 0, result.success_evidence, result.error_message,
          1 if result.status == "FAILED_RETRYABLE" else 0, result.run_id,
          result.final_url if keep_debug_fields else None,
-         result.page_title if keep_debug_fields else None))
+         result.page_title if keep_debug_fields else None,
+         result.page_text_snippet if keep_debug_fields else None))
     con.commit()
 
 

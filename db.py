@@ -107,7 +107,8 @@ CREATE TABLE IF NOT EXISTS form_send_log (
   retryable INTEGER DEFAULT 0,
   playwright_run_id TEXT,
   final_url TEXT,               -- 開発・検証中のみ埋める想定
-  page_title TEXT
+  page_title TEXT,
+  page_text_snippet TEXT        -- 開発・検証中のみ埋める想定(成功判定できなかった原因調査用)
 );
 """
 
@@ -186,6 +187,7 @@ def migrate(con):
         ("companies", "corporate_no", "TEXT"),  # 法人番号(国税庁13桁)。mikomeru取込で判明した分のみ
         ("companies", "data_source", "TEXT"),  # NULL=国交省名簿(既定) / "mikomeru"=mikomeru由来の新規追加
         ("touches", "step", "INTEGER DEFAULT 1"),
+        ("form_send_log", "page_text_snippet", "TEXT"),  # 成功判定できなかった原因調査用
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:

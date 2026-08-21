@@ -58,8 +58,10 @@ _CONTACT_PATH_HINTS = ["contact", "inquiry", "otoiawase", "toiawase"]
 
 _SUCCESS_HINTS = (
     "ありがとうございます", "ありがとうございました", "送信が完了", "送信しました",
-    "受け付け", "受付ました", "受付いたしました", "受け付けました",
-    "お問い合わせいただき", "thank you", "thanks for",
+    "送信いたしました", "送信されました", "受け付け", "受付ました", "受付いたしました",
+    "受け付けました", "承りました", "お問い合わせいただき", "ご連絡いたします",
+    "担当者より", "追ってご連絡", "確認の上", "確認次第", "折り返しご連絡",
+    "thank you", "thanks for", "successfully",
 )
 
 _CAPTCHA_SELECTORS = (
@@ -91,6 +93,7 @@ class NavigationResult:
     error_message: Optional[str] = None
     final_url: Optional[str] = None
     page_title: Optional[str] = None
+    page_text_snippet: Optional[str] = None   # 診断用。成功判定できなかった時の原因調査に使う
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
 
@@ -337,6 +340,7 @@ def navigate_and_submit(start_url, values, *, headless=True):
                 if not _has_fillable_form(page):
                     result.status = "FAILED_UNSUPPORTED"
                     result.reason_code = discover_err or "form_not_found"
+                    result.page_text_snippet = page_text[:400]
                     return result
 
                 fields = page.query_selector_all(
@@ -405,9 +409,20 @@ def navigate_and_submit(start_url, values, *, headless=True):
                     except Exception:  # noqa: BLE001
                         pass
 
+                # AJAX送信の完了メッセージが非同期で少し遅れて描画されるサイトがあるため、
+                # networkidleの後にもう少しだけ待つ
+                try:
+                    page.wait_for_timeout(1500)
+                except Exception:  # noqa: BLE001
+                    pass
+
                 result.final_url = page.url
                 final_text = _page_text(page)
+                result.page_text_snippet = final_text[:400]
                 url_changed = page.url != contact_url
+                # フォームがDOM上から消えている(=AJAXで完了画面に差し替わった)ことも
+                # 成功の傍証として見る。文言・URLどちらも一致しないAJAX系フォーム向けの保険
+                form_gone = not _has_fillable_form(page)
                 hit = next((k for k in _SUCCESS_HINTS if k in final_text), None)
                 if hit:
                     result.status = "SUCCESS"
@@ -418,6 +433,11 @@ def navigate_and_submit(start_url, values, *, headless=True):
                     result.status = "SUCCESS"
                     result.reason_code = "url_changed_after_submit"
                     result.success_evidence = page.url
+                    return result
+                if form_gone:
+                    result.status = "SUCCESS"
+                    result.reason_code = "form_disappeared_after_submit"
+                    result.success_evidence = "form_not_present"
                     return result
 
                 result.status = "FAILED_UNSUPPORTED"

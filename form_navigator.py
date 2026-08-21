@@ -306,8 +306,20 @@ def _find_button(page, text_re):
 
 
 def _click(el):
+    """通常クリックを試し、失敗したらJS経由のクリックにフォールバックする。
+    Cookie同意バナーやチャットウィジェットがボタンに重なっていて通常クリックが
+    ブロックされるケースがStep3検証で最頻出の一時失敗パターンだったための対策。"""
+    try:
+        el.scroll_into_view_if_needed(timeout=ACTION_TIMEOUT_MS)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         el.click(timeout=ACTION_TIMEOUT_MS)
+        return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        el.evaluate("e => e.click()")
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -432,6 +444,7 @@ def navigate_and_submit(start_url, values, *, headless=True):
                 if not submit_btn:
                     result.status = "FAILED_UNSUPPORTED"
                     result.reason_code = "submit_button_not_found"
+                    result.page_text_snippet = _page_text(page)[:400]
                     return result
 
                 result.submit_attempted = True

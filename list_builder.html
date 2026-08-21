@@ -98,6 +98,24 @@ tr.clickable:hover{background:var(--blue-soft)}
   .navitem.active{border-left:none;border-bottom-color:var(--safety)}
   .row{grid-template-columns:1fr}
 }
+
+/* マニュアルの「PDFとして保存」= ブラウザの印刷機能を使う。外部ライブラリなし。
+   印刷時はサイドバー・ボタン類を消し、選択中ページの内容だけを紙面いっぱいに出す */
+.manual h3{font-family:'Zen Kaku Gothic New';font-weight:700;font-size:14px;margin:18px 0 6px}
+.manual h3:first-child{margin-top:0}
+.manual ol,.manual ul{margin:6px 0 6px 20px}
+.manual li{margin-bottom:4px}
+.manual .step{margin-bottom:18px}
+@media print{
+  .stripe,.sidebar,.topbar,#connStatus{display:none !important}
+  .shell{display:block}
+  .main-wrap{overflow:visible}
+  .content{max-width:none;padding:0}
+  .page{display:none !important}
+  .page.active{display:block !important}
+  .card{border:none;padding:0}
+  #btnPrintManual{display:none}
+}
 </style>
 </head>
 <body>
@@ -288,9 +306,82 @@ tr.clickable:hover{background:var(--blue-soft)}
         <div id="otherLogWrap"><div class="empty">接続すると表示されます</div></div>
       </section>
 
-      <section class="page" data-page="manual">
+      <section class="page manual" data-page="manual">
         <h2>マニュアルDL <span>MANUAL</span></h2>
-        <div class="card"><p class="hint">準備中の機能です。ご不明点は担当者までお問い合わせください。</p></div>
+        <div class="btnrow" style="margin-bottom:16px">
+          <button id="btnPrintManual">PDFとして保存(印刷)</button>
+        </div>
+
+        <div class="card step">
+          <h3>1. はじめに接続する</h3>
+          <p>左メニューの「接続設定」で、APIサーバURLとAPIキーを入力して「接続」を押します。
+            APIキーはテナント全体で共有するものと、担当者ごとに個別発行するものの2種類があり、
+            どちらでも同じデータにアクセスできます(「担当者管理」参照)。一度接続すると、
+            このブラウザに保存され、次回から自動で再接続されます。</p>
+        </div>
+
+        <div class="card step">
+          <h3>2. 送信先の企業を集める</h3>
+          <p>2通りの方法があります。</p>
+          <ol>
+            <li><b>共有マスタから条件で絞り込む</b>(「リスト取得」ページ):
+              都道府県・業種・スコアランク・資本金の上限などの条件を選ぶと、
+              選択中の条件に該当する件数がその場で表示されます。条件を決めたら
+              リスト名を付けて保存します。</li>
+            <li><b>自社の企業リストを取り込む</b>(「CSV検索」ページ): お手持ちのCSVを
+              アップロードします。会社名の列は必須で、それ以外(都道府県・電話番号・メール・URL)は
+              あれば認識します。既存データと商号が一致する行は自動で紐付き、それ以外は
+              御社専用の非公開データとして追加されます(他のお客様には見えません)。</li>
+          </ol>
+        </div>
+
+        <div class="card step">
+          <h3>3. 保存したリストを確認・送信する</h3>
+          <p>「保存済みリスト」ページで作成済みのリストを確認できます。リストをクリックすると
+            詳細画面が開き、そこから実際にフォーム自動送信できます。</p>
+          <ul>
+            <li>送信対象は「問い合わせページのURLが確認できている企業」のみです。</li>
+            <li>「テンプレートを使う」で保存済みの文面を選ぶと、件名・本文が自動で入力されます
+              (「送信文章テンプレート」ページで事前に登録しておきます)。</li>
+            <li><b>ドライラン</b>(既定でオン)では実際のサイトへは何も送信されません。動作確認用です。
+              チェックを外すと本番送信になり、実際の企業サイトへ送信されます。取り消せない操作のため、
+              確認ダイアログが表示されます。</li>
+            <li>同じリストへ再送信しても、既に送信済みの企業には二重送信されません
+              (未送信分だけが対象になります)。</li>
+          </ul>
+        </div>
+
+        <div class="card step">
+          <h3>4. 送信結果を確認する</h3>
+          <p>「自動送信ログ」ページで、企業ごとの送信結果(成功・失敗とその理由)を確認できます。
+            「その他ログ」ページでは、リストの作成や送信を開始した操作そのものの履歴を確認できます。</p>
+        </div>
+
+        <div class="card step">
+          <h3>5. 送信を個別に除外する</h3>
+          <p>「送信除外設定」ページで、競合他社など御社だけが送信を避けたい企業を検索して
+            個別に除外できます。これは御社だけの設定で、他のお客様の送信には影響しません
+            (配信停止の申し出があった企業は、この設定に関わらず常に自動で除外されます)。</p>
+        </div>
+
+        <div class="card step">
+          <h3>6. 送信元の情報を設定する</h3>
+          <p>「送信元テンプレート」ページで、送信者名・返信先メールアドレス・住所・
+            配信停止案内URLを複数パターン登録できます。「有効にする」を押したテンプレートが、
+            以後のすべての送信でこのテナントの送信者情報として使われます。</p>
+        </div>
+
+        <div class="card step">
+          <h3>7. 担当者を追加・管理する</h3>
+          <p>「担当者管理」ページで、担当者ごとに個別のAPIキーを発行できます。発行したAPIキーは
+            その場でしか表示されないため、必ず控えてください。退職・異動の際は、その担当者の
+            キーだけを「失効」させれば、他の担当者やテナント全体には影響しません。</p>
+        </div>
+
+        <div class="card step">
+          <h3>お困りの場合</h3>
+          <p>このマニュアルで解決しない場合は、担当者までお問い合わせください。</p>
+        </div>
       </section>
 
       <section class="page" data-page="filter">
@@ -822,6 +913,8 @@ async function refreshOtherLog() {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }
 }
+
+$("btnPrintManual").addEventListener("click", () => window.print());
 
 function currentFilters() {
   const prefs = [...prefsWrap.querySelectorAll("input:checked")].map(c => c.value);

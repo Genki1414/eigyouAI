@@ -28,6 +28,8 @@ CREATE INDEX IF NOT EXISTS idx_tlm_list ON target_list_members(list_id);
 CREATE INDEX IF NOT EXISTS idx_msgtmpl_tenant ON message_templates(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_sendtmpl_tenant ON sender_templates(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_staff_tenant ON staff(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_tlm_status ON target_list_members(send_status);
+CREATE INDEX IF NOT EXISTS idx_formlog_list ON form_send_log(list_id);
 """
 
 SCHEMA = """
@@ -273,6 +275,38 @@ def migrate(con):
         ("campaigns", "offer_id", "INTEGER"),  # compose.pyで確定したオファー。送信時のテナント解決に使う
         ("tenants", "api_key", "TEXT"),  # target_listsのAPI認証キー(SaaS販売用テナントに発行)
         ("target_lists", "campaign_id", "INTEGER"),  # send_list()で一度送信すると紐づく(二重送信防止)
+        # 企業1社×1リストの「現在の送信状態」。履歴(何度目のどの結果か)は
+        # form_send_log側が持つので、ここは最新状態のスナップショットに徹する。
+        ("target_list_members", "send_status", "TEXT DEFAULT 'PENDING'"),
+        ("target_list_members", "reason_code", "TEXT"),
+        ("target_list_members", "retry_count", "INTEGER DEFAULT 0"),
+        ("target_list_members", "last_error", "TEXT"),
+        ("target_list_members", "latest_result", "TEXT"),
+        ("target_list_members", "started_at", "TEXT"),
+        ("target_list_members", "submitted_at", "TEXT"),
+        ("target_list_members", "completed_at", "TEXT"),
+        ("target_list_members", "contacted_at", "TEXT"),
+        ("target_list_members", "next_retry_at", "TEXT"),
+        ("target_list_members", "created_at", "TEXT"),
+        ("target_list_members", "updated_at", "TEXT"),
+        # 返信・商談化・受注は自動取得せず、担当者がlist_builder.htmlから手動記録する(β版)
+        ("target_list_members", "replied", "INTEGER DEFAULT 0"),
+        ("target_list_members", "replied_at", "TEXT"),
+        ("target_list_members", "deal", "INTEGER DEFAULT 0"),
+        ("target_list_members", "deal_at", "TEXT"),
+        ("target_list_members", "won", "INTEGER DEFAULT 0"),
+        ("target_list_members", "won_at", "TEXT"),
+        ("target_list_members", "memo", "TEXT"),
+        # 原価計測。AIを使わない処理は0のままでよい(将来compose.py等のAI利用に接続する)
+        ("form_send_log", "list_id", "INTEGER"),
+        ("form_send_log", "retry_count", "INTEGER DEFAULT 0"),
+        ("form_send_log", "execution_seconds", "REAL"),
+        ("form_send_log", "ai_tokens_input", "INTEGER DEFAULT 0"),
+        ("form_send_log", "ai_tokens_output", "INTEGER DEFAULT 0"),
+        ("form_send_log", "ai_cost_yen", "REAL DEFAULT 0"),
+        ("form_send_log", "external_api_cost_yen", "REAL DEFAULT 0"),
+        ("form_send_log", "estimated_server_cost_yen", "REAL DEFAULT 0"),
+        ("form_send_log", "total_estimated_cost_yen", "REAL DEFAULT 0"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
@@ -544,6 +578,81 @@ def list_tenant_kill_switches(con):
         FROM tenant_kill_switch k LEFT JOIN tenants t ON t.id = k.tenant_id
         ORDER BY k.updated_at DESC""").fetchall()
     return [dict(r) for r in rows]
+
+
+# ── 企業1社×1リストの送信状態(target_list_members) ──
+# 送信の実行そのものはsenders.send_campaign()に完全に委譲する(新しい送信経路は
+# 作らない)。ここはその結果を「1社ごとの現在状態」としてtarget_list_membersへ
+# 反映するだけの後処理。履歴(何度目のどの結果か)はform_send_logが持つので、
+# ここは上書きしてよい最新状態のスナップショットに徹する。
+def sync_target_list_member_status(con, list_id, campaign_id, step=1):
+    """send_campaign()の実行直後に呼ぶ。呼び出し側がdry_run=Falseのときだけ呼ぶこと
+    (呼ぶこと自体は安全だが、意味のある更新にはならない。理由は下記)。
+
+    重要な注意: touches.sent_atはdry_run/実送信を問わず成功時に同じ形で立つため
+    (SendResult.provider_idが"mock_"接頭辞かどうかでしか判別できない)、
+    「sent_atがある=実送信成功」と単純に判定してはいけない。過去にdry_runで
+    「送信」した企業を、後から本番送信した際にまとめて同期すると、dry_run分の
+    行まで誤ってSUCCESS扱いになってしまう。noteに"provider_id=mock_"が
+    含まれるかどうかで、実際に外部へ届いたかを判別する。"""
+    rows = con.execute("SELECT company_id, sent_at, note FROM touches WHERE campaign_id=? AND step=?",
+                        (campaign_id, step)).fetchall()
+    now = datetime.now().isoformat(timespec="seconds")
+    for r in rows:
+        company_id, note = r["company_id"], r["note"] or ""
+        log = con.execute("""SELECT status, reason_code, error_message, retry_count
+            FROM form_send_log WHERE company_id=? AND list_id=?
+            ORDER BY id DESC LIMIT 1""", (company_id, list_id)).fetchone()
+
+        if r["sent_at"] and "provider_id=mock_" not in note:
+            status = "SUCCESS"
+        elif "Kill Switch" in note:
+            status = "STOPPED"
+        elif "送信中止" in note:
+            status = "SKIP"  # can_contact()のガード(除外設定・配信停止・反応済み等)
+        elif log and log["status"] and log["status"].startswith("SKIP"):
+            status = "SKIP"
+        elif log and log["status"] == "FAILED_UNSUPPORTED":
+            status = "FAILED_UNSUPPORTED"
+        elif note and "provider_id=mock_" not in note:
+            status = "FAILED_RETRYABLE"
+        else:
+            continue  # 未処理、またはdry_run分のみでまだ実送信されていない行は触らない
+
+        reason_code = log["status"] if log else None
+        last_error = (log["error_message"] if log else None) or (note or None)
+        retry_count = log["retry_count"] if log else 0
+        latest_result = f"{status}" + (f"({reason_code})" if reason_code else "")
+        con.execute("""UPDATE target_list_members SET send_status=?, reason_code=?,
+            last_error=?, retry_count=?, latest_result=?, completed_at=?,
+            contacted_at=CASE WHEN ?='SUCCESS' THEN ? ELSE contacted_at END, updated_at=?
+            WHERE list_id=? AND company_id=?""",
+            (status, reason_code, last_error, retry_count, latest_result, now,
+             status, now, now, list_id, company_id))
+    con.commit()
+
+
+def set_target_list_member_outcome(con, tenant_id, list_id, company_id, field, value, memo=None):
+    """返信・商談化・受注の手動記録(β版はメール自動取得等をしないため担当者が記録する)。
+    fieldは'replied'|'deal'|'won'のいずれか。テナント境界はlist_id経由で確認する
+    (他テナントのリストのmember_idを直接指定しても更新できないようにする)。"""
+    if field not in ("replied", "deal", "won"):
+        return False
+    owns = con.execute("SELECT 1 FROM target_lists WHERE id=? AND tenant_id=?",
+                        (list_id, tenant_id)).fetchone()
+    if not owns:
+        return False
+    now = datetime.now().isoformat(timespec="seconds")
+    q = f"""UPDATE target_list_members SET {field}=?, {field}_at=?, updated_at=?
+        {", memo=?" if memo is not None else ""}
+        WHERE list_id=? AND company_id=?"""
+    params = [1 if value else 0, now if value else None, now]
+    if memo is not None:
+        params.append(memo)
+    params += [list_id, company_id]
+    cur = con.execute(q, params)
+    con.commit()
+    return cur.rowcount > 0
 
 
 # ── 許可番号の連番(社歴の代理変数) ──────────

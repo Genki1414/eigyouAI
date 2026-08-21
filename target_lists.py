@@ -135,8 +135,9 @@ def create_from_filter(con, tenant_id, name, filters):
         (tenant_id,name,source,filter_json,company_count,created_at) VALUES (?,?,?,?,?,?)""",
         (tenant_id, name, "filter", json.dumps(filters, ensure_ascii=False), len(ids), now))
     list_id = cur.lastrowid
-    con.executemany("INSERT OR IGNORE INTO target_list_members (list_id, company_id) VALUES (?,?)",
-                     [(list_id, cid) for cid in ids])
+    con.executemany("""INSERT OR IGNORE INTO target_list_members
+        (list_id, company_id, send_status, created_at, updated_at) VALUES (?,?,'PENDING',?,?)""",
+                     [(list_id, cid, now, now) for cid in ids])
     con.commit()
     return {"list_id": list_id, "count": len(ids)}
 
@@ -202,8 +203,9 @@ def create_from_csv(con, tenant_id, name, csv_text):
                  _pick(row, _URL_COLS), "customer_upload", tenant_id))
             cid = cur2.lastrowid
             created += 1
-        con.execute("INSERT OR IGNORE INTO target_list_members (list_id, company_id) VALUES (?,?)",
-                     (list_id, cid))
+        con.execute("""INSERT OR IGNORE INTO target_list_members
+            (list_id, company_id, send_status, created_at, updated_at)
+            VALUES (?,?,'PENDING',?,?)""", (list_id, cid, now, now))
 
     total = matched + created
     con.execute("UPDATE target_lists SET company_count=? WHERE id=?", (total, list_id))
@@ -218,17 +220,38 @@ def list_lists(con, tenant_id):
     return [dict(r) for r in rows]
 
 
-def get_list(con, tenant_id, list_id, limit=200, offset=0):
+_MEMBER_STATUS_FILTERS = {
+    "success": "m.send_status='SUCCESS'",
+    "failed": "m.send_status IN ('FAILED_RETRYABLE','FAILED_UNSUPPORTED')",
+    "skip": "m.send_status='SKIP'",
+    "pending": "m.send_status='PENDING'",
+    "replied": "m.replied=1",
+    "deal": "m.deal=1",
+    "won": "m.won=1",
+}
+
+
+def get_list(con, tenant_id, list_id, limit=200, offset=0, status_filter=None):
     """テナント境界を必ずここで確認する。list_idだけを信じてtenant_id一致を
-    省略すると、他テナントがIDを推測して中身を覗けてしまう。"""
+    省略すると、他テナントがIDを推測して中身を覗けてしまう。
+    status_filterは_MEMBER_STATUS_FILTERSのキーのみ受け付ける(SQLインジェクション
+    防止のため、フリーテキストでの絞込条件は組み立てない)。"""
     lst = con.execute("SELECT * FROM target_lists WHERE id=? AND tenant_id=?",
                        (list_id, tenant_id)).fetchone()
     if not lst:
         return None
-    members = con.execute("""SELECT c.id, c.name, c.pref, c.rank, c.trades, c.phone, c.email,
-            c.website_url, c.contact_url
+    where = "m.list_id=?"
+    params = [list_id]
+    if status_filter in _MEMBER_STATUS_FILTERS:
+        where += " AND " + _MEMBER_STATUS_FILTERS[status_filter]
+    members = con.execute(f"""SELECT c.id, c.name, c.pref, c.rank, c.trades, c.phone, c.email,
+            c.website_url, c.contact_url,
+            m.send_status, m.reason_code, m.retry_count, m.last_error, m.latest_result,
+            m.started_at, m.completed_at, m.contacted_at,
+            m.replied, m.replied_at, m.deal, m.deal_at, m.won, m.won_at, m.memo
         FROM target_list_members m JOIN companies c ON c.id=m.company_id
-        WHERE m.list_id=? LIMIT ? OFFSET ?""", (list_id, limit, offset)).fetchall()
+        WHERE {where} ORDER BY m.company_id LIMIT ? OFFSET ?""",
+        params + [limit, offset]).fetchall()
     return {"list": dict(lst), "members": [dict(r) for r in members]}
 
 
@@ -245,6 +268,7 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True):
     未送信分だけがもう一度試される(リトライにはなるが二重送信にはならない)。
     """
     import senders
+    import db
 
     lst = con.execute("SELECT * FROM target_lists WHERE id=? AND tenant_id=?",
                        (list_id, tenant_id)).fetchone()
@@ -290,13 +314,30 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True):
             campaign_id = con.execute("SELECT campaign_id FROM target_lists WHERE id=?",
                                        (list_id,)).fetchone()["campaign_id"]
 
+    now2 = datetime.now().isoformat(timespec="seconds")
     for m in members:
         con.execute("""INSERT OR IGNORE INTO touches
             (campaign_id, company_id, channel, variant, step, subject, body)
             VALUES (?,?,'フォーム','A',1,?,?)""", (campaign_id, m["id"], subject, body))
+    if not dry_run:
+        # 実送信の直前に「処理中」を記録しておく。サーバー再起動等で送信が
+        # 途中で止まった場合でも、PROCESSINGのまま残った行=結果不明な行として
+        # 後から目視で気づけるようにするため(PENDINGのままだと「未着手」と
+        # 「処理中に落ちた」の区別がつかない)。send_campaign()が今回実際に
+        # 対象とする行(sent_atがまだ無い行)だけに絞る。既に送信済み(SUCCESS等)の
+        # 行まで一律PROCESSINGへ戻すと、今回の対象外なのに更新されないまま
+        # 「処理中」で止まって見えてしまう。
+        pending_ids = {row["company_id"] for row in con.execute(
+            "SELECT company_id FROM touches WHERE campaign_id=? AND step=1 AND sent_at IS NULL",
+            (campaign_id,)).fetchall()}
+        con.executemany("""UPDATE target_list_members SET send_status='PROCESSING',
+            started_at=?, updated_at=? WHERE list_id=? AND company_id=?""",
+            [(now2, now2, list_id, m["id"]) for m in members if m["id"] in pending_ids])
     con.commit()
 
     stats = senders.send_campaign(con, campaign_id, step=1, dry_run=dry_run)
+    if not dry_run:
+        db.sync_target_list_member_status(con, list_id, campaign_id, step=1)
     return {"campaign_id": campaign_id, "target_count": len(members),
             "dry_run": dry_run, "stats": stats}
 

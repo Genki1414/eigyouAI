@@ -29,7 +29,13 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/tenant/lists          {"name","filters"} → フィルタ型リストを保存
   POST /api/tenant/lists/csv      {"name","csv"} → 顧客持込CSVを取り込む
   GET  /api/tenant/lists          自テナントのリスト一覧
-  GET  /api/tenant/lists/<id>     リスト詳細(自テナントのものだけ。他社分は404)
+  GET  /api/tenant/lists/<id>     リスト詳細(自テナントのものだけ。他社分は404)。
+                           ?status=success|failed|skip|pending|replied|deal|wonで
+                           企業ごとの送信状態で絞り込める(1社ごとのsend_status等を
+                           含む。実送信結果はdry_run=falseの送信後に反映される)
+  POST /api/tenant/lists/<id>/outcome  {"company_id","field":"replied"|"deal"|"won",
+                           "value","memo"} → 返信・商談化・受注を手動記録(β版。
+                           メール自動取得等はしない)
   POST /api/tenant/lists/<id>/send  {"subject","body","dry_run"} → リストへフォーム
                            自動送信。dry_run既定true(=実サイトへは送らない)。
                            can_contact()・冪等性・ペーシング上限はsend_campaign()
@@ -115,6 +121,7 @@ ATTRIBUTION_WINDOW_DAYS = 45
 SALES_ENGINE_API_KEY = os.environ.get("SALES_ENGINE_API_KEY")
 
 _SEND_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/send$")
+_OUTCOME_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/outcome$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
@@ -327,10 +334,29 @@ def h_tenant_lists_list(con, tenant_id):
 def h_tenant_list_detail(con, tenant_id, list_id, qs):
     limit = min(int(qs.get("limit", ["200"])[0]), 1000)
     offset = int(qs.get("offset", ["0"])[0])
-    res = TL.get_list(con, tenant_id, list_id, limit=limit, offset=offset)
+    status_filter = qs.get("status", [None])[0]
+    res = TL.get_list(con, tenant_id, list_id, limit=limit, offset=offset, status_filter=status_filter)
     if not res:
         return 404, {"error": "リストが見つかりません"}
     return 200, res
+
+
+def h_tenant_list_member_outcome(con, tenant_id, list_id, data):
+    """送信済み企業への返信・商談化・受注を担当者が手動で記録する(β版)。
+    メール自動取得等はしない。"""
+    company_id = data.get("company_id")
+    field = data.get("field")
+    value = data.get("value")
+    if not isinstance(company_id, int) or field not in ("replied", "deal", "won") \
+            or not isinstance(value, bool):
+        return 400, {"error": "company_id(整数)・field('replied'|'deal'|'won')・value(真偽値)は必須です"}
+    memo = data.get("memo")
+    if memo is not None:
+        memo = str(memo).strip() or None
+    ok = db.set_target_list_member_outcome(con, tenant_id, list_id, company_id, field, value, memo=memo)
+    if not ok:
+        return 404, {"error": "リストまたは企業が見つかりません"}
+    return 200, {"ok": True}
 
 
 def h_tenant_send_log(con, tenant_id, qs):
@@ -585,7 +611,9 @@ class Handler(BaseHTTPRequestHandler):
                 con.close()
 
         send_match = _SEND_PATH_RE.match(path)
-        if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv") or send_match:
+        outcome_match = _OUTCOME_PATH_RE.match(path)
+        if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv") \
+                or send_match or outcome_match:
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -597,8 +625,11 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_lists_create(con, tenant["id"], data)
                 elif path == "/api/tenant/lists/csv":
                     st, res = h_tenant_lists_csv(con, tenant["id"], data)
-                else:
+                elif send_match:
                     st, res = h_tenant_list_send(con, tenant["id"], int(send_match.group(1)), data)
+                else:
+                    st, res = h_tenant_list_member_outcome(con, tenant["id"],
+                                                            int(outcome_match.group(1)), data)
                 return self._json(st, res)
             except Exception as e:  # noqa: BLE001
                 return self._json(500, {"error": str(e)[:200]})
@@ -987,6 +1018,31 @@ def self_test(port=8899):
 
     st, r = get_auth(f"/api/tenant/lists/{list_a_id}", token=key_a)
     t("GET /api/tenant/lists/<id> で自分のリストは見える", st == 200 and "members" in r)
+    t("企業ごとのsend_status(初期値PENDING)が含まれる",
+      len(r.get("members", [])) > 0 and all(m["send_status"] == "PENDING" for m in r["members"]))
+
+    st, r = get_auth(f"/api/tenant/lists/{list_a_id}?status=pending", token=key_a)
+    t("?status=pendingで絞り込める(未送信のみ)",
+      st == 200 and len(r.get("members", [])) > 0)
+    st, r = get_auth(f"/api/tenant/lists/{list_a_id}?status=success", token=key_a)
+    t("?status=successで絞り込める(まだ0件のはず)",
+      st == 200 and len(r.get("members", [])) == 0)
+
+    outcome_company_id = con.execute("""SELECT c.id FROM target_list_members m
+        JOIN companies c ON c.id=m.company_id WHERE m.list_id=? LIMIT 1""", (list_a_id,)).fetchone()[0]
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/outcome",
+                      {"company_id": outcome_company_id, "field": "replied", "value": True,
+                       "memo": "電話で反応あり"}, token=key_a)
+    t("POST /api/tenant/lists/<id>/outcomeで返信を記録できる", st == 200 and r.get("ok"))
+    st, r = get_auth(f"/api/tenant/lists/{list_a_id}?status=replied", token=key_a)
+    t("記録した返信が?status=repliedで拾える",
+      st == 200 and any(m["id"] == outcome_company_id for m in r.get("members", [])))
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/outcome",
+                      {"company_id": outcome_company_id, "field": "invalid", "value": True}, token=key_a)
+    t("不正なfieldは400", st == 400)
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/outcome",
+                      {"company_id": outcome_company_id, "field": "deal", "value": True}, token=key_b)
+    t("他テナントのリストへの記録は404(横断更新できない)", st == 404)
 
     st, r = get_auth(f"/api/tenant/lists/{list_b_id}", token=key_a)
     t("他テナントのリストIDを指定しても404(横断閲覧できない)", st == 404)
@@ -1009,6 +1065,52 @@ def self_test(port=8899):
     t("キャンペーンが実際に作られている",
       send_campaign_id and con.execute(
           "SELECT COUNT(*) FROM campaigns WHERE id=?", (send_campaign_id,)).fetchone()[0] == 1)
+    t("dry_run送信ではtarget_list_membersのsend_statusはPENDINGのまま(反映しない)",
+      all(m["send_status"] == "PENDING" for m in con.execute(
+          "SELECT send_status FROM target_list_members WHERE list_id=?", (list_a_id,)).fetchall()))
+
+    # Kill Switchは既定で全体停止中(db.migrate()の安全側デフォルト。ここまでの
+    # テストで誰も解除していない)。dry_run=falseで送っても実チャネルには一切
+    # 触れずKill Switchで中止されることと、その結果がtarget_list_membersへ
+    # 正しく同期される(STOPPED)ことを確認する
+    t("dry_runで「送信」扱いだった分は実送信扱い(SUCCESS)に誤変換されない"
+      "(sent_atはdry_run/実送信を問わず同じ形で立つため、provider_id=mock_で判別している)",
+      all(row["send_status"] != "SUCCESS" for row in con.execute(
+          "SELECT send_status FROM target_list_members WHERE list_id=?", (list_a_id,)).fetchall()))
+
+    # 単独の小さなリストで、Kill Switch停止時の同期(STOPPED)をクリーンな状態で検証する
+    # (list_aは既にdry_run分の送信履歴で埋まっており、can_contact()の判定が絡んで
+    # Kill Switchまで到達しない行が混ざるため、別途まっさらな企業で確認する)
+    clean_company = None
+    for row in con.execute("SELECT id FROM companies WHERE contact_url IS NOT NULL AND dedup_of IS NULL"):
+        if db.can_contact(con, row["id"])[0]:
+            clean_company = row["id"]
+            break
+    if clean_company:
+        now_ks = datetime.now().isoformat(timespec="seconds")
+        cur = con.execute("""INSERT INTO target_lists (tenant_id,name,source,company_count,created_at)
+            VALUES (?,?,?,?,?)""", (tid_a, "テストA_KS単体", "filter", 1, now_ks))
+        ks_list_id = cur.lastrowid
+        con.execute("""INSERT INTO target_list_members (list_id, company_id, send_status,
+            created_at, updated_at) VALUES (?,?,'PENDING',?,?)""",
+            (ks_list_id, clean_company, now_ks, now_ks))
+        con.commit()
+        res = TL.send_list(con, tid_a, ks_list_id, "件名", "本文", dry_run=False)
+        t("単体テストでもKill Switch停止中は実送信されない",
+          res is not None and "error" not in res and res["stats"]["sent"] == 0)
+        ks_status = con.execute("SELECT send_status FROM target_list_members WHERE list_id=? AND company_id=?",
+                                 (ks_list_id, clean_company)).fetchone()["send_status"]
+        t("Kill Switchで止まった結果がtarget_list_membersにSTOPPEDとして同期される",
+          ks_status == "STOPPED", f"status={ks_status}")
+        con.execute("DELETE FROM touches WHERE campaign_id=(SELECT campaign_id FROM target_lists WHERE id=?)",
+                     (ks_list_id,))
+        con.execute("DELETE FROM campaigns WHERE id=(SELECT campaign_id FROM target_lists WHERE id=?)",
+                     (ks_list_id,))
+        con.execute("DELETE FROM target_list_members WHERE list_id=?", (ks_list_id,))
+        con.execute("DELETE FROM target_lists WHERE id=?", (ks_list_id,))
+        con.commit()
+    else:
+        t("Kill Switch単体テスト", False, "適切な企業が見つからずスキップ")
 
     st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
                       {"subject": "2回目", "body": "2回目"}, token=key_a)

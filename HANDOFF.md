@@ -556,6 +556,40 @@ DNSが未反映のまま起動すると、Caddyは証明書取得に失敗して
     自動では再試行されない。危険な方向(二重送信)ではなく安全な方向
     (未送信のまま止まる)の失敗モードなので許容したが、運用上は
     `idempotency`テーブルの古い未確定行を定期的に監視するとよい
+- **P0-5 企業1社単位の送信結果・履歴**: 新規の記録用テーブルは作らず、
+  既存の`target_list_members`(1社×1リストの「現在の状態」)と
+  `form_send_log`(1試行ごとの「履歴」。もともと1試行=1行で追記されるため、
+  何もしなくても時系列の履歴になっている)を拡張して対応した
+  - `target_list_members`に`send_status`(PENDING/PROCESSING/SUCCESS/SKIP/
+    FAILED_RETRYABLE/FAILED_UNSUPPORTED/STOPPED)・`reason_code`・
+    `retry_count`・`last_error`・`latest_result`・`started_at`〜`updated_at`・
+    返信/商談化/受注の手動記録用列(`replied`/`deal`/`won`とその日時・`memo`)を追加
+  - `db.sync_target_list_member_status()`: `send_list()`が`send_campaign()`を
+    呼んだ直後(dry_run=falseのときだけ)に呼び、結果を`target_list_members`へ
+    反映する。**重要な落とし穴を発見して回避した**: `touches.sent_at`は
+    dry_run/実送信を問わず成功時に同じ形で立つため、「sent_atがある=実送信
+    成功」と単純判定すると、過去にdry_runで「送信」した企業を後で本番送信した
+    際にまとめて誤ってSUCCESS扱いにしてしまう。`SendResult.provider_id`が
+    dry_run時は必ず`mock_`接頭辞になる既存の規約を使い、`touches.note`の
+    `provider_id=mock_`有無で実送信かどうかを判別するようにした
+  - PROCESSING状態は、その回に`send_campaign()`が実際に対象とする行
+    (`sent_at IS NULL`の行)だけに絞って立てる(全件に立てると、対象外の
+    既送信分がPROCESSINGのまま更新されず止まって見えてしまうため)
+  - `GET /api/tenant/lists/<id>`は`?status=success|failed|skip|pending|
+    replied|deal|won`で絞り込めるようにした(許可リスト方式。フリーテキストで
+    SQLを組み立てない)
+  - `POST /api/tenant/lists/<id>/outcome`: 返信・商談化・受注を担当者が
+    手動記録する(β版はメール自動取得等をしない)。list_id経由でテナント境界を
+    確認するため、他テナントのリストへは記録できない(404)
+  - **原価計測**: `form_send_log`に`list_id`・`retry_count`・
+    `execution_seconds`・AI/外部API/サーバー原価の列を追加。`config.py`に
+    `SERVER_MONTHLY_COST_YEN`(概算値。実績に合わせて更新する)と、
+    実行時間から月額費用を按分する`estimate_server_cost_yen()`、モデル別
+    APIの単価テーブル`AI_PRICING_YEN_PER_TOKEN`(現状フォーム送信はAIを
+    使わないため空。将来compose.py等を接続する前提の器)を追加。
+    `R.retry()`が同じ`_deliver()`を複数回呼ぶ既存の仕組みにより、retryのたびに
+    `form_send_log`へ1行ずつ記録される(=失敗が多いフォームほど原価が
+    積み上がって見える設計に、追加のコードなしで既になっている)
 
 ---
 

@@ -66,3 +66,29 @@ FORM_MAX_PER_RUN = 50              # 1回の実行(cron/API呼び出し1回)あ�
 FORM_MAX_PER_HOUR = 20             # 直近1時間の試行数上限(成否問わずカウント)
 FORM_MAX_PER_DAY = 100             # 直近24時間の試行数上限
 FORM_MAX_PER_TENANT_PER_DAY = 100  # テナントごとの直近24時間の試行数上限
+
+# ── 原価計測(1送信あたりのコスト把握。β版・概算値) ──
+# 厳密なクラウド原価配賦ではなく、事業判断に使える推定値を出すのが目的。
+# サーバー月額費用を実行時間で按分する(実行時間ベースの単純な比例配分)。
+SERVER_MONTHLY_COST_YEN = 15000  # Hetzner等の月額実費。実績に合わせて更新する
+
+def estimate_server_cost_yen(execution_seconds):
+    """実行時間(秒)から、月額サーバー費用の按分としての推定原価を返す。"""
+    if not execution_seconds:
+        return 0.0
+    seconds_per_month = 30 * 24 * 3600
+    return SERVER_MONTHLY_COST_YEN * (execution_seconds / seconds_per_month)
+
+
+# モデルごとのAPI単価(1トークンあたり円)。ハードコードで散らばらせず、ここ1箇所を
+# 更新すれば全体に反映される構造にする。現状フォーム送信はAIを使っていないため
+# 実際の呼び出し箇所は無いが、将来compose.py等をここに接続する前提で用意しておく。
+AI_PRICING_YEN_PER_TOKEN = {
+    # "claude-sonnet-5": {"input": 0.0045, "output": 0.0225},  # 例: $3/$15 per 1M tokens換算
+}
+
+def estimate_ai_cost_yen(model, tokens_input, tokens_output):
+    price = AI_PRICING_YEN_PER_TOKEN.get(model)
+    if not price or not (tokens_input or tokens_output):
+        return 0.0
+    return tokens_input * price["input"] + tokens_output * price["output"]

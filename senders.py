@@ -20,6 +20,7 @@ senders.py — 送信アダプタ層
 """
 import json
 import re
+import time as _time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -244,17 +245,25 @@ _SKIP_STATUSES = {"SKIP_CAPTCHA", "SKIP_NO_SOLICIT", "SKIP_RECRUIT_ONLY", "SKIP_
 
 
 def _log_form_send(con, company_id, result, target_url, tenant_id=None, offer_id=None,
-                    started_at=None, keep_debug_fields=False):
+                    list_id=None, started_at=None, keep_debug_fields=False,
+                    retry_count=0, execution_seconds=None):
     """form_send_logへ1試行分を記録する。個人情報配慮のため入力内容そのものは残さない。
     keep_debug_fields=Trueの間だけfinal_url/page_title/page_text_snippetを保存する
-    (検証中のみ想定。page_text_snippetは成功判定できなかった原因調査用)。"""
+    (検証中のみ想定。page_text_snippetは成功判定できなかった原因調査用)。
+
+    retry_count・execution_secondsは1送信あたりの原価把握のための最小限の計測。
+    厳密な原価計算ではなく事業判断に使える概算値を残すのが目的(config.py参照)。
+    AI課金はこの経路では発生しない(フォーム自動送信はAIを使わない)ため0のまま。"""
+    import config as C
+    server_cost = C.estimate_server_cost_yen(execution_seconds)
     con.execute("""INSERT INTO form_send_log
-        (company_id, tenant_id, offer_id, target_url, contact_url, started_at, finished_at,
+        (company_id, tenant_id, offer_id, list_id, target_url, contact_url, started_at, finished_at,
          status, reason_code, detected_fields, filled_fields, submit_attempted,
          success_evidence, error_message, retryable, playwright_run_id, final_url, page_title,
-         page_text_snippet)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (company_id, tenant_id, offer_id, target_url, result.contact_url_used,
+         page_text_snippet, retry_count, execution_seconds, ai_tokens_input, ai_tokens_output,
+         ai_cost_yen, external_api_cost_yen, estimated_server_cost_yen, total_estimated_cost_yen)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (company_id, tenant_id, offer_id, list_id, target_url, result.contact_url_used,
          started_at or datetime.now().isoformat(timespec="seconds"),
          datetime.now().isoformat(timespec="seconds"),
          result.status, result.reason_code,
@@ -264,7 +273,8 @@ def _log_form_send(con, company_id, result, target_url, tenant_id=None, offer_id
          1 if result.status == "FAILED_RETRYABLE" else 0, result.run_id,
          result.final_url if keep_debug_fields else None,
          result.page_title if keep_debug_fields else None,
-         result.page_text_snippet if keep_debug_fields else None))
+         result.page_text_snippet if keep_debug_fields else None,
+         retry_count, execution_seconds, 0, 0, 0.0, 0.0, server_cost, server_cost))
     con.commit()
 
 
@@ -277,12 +287,17 @@ class FormSender(BaseSender):
     rate_service = "form_submit"
     URL_RE = re.compile(r"^https?://", re.I)
 
-    def __init__(self, con, dry_run=True, tenant_id=None, offer_id=None, keep_debug_fields=False):
+    def __init__(self, con, dry_run=True, tenant_id=None, offer_id=None, list_id=None,
+                 keep_debug_fields=False):
         super().__init__(con, dry_run=dry_run)
         self.tenant_id = tenant_id
         self.offer_id = offer_id
+        self.list_id = list_id
         self.keep_debug_fields = keep_debug_fields
         self._run_count = 0  # このインスタンス(=1回の実行)での試行数
+        self._attempt_count = 0  # このインスタンス(=1社への1回のsend())での試行回数。
+                                  # R.retry()が_deliver()を再試行するたびに増える。
+                                  # retry_countとしてform_send_logに残す(原価計測用)
 
     def _check_quota(self):
         """cron/API呼び出し1回あたり・直近1時間・直近24時間・テナット別の上限を見る。
@@ -333,6 +348,7 @@ class FormSender(BaseSender):
         if self.dry_run:
             return SendResult(ok=True, provider_id=f"mock_form_{uuid.uuid4().hex[:10]}")
 
+        self._attempt_count += 1
         quota_ok, quota_reason = self._check_quota()
         if not quota_ok:
             # 上限に達した場合はPlaywrightを一切起動しない(相手サイトへのアクセス自体が
@@ -343,13 +359,16 @@ class FormSender(BaseSender):
 
         import form_navigator as FN
         started_at = datetime.now().isoformat(timespec="seconds")
+        t0 = _time.monotonic()
         values = {"company": sender.name, "name": sender.name, "email": sender.email,
                   "phone": "", "subject": subject or "", "message": body,
                   "furigana": "アシベース"}
         result = FN.navigate_and_submit(to.contact_url, values)
+        execution_seconds = _time.monotonic() - t0
         _log_form_send(self.con, to.company_id, result, to.contact_url,
-                        tenant_id=self.tenant_id, offer_id=self.offer_id,
-                        started_at=started_at, keep_debug_fields=self.keep_debug_fields)
+                        tenant_id=self.tenant_id, offer_id=self.offer_id, list_id=self.list_id,
+                        started_at=started_at, keep_debug_fields=self.keep_debug_fields,
+                        retry_count=self._attempt_count - 1, execution_seconds=execution_seconds)
 
         if result.status == "SUCCESS":
             return SendResult(ok=True, provider_id=f"form_{result.run_id}",
@@ -367,12 +386,12 @@ class FormSender(BaseSender):
 REGISTRY = {s.channel: s for s in (MailSender, FaxSender, SmsSender, PostSender, FormSender)}
 
 
-def get_sender(channel, con, dry_run=True, tenant_id=None, offer_id=None):
+def get_sender(channel, con, dry_run=True, tenant_id=None, offer_id=None, list_id=None):
     cls = REGISTRY.get(channel)
     if not cls:
         raise ValueError(f"未対応チャネル: {channel}")
     if cls is FormSender:
-        return cls(con, dry_run=dry_run, tenant_id=tenant_id, offer_id=offer_id)
+        return cls(con, dry_run=dry_run, tenant_id=tenant_id, offer_id=offer_id, list_id=list_id)
     return cls(con, dry_run=dry_run)
 
 
@@ -384,13 +403,14 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
 
     q = """SELECT t.id tid, t.channel, t.subject, t.body, t.company_id, t.step,
                   c.name, c.email, c.fax, c.phone, c.address, c.contact_url,
-                  o.id offer_id, tn.id tenant_id,
+                  o.id offer_id, tn.id tenant_id, tl.id list_id,
                   tn.sender_name sname, tn.sender_email, tn.sender_address, tn.optout_url
            FROM touches t
            JOIN companies c ON c.id = t.company_id
            LEFT JOIN campaigns cp ON cp.id = t.campaign_id
            LEFT JOIN offers o ON o.id = COALESCE(cp.offer_id, 1)
            LEFT JOIN tenants tn ON tn.id = o.tenant_id
+           LEFT JOIN target_lists tl ON tl.campaign_id = t.campaign_id
            WHERE t.campaign_id=? AND t.step=? AND t.sent_at IS NULL
              AND t.body IS NOT NULL AND t.body != ''"""
     p = [campaign_id, step]
@@ -436,7 +456,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
                        contact_url=r["contact_url"])
 
         adapter = get_sender(r["channel"], con, dry_run=dry_run,
-                              tenant_id=r["tenant_id"], offer_id=r["offer_id"])
+                              tenant_id=r["tenant_id"], offer_id=r["offer_id"], list_id=r["list_id"])
         key = R.Idempotency.key("send", campaign_id, r["company_id"], step)
         res = adapter.send(to, sender, r["subject"], r["body"], key)
 
@@ -544,6 +564,28 @@ if __name__ == "__main__":
         print(f"  5スレッド同時送信 → 実送信扱い{sent_count}件 / スキップ{5 - sent_count}件")
         print(f"  {'✓' if sent_count == 1 else '✗'} 5スレッド同時でも実際に送るのは1回だけ")
         con.execute("DELETE FROM idempotency WHERE key LIKE 'test:race:%'"); con.commit()
+
+        print("\n── 原価計測(form_send_logへの記録) ──")
+        # 実際にPlaywrightを起動せず、_log_form_send()だけを直接呼んで
+        # 原価計測(execution_seconds→estimated_server_cost_yen、retry_countの
+        # 記録)が正しく効くことを確認する。
+        import form_navigator as FN
+        con.execute("DELETE FROM form_send_log WHERE company_id=999999"); con.commit()
+        fake_result = FN.NavigationResult(status="SUCCESS", reason_code="success_text_matched",
+                                          contact_url_used="https://example.co.jp/contact/",
+                                          submit_attempted=True, success_evidence="ok")
+        _log_form_send(con, 999999, fake_result, "https://example.co.jp/contact/",
+                       tenant_id=1, list_id=None, retry_count=2, execution_seconds=30.0)
+        logged = con.execute("""SELECT retry_count, execution_seconds, estimated_server_cost_yen,
+            total_estimated_cost_yen FROM form_send_log WHERE company_id=999999
+            ORDER BY id DESC LIMIT 1""").fetchone()
+        print(f"  retry_count={logged['retry_count']} execution_seconds={logged['execution_seconds']} "
+              f"estimated_server_cost_yen={logged['estimated_server_cost_yen']:.4f}円")
+        ok_cost = (logged["retry_count"] == 2 and logged["execution_seconds"] == 30.0
+                   and logged["estimated_server_cost_yen"] > 0
+                   and logged["total_estimated_cost_yen"] == logged["estimated_server_cost_yen"])
+        print(f"  {'✓' if ok_cost else '✗'} retry_count・execution_seconds・推定原価が記録される")
+        con.execute("DELETE FROM form_send_log WHERE company_id=999999"); con.commit()
 
         print("\n── フォーム自動送信(dry run) ──")
         fm = FormSender(con, dry_run=True)

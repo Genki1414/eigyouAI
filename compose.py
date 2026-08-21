@@ -169,6 +169,10 @@ def main():
     con = db.connect()
     offer_row, offer_text = load_offer(con, a.offer)
     print(f"オファー: {offer_row['name']}")
+    # キャンペーンが使うオファーをここで確定する。send_campaign()側はこれを見て
+    # テナント(送信者情報)を解決するため、未設定のままだと送信時に解決できない
+    con.execute("UPDATE campaigns SET offer_id=? WHERE id=?", (a.offer, a.campaign))
+    con.commit()
     rows = con.execute("""SELECT t.id AS tid, t.channel, t.variant,
                                  c.name, c.pref, c.trades, c.est_employees, c.enrich_note
                           FROM touches t JOIN companies c ON c.id=t.company_id

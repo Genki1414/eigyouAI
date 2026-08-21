@@ -348,10 +348,12 @@ class FormSender(BaseSender):
 REGISTRY = {s.channel: s for s in (MailSender, FaxSender, SmsSender, PostSender, FormSender)}
 
 
-def get_sender(channel, con, dry_run=True):
+def get_sender(channel, con, dry_run=True, tenant_id=None, offer_id=None):
     cls = REGISTRY.get(channel)
     if not cls:
         raise ValueError(f"未対応チャネル: {channel}")
+    if cls is FormSender:
+        return cls(con, dry_run=dry_run, tenant_id=tenant_id, offer_id=offer_id)
     return cls(con, dry_run=dry_run)
 
 
@@ -363,11 +365,12 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
 
     q = """SELECT t.id tid, t.channel, t.subject, t.body, t.company_id, t.step,
                   c.name, c.email, c.fax, c.phone, c.address, c.contact_url,
+                  o.id offer_id, tn.id tenant_id,
                   tn.name sname, tn.sender_email, tn.sender_address, tn.optout_url
            FROM touches t
            JOIN companies c ON c.id = t.company_id
            LEFT JOIN campaigns cp ON cp.id = t.campaign_id
-           LEFT JOIN offers o ON o.id = 1
+           LEFT JOIN offers o ON o.id = COALESCE(cp.offer_id, 1)
            LEFT JOIN tenants tn ON tn.id = o.tenant_id
            WHERE t.campaign_id=? AND t.step=? AND t.sent_at IS NULL
              AND t.body IS NOT NULL AND t.body != ''"""
@@ -401,7 +404,8 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
                        fax=r["fax"], phone=r["phone"], address=r["address"],
                        contact_url=r["contact_url"])
 
-        adapter = get_sender(r["channel"], con, dry_run=dry_run)
+        adapter = get_sender(r["channel"], con, dry_run=dry_run,
+                              tenant_id=r["tenant_id"], offer_id=r["offer_id"])
         key = R.Idempotency.key("send", campaign_id, r["company_id"], step)
         res = adapter.send(to, sender, r["subject"], r["body"], key)
 

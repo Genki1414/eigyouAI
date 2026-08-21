@@ -232,6 +232,18 @@ mikomeruの「リスト取得」機能で業種(とび・土工工事/解体工�
   `deploy/crontab`の送信行は`flock -n /tmp/eigyouai_send.lock`でラップし、
   前回実行が終わっていない場合は待たずにスキップする(実サイトへの送信は
   取り消せないため、二重実行より「今回はスキップ」の方が安全という判断)
+- チェックリスト9番(テナント・オファー単位で送信できる)対応。実は`send_campaign()`
+  が`LEFT JOIN offers o ON o.id = 1`とオファーIDを固定していたため、
+  `compose.py --offer`で別オファーを指定して文面生成しても、送信時の送信者情報
+  ([FormSender]の`tenant_id`/`offer_id`含む)は常にオファー1のテナントに固定される
+  という不具合が判明。`campaigns`に`offer_id`列を追加し、`compose.py`が
+  `--campaign`実行時に`campaigns.offer_id`を確定させ、`send_campaign()`は
+  `COALESCE(cp.offer_id, 1)`(旧キャンペーンとの後方互換用)でオファー→テナントを
+  解決し、`get_sender()`経由で`FormSender`に正しい`tenant_id`/`offer_id`が渡る
+  ように修正。これにより`FORM_MAX_PER_TENANT_PER_DAY`のテナント別上限も
+  本番経路で実際に機能するようになった。`run.py all --demo`・`api.py test`
+  (`can_contact()`バイパス防止テスト含む)・`test_pipeline.py`・
+  `test_concurrency.py`で回帰なしを確認済み
 - チェックリスト3番(重複送信0件)・4番(配信停止企業への誤送信0件)は、
   `FormSender`が既存の`db.can_contact()`(接触ガード)・`Idempotency`(冪等性)の
   仕組みをそのまま利用しており、これらのコードパス自体は今回のPlaywright化で

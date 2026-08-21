@@ -188,6 +188,7 @@ def migrate(con):
         ("companies", "data_source", "TEXT"),  # NULL=国交省名簿(既定) / "mikomeru"=mikomeru由来の新規追加
         ("touches", "step", "INTEGER DEFAULT 1"),
         ("form_send_log", "page_text_snippet", "TEXT"),  # 成功判定できなかった原因調査用
+        ("campaigns", "offer_id", "INTEGER"),  # compose.pyで確定したオファー。送信時のテナント解決に使う
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:

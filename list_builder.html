@@ -169,8 +169,28 @@ tr.clickable:hover{background:var(--blue-soft)}
 
       <section class="page" data-page="tmpl-body">
         <h2>送信文章テンプレート <span>MESSAGE TEMPLATES</span></h2>
-        <div class="card"><p class="hint">準備中の機能です。現在は送信のたびに件名・本文を入力する形式です。
-          よく使う文面をテンプレートとして保存できる機能を追加予定です。</p></div>
+        <div class="card">
+          <p class="hint">よく使う件名・本文をテンプレートとして保存できます。保存済みリストの
+            送信画面で選択すると、件名・本文が自動で入力されます。</p>
+          <div class="row" style="margin-top:10px">
+            <div>
+              <label>テンプレート名</label>
+              <input type="text" id="tName" placeholder="例: 初回案内">
+            </div>
+            <div>
+              <label>件名</label>
+              <input type="text" id="tSubject" placeholder="例: 積算のお手伝いをさせてください">
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label>本文</label>
+            <textarea id="tBody" rows="4" placeholder="本文を入力してください"></textarea>
+          </div>
+          <div class="btnrow"><button id="btnSaveTemplate">保存</button></div>
+          <div id="tmplResult"></div>
+        </div>
+        <h2 style="margin-top:20px">保存済みテンプレート <span>SAVED</span></h2>
+        <div id="tmplListWrap"><div class="empty">接続すると表示されます</div></div>
       </section>
 
       <section class="page" data-page="tmpl-sender">
@@ -341,6 +361,7 @@ function goPage(pageId) {
   if (pageId === "home") refreshHomeStats();
   if (pageId === "sendlog") refreshSendLog();
   if (pageId === "exclude") refreshExclusions();
+  if (pageId === "tmpl-body") refreshTemplates();
 }
 document.querySelectorAll(".navitem").forEach(item => {
   if (item.id === "navLogout") return; // ログアウトは専用ハンドラ(下)で扱う
@@ -436,7 +457,7 @@ document.getElementById("fCapital").addEventListener("change", e => {
   });
 });
 
-let API = "", KEY = "", connected = false, lastLists = [];
+let API = "", KEY = "", connected = false, lastLists = [], lastTemplates = [];
 const $ = id => document.getElementById(id);
 
 // このページがapi.py自身から配信されている場合は、同一オリジンを既定値にする
@@ -465,6 +486,7 @@ $("btnConnect").addEventListener("click", async () => {
   localStorage.setItem("eigyouai_api_key", KEY);
   try {
     await refreshLists();
+    await refreshTemplates();
     setConnStatus("接続済み", "on");
     connected = true;
     ["btnSaveFilter", "btnUploadCsv"].forEach(id => $(id).disabled = false);
@@ -573,6 +595,47 @@ $("exQuery").addEventListener("input", () => {
   exSearchTimer = setTimeout(runExclusionSearch, 250);
 });
 
+async function refreshTemplates() {
+  if (!connected) return;
+  const r = await call("/api/tenant/templates");
+  lastTemplates = r.templates;
+  const el = $("tmplListWrap");
+  if (!lastTemplates.length) { el.innerHTML = `<div class="empty">保存済みテンプレートはありません</div>`; return; }
+  el.innerHTML = `<table><tr><th>名前</th><th>件名</th><th>作成日時</th><th></th></tr>` +
+    lastTemplates.map(x => `<tr><td>${x.name}</td><td>${x.subject}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.created_at}</td>
+      <td><button class="ghost tmplDeleteBtn" data-id="${x.id}">削除</button></td></tr>`).join("") +
+    `</table>`;
+  el.querySelectorAll(".tmplDeleteBtn").forEach(btn => {
+    btn.addEventListener("click", () => deleteTemplate(Number(btn.dataset.id)));
+  });
+}
+
+async function deleteTemplate(id) {
+  try {
+    await call("/api/tenant/templates/delete", { method: "POST", body: JSON.stringify({ template_id: id }) });
+    await refreshTemplates();
+  } catch (e) {
+    $("tmplListWrap").innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+$("btnSaveTemplate").addEventListener("click", async () => {
+  const name = $("tName").value.trim();
+  const subject = $("tSubject").value.trim();
+  const body = $("tBody").value.trim();
+  const el = $("tmplResult");
+  if (!name || !subject || !body) { el.innerHTML = `<div class="result err">名前・件名・本文をすべて入力してください</div>`; return; }
+  try {
+    await call("/api/tenant/templates", { method: "POST", body: JSON.stringify({ name, subject, body }) });
+    el.innerHTML = `<div class="result ok">保存しました</div>`;
+    $("tName").value = ""; $("tSubject").value = ""; $("tBody").value = "";
+    await refreshTemplates();
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+});
+
 function currentFilters() {
   const prefs = [...prefsWrap.querySelectorAll("input:checked")].map(c => c.value);
   const trades = [...document.querySelectorAll("#fTrades input:checked")].map(c => c.value);
@@ -671,6 +734,13 @@ async function showDetail(id) {
       <div class="card">
         <p class="hint">問い合わせページが確認できている企業のみが送信対象になります。
           ドライランでは実際のサイトへは何も送信されません(動作確認用)。</p>
+        <div style="margin-top:10px">
+          <label>テンプレートを使う(任意)</label>
+          <select id="sendTemplate">
+            <option value="">選択しない(件名・本文を直接入力)</option>
+            ${lastTemplates.map(x => `<option value="${x.id}">${x.name}</option>`).join("")}
+          </select>
+        </div>
         <div class="row" style="margin-top:10px">
           <div><label>件名</label><input type="text" id="sendSubject" placeholder="例: 積算のお手伝いをさせてください"></div>
           <div><label>本文</label><textarea id="sendBody" rows="3" placeholder="本文を入力してください"></textarea></div>
@@ -686,6 +756,11 @@ async function showDetail(id) {
       `<table><tr><th>会社名</th><th>都道府県</th><th>ランク</th><th>電話</th></tr>` +
       r.members.map(m => `<tr><td>${m.name}</td><td>${m.pref || "—"}</td>
         <td>${m.rank || "—"}</td><td>${m.phone || "—"}</td></tr>`).join("") + `</table>`;
+
+    $("sendTemplate").addEventListener("change", () => {
+      const tmpl = lastTemplates.find(x => String(x.id) === $("sendTemplate").value);
+      if (tmpl) { $("sendSubject").value = tmpl.subject; $("sendBody").value = tmpl.body; }
+    });
 
     const dryRunBox = $("sendDryRun"), dryRunLabel = $("sendDryRunLabel");
     dryRunBox.addEventListener("change", () => {

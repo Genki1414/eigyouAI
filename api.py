@@ -36,6 +36,9 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/tenant/exclusions/remove   {"company_id"} → 除外を解除
                            除外はテナント別(tenant_exclusions)。全テナント共通の
                            法令対応suppressionとは別物で、can_contact()が両方を見る
+  GET  /api/tenant/templates      自テナントの送信文章テンプレート一覧
+  POST /api/tenant/templates           {"name","subject","body"} → 保存
+  POST /api/tenant/templates/delete    {"template_id"} → 削除
   ※ Authorization: Bearer <tenant.api_key>。テナントIDはこのキーからサーバ側で
     解決し、リクエストボディのtenant_idは一切信用しない(offers.resolve_tenant_by_key)
   GET  / , /list_builder.html  操作画面(list_builder.html)をこのサーバ自身から配信。
@@ -350,6 +353,29 @@ def h_tenant_exclusions_remove(con, tenant_id, data):
     return 200, {"ok": True}
 
 
+def h_tenant_templates_list(con, tenant_id):
+    return 200, {"templates": db.list_message_templates(con, tenant_id)}
+
+
+def h_tenant_templates_add(con, tenant_id, data):
+    name = (data.get("name") or "").strip()
+    subject = (data.get("subject") or "").strip()
+    body = (data.get("body") or "").strip()
+    if not name or not subject or not body:
+        return 400, {"error": "name・subject・bodyはすべて必須です"}
+    tid = db.add_message_template(con, tenant_id, name, subject, body)
+    return 200, {"ok": True, "template_id": tid}
+
+
+def h_tenant_templates_delete(con, tenant_id, data):
+    template_id = data.get("template_id")
+    if not isinstance(template_id, int):
+        return 400, {"error": "template_idは必須です"}
+    if not db.delete_message_template(con, tenant_id, template_id):
+        return 404, {"error": "テンプレートが見つかりません"}
+    return 200, {"ok": True}
+
+
 def h_tenant_list_send(con, tenant_id, list_id, data):
     """保存済みリストから実際にフォーム自動送信キャンペーンを走らせる。
     dry_runは既定でTrue(=実サイトへは何も送らない)。実送信するには
@@ -462,6 +488,22 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
+        if path in ("/api/tenant/templates", "/api/tenant/templates/delete"):
+            con = self._con()
+            try:
+                tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
+                if not tenant:
+                    return self._json(401, {"error": "unauthorized"})
+                if path == "/api/tenant/templates":
+                    st, res = h_tenant_templates_add(con, tenant["id"], data)
+                else:
+                    st, res = h_tenant_templates_delete(con, tenant["id"], data)
+                return self._json(st, res)
+            except Exception as e:  # noqa: BLE001
+                return self._json(500, {"error": str(e)[:200]})
+            finally:
+                con.close()
+
         con = self._con()
         try:
             if path == "/api/signup":
@@ -508,7 +550,8 @@ class Handler(BaseHTTPRequestHandler):
         if (u.path == "/api/tenant/lists" or u.path.startswith("/api/tenant/lists/")
                 or u.path == "/api/tenant/send-log"
                 or u.path == "/api/tenant/exclusions"
-                or u.path == "/api/tenant/companies/search"):
+                or u.path == "/api/tenant/companies/search"
+                or u.path == "/api/tenant/templates"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -520,6 +563,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_exclusions_list(con, tenant["id"])
                 elif u.path == "/api/tenant/companies/search":
                     st, res = h_tenant_companies_search(con, tenant["id"], qs)
+                elif u.path == "/api/tenant/templates":
+                    st, res = h_tenant_templates_list(con, tenant["id"])
                 elif u.path == "/api/tenant/lists":
                     st, res = h_tenant_lists_list(con, tenant["id"])
                 else:
@@ -852,6 +897,33 @@ def self_test(port=8899):
     t("解除後はcan_contact()が再びTrueを返す", allowed_after is True)
 
     con.execute("DELETE FROM tenant_exclusions WHERE tenant_id IN (?,?)", (tid_a, tid_b))
+    con.commit()
+
+    print("\n── 送信文章テンプレート ──")
+    st, r = post_auth("/api/tenant/templates", {"name": "初回案内", "subject": "件名"}, token=key_a)
+    t("bodyが無いと400", st == 400)
+    st, r = post_auth("/api/tenant/templates",
+                      {"name": "初回案内", "subject": "積算のお手伝い", "body": "本文です"}, token=key_a)
+    t("POST /api/tenant/templates でテンプレート保存", st == 200 and bool(r.get("template_id")))
+    tmpl_id = r.get("template_id")
+
+    st, r = get_auth("/api/tenant/templates", token=key_a)
+    t("GET /api/tenant/templates に保存した内容が出る",
+      st == 200 and any(x["id"] == tmpl_id and x["subject"] == "積算のお手伝い"
+                         for x in r.get("templates", [])))
+    st, r = get_auth("/api/tenant/templates", token=key_b)
+    t("他テナントのテンプレートは見えない(テナント分離)",
+      st == 200 and all(x["id"] != tmpl_id for x in r.get("templates", [])))
+
+    st, r = post_auth("/api/tenant/templates/delete", {"template_id": tmpl_id}, token=key_b)
+    t("他テナントのテンプレートは削除できない(404)", st == 404)
+    st, r = post_auth("/api/tenant/templates/delete", {"template_id": tmpl_id}, token=key_a)
+    t("POST /api/tenant/templates/delete で削除", st == 200 and r.get("ok"))
+    st, r = get_auth("/api/tenant/templates", token=key_a)
+    t("削除後はGET /api/tenant/templatesに出てこない",
+      st == 200 and all(x["id"] != tmpl_id for x in r.get("templates", [])))
+
+    con.execute("DELETE FROM message_templates WHERE tenant_id IN (?,?)", (tid_a, tid_b))
     con.commit()
 
     con.execute("DELETE FROM touches WHERE campaign_id=?", (send_campaign_id,))

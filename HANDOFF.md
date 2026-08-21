@@ -388,6 +388,17 @@ mikomeruの「リスト取得」機能で業種(とび・土工工事/解体工�
       戻ることを確認。テスト対象企業は「素の状態でcan_contact()がTrueの会社」を
       事前に選ぶようにした(他テスト区画の副作用で既に反応済み扱いの会社を
       誤って選ぶと、除外の効果を検証できないため)
+  - **送信文章テンプレート**(2/7): `message_templates`テーブル(id, tenant_id,
+    name, subject, body, created_at)を新設。送信自体には手を加えず、
+    `list_builder.html`の送信フォームに「テンプレートを使う」プルダウンを
+    追加して件名・本文を自動入力するだけの機能(送信経路は既存のまま)
+    - 新規API: `GET/POST /api/tenant/templates`、
+      `POST /api/tenant/templates/delete`(他テナントのテンプレートは
+      404で削除できない。テナント分離はDELETE文の`WHERE tenant_id=?`条件で担保)
+    - `list_builder.html`の`tmpl-body`ページ(保存・一覧・削除)と、
+      保存済みリストの送信フォームへの`<select id="sendTemplate">`追加
+    - api.py testに保存・一覧・テナント分離・削除(自テナント/他テナント)の
+      確認を追加
 - 未対応(次フェーズ): 顧客の新規登録・課金・自分でのAPIキー発行UI
 
 **⚠ 暫定措置・要対応(2026-08-21)**: `list_builder.html`の動作確認のため、

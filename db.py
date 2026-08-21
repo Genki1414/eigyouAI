@@ -25,6 +25,7 @@ CREATE INDEX IF NOT EXISTS idx_formlog_status ON form_send_log(status);
 CREATE INDEX IF NOT EXISTS idx_companies_owner ON companies(owner_tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tlist_tenant ON target_lists(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tlm_list ON target_list_members(list_id);
+CREATE INDEX IF NOT EXISTS idx_msgtmpl_tenant ON message_templates(tenant_id);
 """
 
 SCHEMA = """
@@ -89,6 +90,18 @@ CREATE TABLE IF NOT EXISTS tenant_exclusions (
   reason TEXT,
   created_at TEXT NOT NULL,
   PRIMARY KEY (tenant_id, company_id)
+);
+
+-- テナントが保存する送信文章テンプレート(件名・本文の定型文)。
+-- 送信自体は既存のtarget_lists.send_list()がそのまま担う。ここは
+-- フォームへ件名・本文を自動入力するための入れ物でしかない。
+CREATE TABLE IF NOT EXISTS message_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 -- 監査ログ: 誰がいつ何を実行したか。デューデリで運用実態を示す材料になる。
@@ -343,6 +356,28 @@ def list_tenant_exclusions(con, tenant_id):
         FROM tenant_exclusions e LEFT JOIN companies c ON c.id = e.company_id
         WHERE e.tenant_id=? ORDER BY e.created_at DESC""", (tenant_id,)).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── 送信文章テンプレート(送信フォームの件名・本文を自動入力するための保存領域) ──
+def add_message_template(con, tenant_id, name, subject, body):
+    cur = con.execute("""INSERT INTO message_templates (tenant_id, name, subject, body, created_at)
+        VALUES (?,?,?,?,?)""",
+        (tenant_id, name, subject, body, datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    return cur.lastrowid
+
+
+def list_message_templates(con, tenant_id):
+    rows = con.execute("""SELECT id, name, subject, body, created_at FROM message_templates
+        WHERE tenant_id=? ORDER BY created_at DESC""", (tenant_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_message_template(con, tenant_id, template_id):
+    cur = con.execute("DELETE FROM message_templates WHERE id=? AND tenant_id=?",
+                       (template_id, tenant_id))
+    con.commit()
+    return cur.rowcount > 0
 
 
 # ── 許可番号の連番(社歴の代理変数) ──────────

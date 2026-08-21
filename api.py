@@ -53,6 +53,9 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/tenant/staff/revoke        {"staff_id"} → 担当者のapi_keyを失効
   GET  /api/tenant/announcements  公開中のお知らせ一覧(全テナント共通。
                            投稿はannouncements_cli.py、Web管理画面は作らない)
+  GET  /api/tenant/activity-log   自テナントの操作履歴(リスト作成・送信開始を
+                           時系列でまとめたもの。新規テーブルは持たず、
+                           target_lists/campaignsを突き合わせて作る)
   ※ Authorization: Bearer <tenant.api_key または staff.api_key>。テナントIDは
     このキーからサーバ側で解決し、リクエストボディのtenant_idは一切信用しない
     (offers.resolve_tenant_by_key。担当者ごとのキーでもテナント全体のキーでも
@@ -452,6 +455,11 @@ def h_tenant_announcements_list(con):
     return 200, {"announcements": db.list_announcements(con, published_only=True)}
 
 
+def h_tenant_activity_log(con, tenant_id, qs):
+    limit = min(int(qs.get("limit", ["100"])[0]), 500)
+    return 200, {"log": TL.activity_log(con, tenant_id, limit=limit)}
+
+
 def h_tenant_list_send(con, tenant_id, list_id, data):
     """保存済みリストから実際にフォーム自動送信キャンペーンを走らせる。
     dry_runは既定でTrue(=実サイトへは何も送らない)。実送信するには
@@ -665,7 +673,8 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/templates"
                 or u.path == "/api/tenant/sender-templates"
                 or u.path == "/api/tenant/staff"
-                or u.path == "/api/tenant/announcements"):
+                or u.path == "/api/tenant/announcements"
+                or u.path == "/api/tenant/activity-log"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -685,6 +694,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_staff_list(con, tenant["id"])
                 elif u.path == "/api/tenant/announcements":
                     st, res = h_tenant_announcements_list(con)
+                elif u.path == "/api/tenant/activity-log":
+                    st, res = h_tenant_activity_log(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/lists":
                     st, res = h_tenant_lists_list(con, tenant["id"])
                 else:
@@ -952,6 +963,19 @@ def self_test(port=8899):
     st, r = post_auth(f"/api/tenant/lists/{list_b_id}/send",
                       {"subject": "x", "body": "y"}, token=key_a)
     t("他テナントのリストへは送信できない(404)", st == 404)
+
+    print("\n── その他ログ(活動履歴) ──")
+    st, r = get_auth("/api/tenant/activity-log")
+    t("認証ヘッダなしのGET /api/tenant/activity-logは401", st == 401)
+    st, r = get_auth("/api/tenant/activity-log", token=key_a)
+    t("GET /api/tenant/activity-logにリスト作成イベントが出る",
+      st == 200 and any(e["type"] == "list_created" and "テストA_東京都" in e["detail"]
+                         for e in r.get("log", [])))
+    t("送信イベントも出る(初回送信時刻)",
+      any(e["type"] == "list_sent" and "テストA_東京都" in e["detail"] for e in r.get("log", [])))
+    st, r = get_auth("/api/tenant/activity-log", token=key_b)
+    t("他テナントのリスト作成イベントは見えない(テナント分離)",
+      st == 200 and all("テストA_東京都" not in e["detail"] for e in r.get("log", [])))
 
     print("\n── 自動送信ログ ──")
     # dry_runはform_send_logへ書かない(Playwrightに触れないため)ので、

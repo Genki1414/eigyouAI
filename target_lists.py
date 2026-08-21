@@ -285,6 +285,31 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True):
             "dry_run": dry_run, "stats": stats}
 
 
+def activity_log(con, tenant_id, limit=100):
+    """「その他ログ」画面向けの、テナントの操作履歴を時系列でまとめたもの。
+    新しい記録用テーブルは作らず、既存のtarget_lists/campaignsをそのまま
+    突き合わせて作る(リスト作成イベントと、初回送信のタイミングの2種類)。
+    再送信は同じcampaign_idを使い回す仕様(send_list()参照)なので、
+    「送信」イベントは初回送信時刻のみを表す(リストごとに1件)。"""
+    events = []
+    for l in con.execute("""SELECT id, name, source, company_count, created_at
+            FROM target_lists WHERE tenant_id=?""", (tenant_id,)).fetchall():
+        kind = "CSVから作成" if l["source"] == "csv" else "条件から作成"
+        events.append({
+            "at": l["created_at"], "type": "list_created",
+            "detail": f"リスト「{l['name']}」を{kind}({l['company_count']:,}社)",
+        })
+    for r in con.execute("""SELECT tl.name, cp.started_at FROM target_lists tl
+            JOIN campaigns cp ON cp.id = tl.campaign_id
+            WHERE tl.tenant_id=?""", (tenant_id,)).fetchall():
+        events.append({
+            "at": r["started_at"], "type": "list_sent",
+            "detail": f"リスト「{r['name']}」への送信を開始",
+        })
+    events.sort(key=lambda e: e["at"], reverse=True)
+    return events[:limit]
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--api-key", required=True)

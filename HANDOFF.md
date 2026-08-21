@@ -445,6 +445,18 @@ mikomeruの「リスト取得」機能で業種(とび・土工工事/解体工�
     - `list_builder.html`の`news`ページを実装(一覧表示のみ)
     - api.py testに、未認証401・公開中のものだけ返る・非公開は出ない・
       全テナントに同じ内容が見えることの確認を追加
+  - **その他ログ**(6/7): 「自動送信ログ」(企業ごとのフォーム送信結果=
+    form_send_log)には出ない、テナントの操作履歴(リスト作成・送信開始)を
+    時系列でまとめた画面。設計方針どおり新規の記録用テーブルは作らず、
+    既存の`target_lists`(作成イベント)と`campaigns`(送信開始イベント。
+    `target_lists.campaign_id`経由で紐付け)を突き合わせて動的に作る
+    - `target_lists.activity_log(con, tenant_id, limit)`を新設。同じリストへの
+      再送信は同じcampaign_idを使い回す仕様(send_list()参照)なので、
+      「送信開始」イベントはリストごとに初回送信時刻のみを表す
+    - 新規API: `GET /api/tenant/activity-log`
+    - `list_builder.html`の`otherlog`ページを実装(一覧表示)
+    - api.py testに、未認証401・リスト作成/送信イベントが出ること・
+      テナント分離の確認を追加
 - 未対応(次フェーズ): 顧客の新規登録・課金・自分でのAPIキー発行UI
 
 **⚠ 暫定措置・要対応(2026-08-21)**: `list_builder.html`の動作確認のため、

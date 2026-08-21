@@ -3,23 +3,43 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>足場AI営業エンジン — 送信先リスト作成</title>
+<title>足場AI営業エンジン — 送信先リスト管理</title>
 <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700;900&family=IBM+Plex+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
 <style>
 :root{
   --concrete:#EFF1F2; --surface:#FFFFFF; --ink:#16191D; --steel:#6E7880;
   --line:#DDE1E4; --safety:#F2C511; --blue:#24589E; --blue-soft:#E8EFF8;
   --win:#1E7A4D; --warn:#B4441F; --mono:'IBM Plex Mono',monospace;
+  --sidebar-fg:#C7CCD6; --sidebar-fg-dim:#8A93A6;
 }
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:var(--concrete);color:var(--ink);font-family:'IBM Plex Sans JP',sans-serif;font-size:14px;line-height:1.6}
-.stripe{height:8px;background:repeating-linear-gradient(-45deg,var(--safety) 0 14px,var(--ink) 14px 28px)}
-header{background:var(--surface);border-bottom:1px solid var(--line);padding:20px 24px 18px}
-.wrap{max-width:900px;margin:0 auto}
-h1{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:clamp(19px,4vw,24px);letter-spacing:.02em}
-h1 small{font-weight:700;font-size:11px;color:var(--steel);letter-spacing:.18em;display:block}
-main{max-width:900px;margin:0 auto;padding:8px 24px 60px}
-h2{font-family:'Zen Kaku Gothic New';font-weight:700;font-size:15px;letter-spacing:.04em;margin:28px 0 10px;display:flex;align-items:center;gap:8px}
+html,body{height:100%}
+body{background:var(--concrete);color:var(--ink);font-family:'IBM Plex Sans JP',sans-serif;font-size:14px;line-height:1.6;
+  display:flex;flex-direction:column}
+.stripe{height:6px;background:repeating-linear-gradient(-45deg,var(--safety) 0 14px,var(--ink) 14px 28px);flex-shrink:0}
+.shell{display:flex;flex:1;min-height:0}
+
+/* サイドバー */
+.sidebar{width:220px;background:var(--ink);color:var(--sidebar-fg);flex-shrink:0;display:flex;flex-direction:column;overflow-y:auto}
+.sidebar .brand{padding:18px 16px 14px;border-bottom:1px solid rgba(255,255,255,.1)}
+.sidebar .brand b{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:15px;color:#fff;display:block}
+.sidebar .brand small{font-size:10px;color:var(--sidebar-fg-dim);letter-spacing:.14em}
+.sidebar nav{flex:1;padding:10px 0}
+.navgroup-label{font-size:10px;color:var(--sidebar-fg-dim);letter-spacing:.1em;padding:14px 16px 4px;text-transform:uppercase}
+.navitem{display:block;padding:9px 16px;font-size:13px;color:var(--sidebar-fg);cursor:pointer;
+  border-left:3px solid transparent;user-select:none}
+.navitem:hover{background:rgba(255,255,255,.06);color:#fff}
+.navitem.active{background:rgba(255,255,255,.1);color:#fff;border-left-color:var(--safety);font-weight:700}
+.sidebar .foot{padding:12px 16px;border-top:1px solid rgba(255,255,255,.1);font-size:11px;color:var(--sidebar-fg-dim)}
+
+/* メイン */
+.main-wrap{flex:1;display:flex;flex-direction:column;min-width:0;overflow-y:auto}
+.topbar{background:var(--surface);border-bottom:1px solid var(--line);padding:14px 24px;
+  display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.topbar h1{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:18px}
+.content{flex:1;padding:20px 24px 60px;max-width:1000px;width:100%}
+h2{font-family:'Zen Kaku Gothic New';font-weight:700;font-size:15px;letter-spacing:.04em;margin:24px 0 10px;display:flex;align-items:center;gap:8px}
+h2:first-child{margin-top:0}
 h2::before{content:"";width:4px;height:16px;background:var(--safety)}
 h2 span{font-family:var(--mono);font-size:11px;color:var(--steel);font-weight:500;letter-spacing:0}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px}
@@ -42,7 +62,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .result.ok{background:#E7F5EC;color:var(--win)}
 .result.err{background:#FBEAE4;color:var(--warn)}
 .status{font-family:var(--mono);font-size:11px;font-weight:600;padding:5px 12px;border-radius:99px;
-  display:inline-block;margin-top:8px}
+  display:inline-block}
 .status.on{background:#E7F5EC;color:var(--win)}
 .status.off{background:#FBEAE4;color:var(--warn)}
 table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);
@@ -54,104 +74,187 @@ tr.clickable:hover{background:var(--blue-soft)}
 .pill{display:inline-block;background:var(--concrete);border-radius:4px;padding:1px 8px;font-size:11px;font-family:var(--mono)}
 .hint{font-size:12px;color:var(--steel);margin-top:6px}
 .empty{color:var(--steel);font-size:13px;text-align:center;padding:16px}
-footer{text-align:center;font-size:11px;color:var(--steel);padding:24px}
+
+/* ホーム統計カード */
+.statcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.statcard{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px}
+.statcard.key{background:var(--ink);border-color:var(--ink)}
+.statcard.key b{color:var(--safety)}
+.statcard.key span{color:#B9BEC4}
+.statcard b{font-family:var(--mono);font-size:26px;font-weight:600;display:block;line-height:1.3}
+.statcard span{font-size:11px;color:var(--steel);letter-spacing:.04em}
+
+/* ページ切替 */
+.page{display:none}
+.page.active{display:block}
+
+@media(max-width:800px){
+  .shell{flex-direction:column}
+  .sidebar{width:100%;flex-direction:row;overflow-x:auto;overflow-y:visible}
+  .sidebar .brand,.sidebar .foot{display:none}
+  .sidebar nav{display:flex;padding:0}
+  .navgroup-label{display:none}
+  .navitem{white-space:nowrap;border-left:none;border-bottom:3px solid transparent}
+  .navitem.active{border-left:none;border-bottom-color:var(--safety)}
+  .row{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
 <div class="stripe"></div>
-<header><div class="wrap">
-  <h1><small>ASHIBA AI SALES ENGINE</small>送信先リスト作成</h1>
-  <div class="row" style="margin-top:10px">
-    <div>
-      <label>APIサーバURL</label>
-      <input type="text" id="apiBase" placeholder="https://例: your-server:8787">
-    </div>
-    <div>
-      <label>APIキー</label>
-      <input type="password" id="apiKey" placeholder="tk_...">
-    </div>
-  </div>
-  <div class="btnrow">
-    <button id="btnConnect">接続</button>
-    <span id="connStatus" class="status off">未接続</span>
-  </div>
-</div></header>
-<main>
-  <h2>共有マスタから条件で絞り込む <span>FILTER</span></h2>
-  <div class="card">
-    <div id="filterInputs">
-    <label>エリア(クリックで管内の都道府県をまとめて選択/解除)</label>
-    <div class="chips" id="fAreas"></div>
-    <label style="margin-top:10px">都道府県(複数選択可)</label>
-    <div class="chips" id="fPrefs"></div>
-    <label style="margin-top:10px">資本金の上限</label>
-    <div class="chips" id="fCapital">
-      <label class="chip"><input type="radio" name="fCapital" value="3000000">300万円以下</label>
-      <label class="chip"><input type="radio" name="fCapital" value="5000000">500万円以下</label>
-      <label class="chip"><input type="radio" name="fCapital" value="10000000">1,000万円以下</label>
-      <label class="chip"><input type="radio" name="fCapital" value="30000000">3,000万円以下</label>
-      <label class="chip"><input type="radio" name="fCapital" value="50000000">5,000万円以下</label>
-      <label class="chip"><input type="radio" name="fCapital" value="100000000">1億円以下</label>
-      <label class="chip on"><input type="radio" name="fCapital" value="" checked>指定しない</label>
-    </div>
-    <label>業種</label>
-    <div class="chips" id="fTrades">
-      <label class="chip"><input type="checkbox" value="tobi">とび・土工</label>
-      <label class="chip"><input type="checkbox" value="tosou">塗装</label>
-      <label class="chip"><input type="checkbox" value="kaitai">解体</label>
-    </div>
-    <label style="margin-top:10px">スコアランク</label>
-    <div class="chips" id="fRanks">
-      <label class="chip"><input type="checkbox" value="S">S</label>
-      <label class="chip"><input type="checkbox" value="A">A</label>
-      <label class="chip"><input type="checkbox" value="B">B</label>
-      <label class="chip"><input type="checkbox" value="C">C</label>
-    </div>
-    <div class="chips" id="fToggles" style="margin-top:10px">
-      <label class="chip"><input type="checkbox" id="fHiring">求人出稿中のみ</label>
-      <label class="chip"><input type="checkbox" id="fWebsite">HPありのみ</label>
-      <label class="chip"><input type="checkbox" id="fContact">問い合わせフォームURL確定済みのみ</label>
-    </div>
-    </div>
-    <div id="previewResult"></div>
-    <div class="row" style="margin-top:12px">
-      <div>
-        <label>リスト名</label>
-        <input type="text" id="fName" placeholder="例: 東京都_とび土工_Aランク">
-      </div>
-      <div style="display:flex;align-items:flex-end">
-        <button id="btnSaveFilter" disabled style="width:100%">このリストを保存</button>
-      </div>
-    </div>
-  </div>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><b>ASHIBA AI SALES ENGINE</b><small>送信先リスト管理</small></div>
+    <nav>
+      <div class="navitem active" data-page="home">ホーム</div>
+      <div class="navgroup-label">会社情報</div>
+      <div class="navitem" data-page="filter">条件でリスト作成</div>
+      <div class="navitem" data-page="csv">CSVから作成</div>
+      <div class="navitem" data-page="lists">保存済みリスト</div>
+      <div class="navgroup-label">設定</div>
+      <div class="navitem" data-page="conn">接続設定</div>
+    </nav>
+    <div class="foot" id="sidebarConn">未接続</div>
+  </aside>
 
-  <h2>自社の企業リストを取り込む <span>CSV UPLOAD</span></h2>
-  <div class="card">
-    <p class="hint">列名は「会社名/name」「都道府県/pref」「電話番号」「メール」「URL」等、
-      日本語・英語どちらでも認識します。会社名の列だけは必須です。既存データと商号が一致する行は
-      自動で紐付き、それ以外は御社専用の非公開データとして追加されます(他のお客様には見えません)。</p>
-    <div class="row" style="margin-top:10px">
-      <div>
-        <label>リスト名</label>
-        <input type="text" id="cName" placeholder="例: 自社保有リスト2026">
-      </div>
-      <div>
-        <label>CSVファイル</label>
-        <input type="file" id="cFile" accept=".csv,text/csv">
-      </div>
+  <div class="main-wrap">
+    <div class="topbar">
+      <h1 id="pageTitle">ホーム</h1>
+      <span id="connStatus" class="status off">未接続</span>
     </div>
-    <div class="btnrow">
-      <button id="btnUploadCsv" disabled>アップロード</button>
-    </div>
-    <div id="csvResult"></div>
-  </div>
+    <div class="content">
 
-  <h2>保存済みリスト <span>SAVED LISTS</span></h2>
-  <div id="listsWrap"><div class="empty">接続すると表示されます</div></div>
-  <div id="detailWrap"></div>
-</main>
-<footer>送信先リストの作成のみを行うツールです。実際の送信は別途キャンペーンに接続して行います。</footer>
+      <section class="page active" data-page="home">
+        <h2>今月の状況 <span>OVERVIEW</span></h2>
+        <div class="statcards" id="homeStats">
+          <div class="statcard"><b>—</b><span>保存済みリスト数</span></div>
+          <div class="statcard key"><b>—</b><span>対象企業数(合計)</span></div>
+        </div>
+        <h2>使い方</h2>
+        <div class="card">
+          <p class="hint">
+            1. 左メニューの「接続設定」でAPIキーを入力して接続します<br>
+            2. 「条件でリスト作成」で都道府県・業種・ランク等の条件を選ぶと、該当件数が自動で表示されます。名前を付けて保存できます<br>
+            3. 自社で持っている企業リストがあれば「CSVから作成」で取り込めます<br>
+            4. 作成したリストは「保存済みリスト」からいつでも確認できます
+          </p>
+        </div>
+      </section>
+
+      <section class="page" data-page="filter">
+        <h2>共有マスタから条件で絞り込む <span>FILTER</span></h2>
+        <div class="card">
+          <div id="filterInputs">
+          <label>エリア(クリックで管内の都道府県をまとめて選択/解除)</label>
+          <div class="chips" id="fAreas"></div>
+          <label style="margin-top:10px">都道府県(複数選択可)</label>
+          <div class="chips" id="fPrefs"></div>
+          <label style="margin-top:10px">資本金の上限</label>
+          <div class="chips" id="fCapital">
+            <label class="chip"><input type="radio" name="fCapital" value="3000000">300万円以下</label>
+            <label class="chip"><input type="radio" name="fCapital" value="5000000">500万円以下</label>
+            <label class="chip"><input type="radio" name="fCapital" value="10000000">1,000万円以下</label>
+            <label class="chip"><input type="radio" name="fCapital" value="30000000">3,000万円以下</label>
+            <label class="chip"><input type="radio" name="fCapital" value="50000000">5,000万円以下</label>
+            <label class="chip"><input type="radio" name="fCapital" value="100000000">1億円以下</label>
+            <label class="chip on"><input type="radio" name="fCapital" value="" checked>指定しない</label>
+          </div>
+          <label>業種</label>
+          <div class="chips" id="fTrades">
+            <label class="chip"><input type="checkbox" value="tobi">とび・土工</label>
+            <label class="chip"><input type="checkbox" value="tosou">塗装</label>
+            <label class="chip"><input type="checkbox" value="kaitai">解体</label>
+          </div>
+          <label style="margin-top:10px">スコアランク</label>
+          <div class="chips" id="fRanks">
+            <label class="chip"><input type="checkbox" value="S">S</label>
+            <label class="chip"><input type="checkbox" value="A">A</label>
+            <label class="chip"><input type="checkbox" value="B">B</label>
+            <label class="chip"><input type="checkbox" value="C">C</label>
+          </div>
+          <div class="chips" id="fToggles" style="margin-top:10px">
+            <label class="chip"><input type="checkbox" id="fHiring">求人出稿中のみ</label>
+            <label class="chip"><input type="checkbox" id="fWebsite">HPありのみ</label>
+            <label class="chip"><input type="checkbox" id="fContact">問い合わせフォームURL確定済みのみ</label>
+          </div>
+          </div>
+          <div id="previewResult"></div>
+          <div class="row" style="margin-top:12px">
+            <div>
+              <label>リスト名</label>
+              <input type="text" id="fName" placeholder="例: 東京都_とび土工_Aランク">
+            </div>
+            <div style="display:flex;align-items:flex-end">
+              <button id="btnSaveFilter" disabled style="width:100%">このリストを保存</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" data-page="csv">
+        <h2>自社の企業リストを取り込む <span>CSV UPLOAD</span></h2>
+        <div class="card">
+          <p class="hint">列名は「会社名/name」「都道府県/pref」「電話番号」「メール」「URL」等、
+            日本語・英語どちらでも認識します。会社名の列だけは必須です。既存データと商号が一致する行は
+            自動で紐付き、それ以外は御社専用の非公開データとして追加されます(他のお客様には見えません)。</p>
+          <div class="row" style="margin-top:10px">
+            <div>
+              <label>リスト名</label>
+              <input type="text" id="cName" placeholder="例: 自社保有リスト2026">
+            </div>
+            <div>
+              <label>CSVファイル</label>
+              <input type="file" id="cFile" accept=".csv,text/csv">
+            </div>
+          </div>
+          <div class="btnrow">
+            <button id="btnUploadCsv" disabled>アップロード</button>
+          </div>
+          <div id="csvResult"></div>
+        </div>
+      </section>
+
+      <section class="page" data-page="lists">
+        <h2>保存済みリスト <span>SAVED LISTS</span></h2>
+        <div id="listsWrap"><div class="empty">接続すると表示されます</div></div>
+        <div id="detailWrap"></div>
+      </section>
+
+      <section class="page" data-page="conn">
+        <h2>接続設定 <span>CONNECTION</span></h2>
+        <div class="card">
+          <div class="row">
+            <div>
+              <label>APIサーバURL</label>
+              <input type="text" id="apiBase" placeholder="https://例: your-server:8787">
+            </div>
+            <div>
+              <label>APIキー</label>
+              <input type="password" id="apiKey" placeholder="tk_...">
+            </div>
+          </div>
+          <div class="btnrow">
+            <button id="btnConnect">接続</button>
+          </div>
+          <p class="hint">APIキーはお客様ごとに発行されます。このブラウザにのみ保存され、サーバには送信内容以外保存されません。</p>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
 <script>
+// ── ナビゲーション(単一ページ内の切替。リロードなし) ──
+const PAGE_TITLES = {home:"ホーム", filter:"条件でリスト作成", csv:"CSVから作成", lists:"保存済みリスト", conn:"接続設定"};
+document.querySelectorAll(".navitem").forEach(item => {
+  item.addEventListener("click", () => {
+    document.querySelectorAll(".navitem").forEach(n => n.classList.toggle("active", n === item));
+    document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.dataset.page === item.dataset.page));
+    document.getElementById("pageTitle").textContent = PAGE_TITLES[item.dataset.page];
+    if (item.dataset.page === "home") refreshHomeStats();
+  });
+});
+
 // 8地方区分。エリアチップは「管内の都道府県チェックボックスをまとめて操作する」
 // だけのUI上のショートカットで、サーバへはprefs(都道府県の配列)としてのみ送る
 const AREAS = [
@@ -233,7 +336,7 @@ document.getElementById("fCapital").addEventListener("change", e => {
   });
 });
 
-let API = "", KEY = "", connected = false;
+let API = "", KEY = "", connected = false, lastLists = [];
 const $ = id => document.getElementById(id);
 
 // このページがapi.py自身から配信されている場合は、同一オリジンを既定値にする
@@ -251,23 +354,34 @@ async function call(path, opts) {
   return body;
 }
 
+function setConnStatus(text, cls) {
+  [$("connStatus"), $("sidebarConn")].forEach(el => { el.textContent = text; el.className = "status " + cls; });
+}
+
 $("btnConnect").addEventListener("click", async () => {
   API = $("apiBase").value.trim();
   KEY = $("apiKey").value.trim();
   localStorage.setItem("eigyouai_api_base", API);
   localStorage.setItem("eigyouai_api_key", KEY);
-  const st = $("connStatus");
   try {
     await refreshLists();
-    st.textContent = "接続済み"; st.className = "status on";
+    setConnStatus("接続済み", "on");
     connected = true;
     ["btnSaveFilter", "btnUploadCsv"].forEach(id => $(id).disabled = false);
     runPreview();
+    refreshHomeStats();
   } catch (e) {
     connected = false;
-    st.textContent = "接続失敗: " + e.message; st.className = "status off";
+    setConnStatus("接続失敗: " + e.message, "off");
   }
 });
+
+function refreshHomeStats() {
+  const totalCompanies = lastLists.reduce((a, l) => a + l.company_count, 0);
+  $("homeStats").innerHTML = `
+    <div class="statcard"><b>${lastLists.length.toLocaleString()}</b><span>保存済みリスト数</span></div>
+    <div class="statcard key"><b>${totalCompanies.toLocaleString()}</b><span>対象企業数(合計)</span></div>`;
+}
 
 function currentFilters() {
   const prefs = [...prefsWrap.querySelectorAll("input:checked")].map(c => c.value);
@@ -318,6 +432,7 @@ $("btnSaveFilter").addEventListener("click", async () => {
     el.innerHTML = `<div class="result ok">保存しました(${r.count.toLocaleString()}社) — list_id=${r.list_id}</div>`;
     $("fName").value = "";
     await refreshLists();
+    refreshHomeStats();
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }
@@ -334,6 +449,7 @@ $("btnUploadCsv").addEventListener("click", async () => {
     el.innerHTML = `<div class="result ok">取込完了: 合計${r.count}社(既存と一致${r.matched_existing} / 新規${r.new_companies} / スキップ${r.skipped_rows})</div>`;
     $("cName").value = ""; $("cFile").value = "";
     await refreshLists();
+    refreshHomeStats();
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }
@@ -341,6 +457,7 @@ $("btnUploadCsv").addEventListener("click", async () => {
 
 async function refreshLists() {
   const r = await call("/api/tenant/lists");
+  lastLists = r.lists;
   const wrap = $("listsWrap");
   if (!r.lists.length) { wrap.innerHTML = `<div class="empty">まだリストがありません</div>`; return; }
   wrap.innerHTML = `<table><tr><th>名前</th><th>種別</th><th>件数</th><th>作成日時</th></tr>` +

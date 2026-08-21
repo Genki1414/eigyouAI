@@ -79,6 +79,7 @@ footer{text-align:center;font-size:11px;color:var(--steel);padding:24px}
 <main>
   <h2>共有マスタから条件で絞り込む <span>FILTER</span></h2>
   <div class="card">
+    <div id="filterInputs">
     <label>エリア(クリックで管内の都道府県をまとめて選択/解除)</label>
     <div class="chips" id="fAreas"></div>
     <label style="margin-top:10px">都道府県(複数選択可)</label>
@@ -111,8 +112,6 @@ footer{text-align:center;font-size:11px;color:var(--steel);padding:24px}
       <label class="chip"><input type="checkbox" id="fWebsite">HPありのみ</label>
       <label class="chip"><input type="checkbox" id="fContact">問い合わせフォームURL確定済みのみ</label>
     </div>
-    <div class="btnrow">
-      <button class="ghost" id="btnPreview" disabled>件数をプレビュー</button>
     </div>
     <div id="previewResult"></div>
     <div class="row" style="margin-top:12px">
@@ -234,7 +233,7 @@ document.getElementById("fCapital").addEventListener("change", e => {
   });
 });
 
-let API = "", KEY = "";
+let API = "", KEY = "", connected = false;
 const $ = id => document.getElementById(id);
 
 // このページがapi.py自身から配信されている場合は、同一オリジンを既定値にする
@@ -261,8 +260,11 @@ $("btnConnect").addEventListener("click", async () => {
   try {
     await refreshLists();
     st.textContent = "接続済み"; st.className = "status on";
-    ["btnPreview", "btnSaveFilter", "btnUploadCsv"].forEach(id => $(id).disabled = false);
+    connected = true;
+    ["btnSaveFilter", "btnUploadCsv"].forEach(id => $(id).disabled = false);
+    runPreview();
   } catch (e) {
+    connected = false;
     st.textContent = "接続失敗: " + e.message; st.className = "status off";
   }
 });
@@ -283,16 +285,28 @@ function currentFilters() {
   return f;
 }
 
-$("btnPreview").addEventListener("click", async () => {
+// 選択が変わるたびに自動でプレビューする。連続クリック(エリア一括選択等)で
+// リクエストが乱発しないよう軽くデバウンスし、さらに古いリクエストの応答が
+// 後から返ってきても新しい選択結果を上書きしないようseqで捨てる
+let previewSeq = 0, previewTimer = null;
+async function runPreview() {
+  if (!connected) return;
   const el = $("previewResult");
-  el.innerHTML = "";
+  const seq = ++previewSeq;
+  el.innerHTML = `<div class="result">集計中…</div>`;
   try {
     const r = await call("/api/tenant/lists/preview", { method: "POST", body: JSON.stringify({ filters: currentFilters() }) });
+    if (seq !== previewSeq) return;
     el.innerHTML = `<div class="result ok">該当 ${r.count_before_cap.toLocaleString()}社` +
       (r.capped ? `(上限20,000件のため実際に保存されるのは20,000社)` : ``) + `</div>`;
   } catch (e) {
+    if (seq !== previewSeq) return;
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }
+}
+document.getElementById("filterInputs").addEventListener("change", () => {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(runPreview, 200);
 });
 
 $("btnSaveFilter").addEventListener("click", async () => {

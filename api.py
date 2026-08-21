@@ -30,6 +30,12 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            can_contact()・冪等性・ペーシング上限はsend_campaign()
                            経由でそのまま適用される(HANDOFF.mdの原則を厳守)
   GET  /api/tenant/send-log       自テナントのフォーム自動送信履歴(form_send_log)
+  GET  /api/tenant/companies/search?q=  除外設定対象を探す簡易企業検索(2文字以上)
+  GET  /api/tenant/exclusions     自テナントの送信除外設定一覧
+  POST /api/tenant/exclusions          {"company_id","reason"} → 除外に追加
+  POST /api/tenant/exclusions/remove   {"company_id"} → 除外を解除
+                           除外はテナント別(tenant_exclusions)。全テナント共通の
+                           法令対応suppressionとは別物で、can_contact()が両方を見る
   ※ Authorization: Bearer <tenant.api_key>。テナントIDはこのキーからサーバ側で
     解決し、リクエストボディのtenant_idは一切信用しない(offers.resolve_tenant_by_key)
   GET  / , /list_builder.html  操作画面(list_builder.html)をこのサーバ自身から配信。
@@ -310,6 +316,40 @@ def h_tenant_send_log(con, tenant_id, qs):
     return 200, {"log": [dict(r) for r in rows]}
 
 
+def h_tenant_companies_search(con, tenant_id, qs):
+    """送信除外設定で対象企業を探すための簡易検索。共有マスタ+自テナントの
+    非公開データのみ(他テナントの非公開企業は検索にも出さない)。"""
+    q = (qs.get("q", [""])[0] or "").strip()
+    if len(q) < 2:
+        return 400, {"error": "2文字以上で検索してください"}
+    rows = con.execute("""SELECT id, name, pref FROM companies
+        WHERE dedup_of IS NULL AND (owner_tenant_id IS NULL OR owner_tenant_id=?)
+          AND name LIKE ? LIMIT 20""", (tenant_id, f"%{q}%")).fetchall()
+    return 200, {"companies": [dict(r) for r in rows]}
+
+
+def h_tenant_exclusions_list(con, tenant_id):
+    return 200, {"exclusions": db.list_tenant_exclusions(con, tenant_id)}
+
+
+def h_tenant_exclusions_add(con, tenant_id, data):
+    company_id = data.get("company_id")
+    if not isinstance(company_id, int):
+        return 400, {"error": "company_idは必須です"}
+    if not con.execute("SELECT 1 FROM companies WHERE id=?", (company_id,)).fetchone():
+        return 404, {"error": "企業が見つかりません"}
+    db.exclude_for_tenant(con, tenant_id, company_id, reason=(data.get("reason") or "").strip() or None)
+    return 200, {"ok": True}
+
+
+def h_tenant_exclusions_remove(con, tenant_id, data):
+    company_id = data.get("company_id")
+    if not isinstance(company_id, int):
+        return 400, {"error": "company_idは必須です"}
+    db.unexclude_for_tenant(con, tenant_id, company_id)
+    return 200, {"ok": True}
+
+
 def h_tenant_list_send(con, tenant_id, list_id, data):
     """保存済みリストから実際にフォーム自動送信キャンペーンを走らせる。
     dry_runは既定でTrue(=実サイトへは何も送らない)。実送信するには
@@ -406,6 +446,22 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
+        if path in ("/api/tenant/exclusions", "/api/tenant/exclusions/remove"):
+            con = self._con()
+            try:
+                tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
+                if not tenant:
+                    return self._json(401, {"error": "unauthorized"})
+                if path == "/api/tenant/exclusions":
+                    st, res = h_tenant_exclusions_add(con, tenant["id"], data)
+                else:
+                    st, res = h_tenant_exclusions_remove(con, tenant["id"], data)
+                return self._json(st, res)
+            except Exception as e:  # noqa: BLE001
+                return self._json(500, {"error": str(e)[:200]})
+            finally:
+                con.close()
+
         con = self._con()
         try:
             if path == "/api/signup":
@@ -450,7 +506,9 @@ class Handler(BaseHTTPRequestHandler):
                 con.close()
 
         if (u.path == "/api/tenant/lists" or u.path.startswith("/api/tenant/lists/")
-                or u.path == "/api/tenant/send-log"):
+                or u.path == "/api/tenant/send-log"
+                or u.path == "/api/tenant/exclusions"
+                or u.path == "/api/tenant/companies/search"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -458,6 +516,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(401, {"error": "unauthorized"})
                 if u.path == "/api/tenant/send-log":
                     st, res = h_tenant_send_log(con, tenant["id"], qs)
+                elif u.path == "/api/tenant/exclusions":
+                    st, res = h_tenant_exclusions_list(con, tenant["id"])
+                elif u.path == "/api/tenant/companies/search":
+                    st, res = h_tenant_companies_search(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/lists":
                     st, res = h_tenant_lists_list(con, tenant["id"])
                 else:
@@ -741,6 +803,55 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/send-log", token=key_b)
     t("他テナントのログは見えない", st == 200 and len(r.get("log", [])) == 0)
     con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (tid_a,))
+    con.commit()
+
+    print("\n── 送信除外設定 ──")
+    # can_contact()が既にFalseな会社(他テストの副作用で反応済み等)だと
+    # 除外設定による判定変化を検証できないので、まず素の状態でTrueな会社を選ぶ
+    excl_company_id = None
+    for row in con.execute("SELECT id, name FROM companies WHERE dedup_of IS NULL"):
+        if db.can_contact(con, row["id"])[0]:
+            excl_company_id, excl_name = row["id"], row["name"]
+            break
+    excl_name_part = urllib.parse.quote(excl_name[:2])
+    st, r = get_auth(f"/api/tenant/companies/search?q={excl_name_part}")
+    t("認証ヘッダなしのGET /api/tenant/companies/searchは401", st == 401)
+    st, r = get_auth("/api/tenant/companies/search?q=a", token=key_a)
+    t("検索語が2文字未満なら400", st == 400)
+    st, r = get_auth(f"/api/tenant/companies/search?q={excl_name_part}", token=key_a)
+    t("2文字以上の検索で企業が引ける",
+      st == 200 and any(c["id"] == excl_company_id for c in r.get("companies", [])))
+
+    st, r = post_auth("/api/tenant/exclusions", {"company_id": "not-an-int"}, token=key_a)
+    t("company_idが整数でないと400", st == 400)
+    st, r = post_auth("/api/tenant/exclusions", {"company_id": 999999999}, token=key_a)
+    t("存在しない企業IDは404", st == 404)
+    st, r = post_auth("/api/tenant/exclusions", {"company_id": excl_company_id, "reason": "競合他社"},
+                      token=key_a)
+    t("POST /api/tenant/exclusions で除外に追加", st == 200 and r.get("ok"))
+
+    st, r = get_auth("/api/tenant/exclusions", token=key_a)
+    t("GET /api/tenant/exclusions に追加した企業が出る",
+      st == 200 and any(e["company_id"] == excl_company_id for e in r.get("exclusions", [])))
+    st, r = get_auth("/api/tenant/exclusions", token=key_b)
+    t("他テナントの除外設定は見えない(テナント分離)",
+      st == 200 and all(e["company_id"] != excl_company_id for e in r.get("exclusions", [])))
+
+    allowed, why = db.can_contact(con, excl_company_id, tenant_id=tid_a)
+    t("除外されたテナントではcan_contact()がFalseを返す(バイパスなし)",
+      allowed is False and why == "テナント除外設定")
+    allowed_b, why_b = db.can_contact(con, excl_company_id, tenant_id=tid_b)
+    t("他テナントの送信には影響しない", allowed_b is True)
+
+    st, r = post_auth("/api/tenant/exclusions/remove", {"company_id": excl_company_id}, token=key_a)
+    t("POST /api/tenant/exclusions/remove で除外解除", st == 200 and r.get("ok"))
+    st, r = get_auth("/api/tenant/exclusions", token=key_a)
+    t("解除後はGET /api/tenant/exclusionsに出てこない",
+      st == 200 and all(e["company_id"] != excl_company_id for e in r.get("exclusions", [])))
+    allowed_after, _ = db.can_contact(con, excl_company_id, tenant_id=tid_a)
+    t("解除後はcan_contact()が再びTrueを返す", allowed_after is True)
+
+    con.execute("DELETE FROM tenant_exclusions WHERE tenant_id IN (?,?)", (tid_a, tid_b))
     con.commit()
 
     con.execute("DELETE FROM touches WHERE campaign_id=?", (send_campaign_id,))

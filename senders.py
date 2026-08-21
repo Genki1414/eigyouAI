@@ -388,8 +388,9 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
     cost = 0
 
     for r in rows:
-        # 送信直前の最終ガード（作成後に配信停止された可能性がある）
-        allowed, why = db.can_contact(con, r["company_id"])
+        # 送信直前の最終ガード（作成後に配信停止された可能性がある。テナント別の
+        # 送信除外設定(tenant_exclusions)もここで一緒に確認する）
+        allowed, why = db.can_contact(con, r["company_id"], tenant_id=r["tenant_id"])
         if not allowed:
             stats["blocked"] += 1
             con.execute("UPDATE touches SET note=? WHERE id=?", (f"送信中止: {why}", r["tid"]))

@@ -80,6 +80,17 @@ CREATE TABLE IF NOT EXISTS suppression (
   created_at TEXT NOT NULL
 );
 
+-- テナント別の送信除外: suppression(法令対応・全テナット共通)とは別に、
+-- 「このテナントだけは送りたくない」(競合他社等)という経営判断の除外を持つ。
+-- 他テナントの送信には影響しない。
+CREATE TABLE IF NOT EXISTS tenant_exclusions (
+  tenant_id INTEGER NOT NULL,
+  company_id INTEGER NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, company_id)
+);
+
 -- 監査ログ: 誰がいつ何を実行したか。デューデリで運用実態を示す材料になる。
 CREATE TABLE IF NOT EXISTS run_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -258,14 +269,20 @@ def suppress(con, company_id, reason, source=None, note=None):
     con.commit()
 
 
-def can_contact(con, company_id, allow_warm=False):
+def can_contact(con, company_id, tenant_id=None, allow_warm=False):
     """接触してよいか判定。(可否, 理由) を返す。
     ここを通らない送信経路を作らないこと。
 
+    tenant_idを渡すと、そのテナントのtenant_exclusions(経営判断の除外。
+    suppressionと違い他テナントには影響しない)も合わせて確認する。
     allow_warm=True にすると「反応済み」チェックだけを外す。
     既存顧客への別オファー案内など、意図的な再接触の時だけ使うこと。"""
     if con.execute("SELECT 1 FROM suppression WHERE company_id=?", (company_id,)).fetchone():
         return False, "配信停止リスト"
+    if tenant_id is not None and con.execute(
+            "SELECT 1 FROM tenant_exclusions WHERE tenant_id=? AND company_id=?",
+            (tenant_id, company_id)).fetchone():
+        return False, "テナント除外設定"
     if con.execute("SELECT 1 FROM companies WHERE id=? AND dedup_of IS NOT NULL",
                    (company_id,)).fetchone():
         return False, "重複レコード(代表社へ集約済)"
@@ -294,16 +311,38 @@ def can_contact(con, company_id, allow_warm=False):
     return True, "OK"
 
 
-def contactable_ids(con, ids, allow_warm=False):
+def contactable_ids(con, ids, tenant_id=None, allow_warm=False):
     """複数IDを一括判定。除外された理由の内訳も返す。"""
     ok, blocked = [], {}
     for i in ids:
-        allowed, why = can_contact(con, i, allow_warm=allow_warm)
+        allowed, why = can_contact(con, i, tenant_id=tenant_id, allow_warm=allow_warm)
         if allowed:
             ok.append(i)
         else:
             blocked[why] = blocked.get(why, 0) + 1
     return ok, blocked
+
+
+# ── テナント別送信除外(送信除外設定画面が使う) ──
+def exclude_for_tenant(con, tenant_id, company_id, reason=None):
+    con.execute("""INSERT INTO tenant_exclusions (tenant_id, company_id, reason, created_at)
+        VALUES (?,?,?,?)
+        ON CONFLICT(tenant_id, company_id) DO UPDATE SET reason=excluded.reason""",
+        (tenant_id, company_id, reason, datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+
+
+def unexclude_for_tenant(con, tenant_id, company_id):
+    con.execute("DELETE FROM tenant_exclusions WHERE tenant_id=? AND company_id=?",
+                (tenant_id, company_id))
+    con.commit()
+
+
+def list_tenant_exclusions(con, tenant_id):
+    rows = con.execute("""SELECT e.company_id, e.reason, e.created_at, c.name, c.pref
+        FROM tenant_exclusions e LEFT JOIN companies c ON c.id = e.company_id
+        WHERE e.tenant_id=? ORDER BY e.created_at DESC""", (tenant_id,)).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── 許可番号の連番(社歴の代理変数) ──────────

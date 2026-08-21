@@ -325,6 +325,49 @@ def _click(el):
         return False
 
 
+_SELECT_PLACEHOLDER_RE = re.compile(
+    r"選択してください|お選び|select|please choose|指定なし|未選択", re.I)
+_SELECT_INQUIRY_OPTION_RE = re.compile(r"お問い合わせ|その他|general|other", re.I)
+
+
+def _fill_selects(page):
+    """<select>要素(問い合わせ種類・都道府県等のプルダウン)を埋める。
+    必須のプルダウンが未選択のままだと送信がブロックされるサイトが多いため対応する。
+    「お問い合わせ」寄りの選択肢があればそれを、無ければプレースホルダーではない
+    先頭の選択肢を選ぶ(都道府県等、正解が決まらない項目でも「未選択」を避ける方が
+    送信を通せる可能性が高いという判断)。"""
+    filled = 0
+    try:
+        selects = page.query_selector_all("select")
+    except Exception:  # noqa: BLE001
+        return filled
+    for sel in selects:
+        try:
+            if not sel.is_visible():
+                continue
+            options = sel.query_selector_all("option")
+            candidates = []
+            for opt in options:
+                text = (opt.inner_text() or "").strip()
+                value = opt.get_attribute("value") or ""
+                if not value or _SELECT_PLACEHOLDER_RE.search(text):
+                    continue
+                candidates.append((text, value))
+            if not candidates:
+                continue
+            pick = next((v for t, v in candidates if _SELECT_INQUIRY_OPTION_RE.search(t)),
+                        candidates[0][1])
+            sel.select_option(value=pick, timeout=ACTION_TIMEOUT_MS)
+            try:
+                sel.dispatch_event("change")
+            except Exception:  # noqa: BLE001
+                pass
+            filled += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return filled
+
+
 # ── メイン ───────────────────────────────
 def navigate_and_submit(start_url, values, *, headless=True):
     """フォームへの一連の操作を行い、NavigationResultを返す。
@@ -422,13 +465,22 @@ def navigate_and_submit(start_url, values, *, headless=True):
                         except Exception:  # noqa: BLE001
                             pass
 
-                result.detected_fields = detected
-                result.filled_fields = filled
-
                 if not filled:
+                    result.detected_fields = detected
+                    result.filled_fields = filled
                     result.status = "FAILED_UNSUPPORTED"
                     result.reason_code = "no_fields_filled"
                     return result
+
+                # プルダウン(お問い合わせ種類・都道府県等)。必須なのに未選択のままだと
+                # 送信がブロックされるサイトが多いため埋める
+                n_selects = _fill_selects(page)
+                if n_selects:
+                    detected["select"] = n_selects
+                    filled.append(f"select×{n_selects}")
+
+                result.detected_fields = detected
+                result.filled_fields = filled
 
                 # 同意チェックボックス
                 try:

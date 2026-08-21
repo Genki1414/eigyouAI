@@ -29,6 +29,7 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            自動送信。dry_run既定true(=実サイトへは送らない)。
                            can_contact()・冪等性・ペーシング上限はsend_campaign()
                            経由でそのまま適用される(HANDOFF.mdの原則を厳守)
+  GET  /api/tenant/send-log       自テナントのフォーム自動送信履歴(form_send_log)
   ※ Authorization: Bearer <tenant.api_key>。テナントIDはこのキーからサーバ側で
     解決し、リクエストボディのtenant_idは一切信用しない(offers.resolve_tenant_by_key)
   GET  / , /list_builder.html  操作画面(list_builder.html)をこのサーバ自身から配信。
@@ -296,6 +297,19 @@ def h_tenant_list_detail(con, tenant_id, list_id, qs):
     return 200, res
 
 
+def h_tenant_send_log(con, tenant_id, qs):
+    """テナント自身のフォーム自動送信履歴(form_send_log)。他テナント分は
+    tenant_id=?で絞り込んでいるため見えない。"""
+    limit = min(int(qs.get("limit", ["100"])[0]), 500)
+    offset = int(qs.get("offset", ["0"])[0])
+    rows = con.execute("""SELECT l.id, l.company_id, c.name company_name, l.status, l.reason_code,
+            l.started_at, l.finished_at
+        FROM form_send_log l LEFT JOIN companies c ON c.id = l.company_id
+        WHERE l.tenant_id=? ORDER BY l.id DESC LIMIT ? OFFSET ?""",
+        (tenant_id, limit, offset)).fetchall()
+    return 200, {"log": [dict(r) for r in rows]}
+
+
 def h_tenant_list_send(con, tenant_id, list_id, data):
     """保存済みリストから実際にフォーム自動送信キャンペーンを走らせる。
     dry_runは既定でTrue(=実サイトへは何も送らない)。実送信するには
@@ -435,13 +449,16 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
-        if u.path == "/api/tenant/lists" or u.path.startswith("/api/tenant/lists/"):
+        if (u.path == "/api/tenant/lists" or u.path.startswith("/api/tenant/lists/")
+                or u.path == "/api/tenant/send-log"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
                 if not tenant:
                     return self._json(401, {"error": "unauthorized"})
-                if u.path == "/api/tenant/lists":
+                if u.path == "/api/tenant/send-log":
+                    st, res = h_tenant_send_log(con, tenant["id"], qs)
+                elif u.path == "/api/tenant/lists":
                     st, res = h_tenant_lists_list(con, tenant["id"])
                 else:
                     list_id_str = u.path[len("/api/tenant/lists/"):]
@@ -708,6 +725,23 @@ def self_test(port=8899):
     st, r = post_auth(f"/api/tenant/lists/{list_b_id}/send",
                       {"subject": "x", "body": "y"}, token=key_a)
     t("他テナントのリストへは送信できない(404)", st == 404)
+
+    print("\n── 自動送信ログ ──")
+    # dry_runはform_send_logへ書かない(Playwrightに触れないため)ので、
+    # ログ表示自体の検証用に1件だけ手で入れる
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, target_url, started_at,
+        status, reason_code) VALUES (1, ?, 'https://example.co.jp', ?, 'SUCCESS', 'success_text_matched')""",
+        (tid_a, datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    st, r = get_auth("/api/tenant/send-log")
+    t("認証ヘッダなしのGET /api/tenant/send-logは401", st == 401)
+    st, r = get_auth("/api/tenant/send-log", token=key_a)
+    t("自テナントの送信ログが取れる",
+      st == 200 and len(r.get("log", [])) == 1 and r["log"][0]["status"] == "SUCCESS")
+    st, r = get_auth("/api/tenant/send-log", token=key_b)
+    t("他テナントのログは見えない", st == 200 and len(r.get("log", [])) == 0)
+    con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (tid_a,))
+    con.commit()
 
     con.execute("DELETE FROM touches WHERE campaign_id=?", (send_campaign_id,))
     con.execute("DELETE FROM campaigns WHERE id=?", (send_campaign_id,))

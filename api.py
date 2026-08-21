@@ -40,7 +40,8 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            自動送信。dry_run既定true(=実サイトへは送らない)。
                            can_contact()・冪等性・ペーシング上限はsend_campaign()
                            経由でそのまま適用される(HANDOFF.mdの原則を厳守)
-  GET  /api/tenant/send-log       自テナントのフォーム自動送信履歴(form_send_log)
+  GET  /api/tenant/send-log       自テナントのフォーム自動送信履歴(form_send_log)。
+                           ?company_id=で1社分の履歴だけに絞り込める
   GET  /api/tenant/companies/search?q=  除外設定対象を探す簡易企業検索(2文字以上)
   GET  /api/tenant/exclusions     自テナントの送信除外設定一覧
   POST /api/tenant/exclusions          {"company_id","reason"} → 除外に追加
@@ -70,6 +71,11 @@ CACもチャネル別成績も出せない = 売り物にならない。
   GET  /api/tenant/kill-switch    自テナントの送信が現在止められているかだけを
                            確認する読み取り専用エンドポイント(他テナントの
                            状態や制御権限は渡さない。操作は/api/ops/*のみ)
+  GET  /api/tenant/dashboard      β版ダッシュボード。今月の対象企業数・
+                           試行数・成功/SKIP/FAILED数、累計成功数、
+                           返信/商談化/受注の件数。form_send_log/
+                           target_list_membersからの集計のみで、
+                           新規の集計テーブルは持たない
   ※ Authorization: Bearer <tenant.api_key または staff.api_key>。テナントIDは
     このキーからサーバ側で解決し、リクエストボディのtenant_idは一切信用しない
     (offers.resolve_tenant_by_key。担当者ごとのキーでもテナント全体のキーでも
@@ -361,14 +367,22 @@ def h_tenant_list_member_outcome(con, tenant_id, list_id, data):
 
 def h_tenant_send_log(con, tenant_id, qs):
     """テナント自身のフォーム自動送信履歴(form_send_log)。他テナント分は
-    tenant_id=?で絞り込んでいるため見えない。"""
+    tenant_id=?で絞り込んでいるため見えない。?company_id=で1社分の履歴
+    (何度目のどの結果か、時系列)だけに絞り込める。"""
     limit = min(int(qs.get("limit", ["100"])[0]), 500)
     offset = int(qs.get("offset", ["0"])[0])
-    rows = con.execute("""SELECT l.id, l.company_id, c.name company_name, l.status, l.reason_code,
-            l.started_at, l.finished_at
+    company_id = qs.get("company_id", [None])[0]
+    q = """SELECT l.id, l.company_id, c.name company_name, l.status, l.reason_code,
+            l.started_at, l.finished_at, l.retry_count, l.execution_seconds
         FROM form_send_log l LEFT JOIN companies c ON c.id = l.company_id
-        WHERE l.tenant_id=? ORDER BY l.id DESC LIMIT ? OFFSET ?""",
-        (tenant_id, limit, offset)).fetchall()
+        WHERE l.tenant_id=?"""
+    params = [tenant_id]
+    if company_id and company_id.isdigit():
+        q += " AND l.company_id=?"
+        params.append(int(company_id))
+    q += " ORDER BY l.id DESC LIMIT ? OFFSET ?"
+    params += [limit, offset]
+    rows = con.execute(q, params).fetchall()
     return 200, {"log": [dict(r) for r in rows]}
 
 
@@ -492,6 +506,44 @@ def h_tenant_announcements_list(con):
 def h_tenant_activity_log(con, tenant_id, qs):
     limit = min(int(qs.get("limit", ["100"])[0]), 500)
     return 200, {"log": TL.activity_log(con, tenant_id, limit=limit)}
+
+
+def h_tenant_dashboard(con, tenant_id):
+    """「AI営業社員がどれだけ働いたか」を一目で見せるβ版ダッシュボード。
+    既存のform_send_log/target_list_membersから集計するだけで、
+    新しい巨大なデータ構造は作らない。"""
+    month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0) \
+        .isoformat(timespec="seconds")
+
+    def _count(where, params):
+        return con.execute(f"SELECT COUNT(*) FROM form_send_log WHERE tenant_id=? AND {where}",
+                            [tenant_id] + params).fetchone()[0]
+
+    targeted = con.execute("""SELECT COUNT(DISTINCT company_id) FROM form_send_log
+        WHERE tenant_id=? AND started_at>=?""", (tenant_id, month_start)).fetchone()[0]
+    this_month = {
+        "targeted_companies": targeted,
+        "attempts": _count("started_at>=?", [month_start]),
+        "success": _count("started_at>=? AND status='SUCCESS'", [month_start]),
+        "skip": _count("started_at>=? AND status LIKE 'SKIP%'", [month_start]),
+        "failed": _count("started_at>=? AND status IN ('FAILED_RETRYABLE','FAILED_UNSUPPORTED')",
+                          [month_start]),
+    }
+    all_time_success = _count("status='SUCCESS'", [])
+
+    outcomes = con.execute("""SELECT
+            SUM(CASE WHEN m.replied=1 THEN 1 ELSE 0 END) replied,
+            SUM(CASE WHEN m.deal=1 THEN 1 ELSE 0 END) deal,
+            SUM(CASE WHEN m.won=1 THEN 1 ELSE 0 END) won
+        FROM target_list_members m JOIN target_lists tl ON tl.id=m.list_id
+        WHERE tl.tenant_id=?""", (tenant_id,)).fetchone()
+
+    return 200, {
+        "this_month": this_month,
+        "all_time": {"success": all_time_success},
+        "outcomes": {"replied": outcomes["replied"] or 0, "deal": outcomes["deal"] or 0,
+                     "won": outcomes["won"] or 0},
+    }
 
 
 def h_tenant_list_send(con, tenant_id, list_id, data):
@@ -758,7 +810,8 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/staff"
                 or u.path == "/api/tenant/announcements"
                 or u.path == "/api/tenant/activity-log"
-                or u.path == "/api/tenant/kill-switch"):
+                or u.path == "/api/tenant/kill-switch"
+                or u.path == "/api/tenant/dashboard"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -782,6 +835,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_activity_log(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/kill-switch":
                     st, res = h_tenant_kill_switch_status(con, tenant["id"])
+                elif u.path == "/api/tenant/dashboard":
+                    st, res = h_tenant_dashboard(con, tenant["id"])
                 elif u.path == "/api/tenant/lists":
                     st, res = h_tenant_lists_list(con, tenant["id"])
                 else:
@@ -1192,8 +1247,26 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/send-log", token=key_a)
     t("自テナントの送信ログが取れる",
       st == 200 and len(r.get("log", [])) == 1 and r["log"][0]["status"] == "SUCCESS")
+    st, r = get_auth("/api/tenant/send-log?company_id=1", token=key_a)
+    t("?company_id=で1社分に絞り込める", st == 200 and len(r.get("log", [])) == 1)
+    st, r = get_auth("/api/tenant/send-log?company_id=999999999", token=key_a)
+    t("該当しない企業IDでは0件になる", st == 200 and len(r.get("log", [])) == 0)
     st, r = get_auth("/api/tenant/send-log", token=key_b)
     t("他テナントのログは見えない", st == 200 and len(r.get("log", [])) == 0)
+
+    print("\n── β版ダッシュボード ──")
+    st, r = get_auth("/api/tenant/dashboard")
+    t("認証ヘッダなしのGET /api/tenant/dashboardは401", st == 401)
+    st, r = get_auth("/api/tenant/dashboard", token=key_a)
+    t("今月の送信成功数に手動投入した1件が反映される",
+      st == 200 and r["this_month"]["success"] >= 1)
+    t("累計送信成功数にも反映される", r["all_time"]["success"] >= 1)
+    t("返信の件数が反映される(先の出来事記録テストで1件記録済み)",
+      r["outcomes"]["replied"] >= 1)
+    st, r = get_auth("/api/tenant/dashboard", token=key_b)
+    t("他テナントのダッシュボードには自テナントの数字が出ない(テナント分離)",
+      st == 200 and r["this_month"]["success"] == 0)
+
     con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (tid_a,))
     con.commit()
 

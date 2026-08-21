@@ -72,6 +72,8 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
 tr.clickable{cursor:pointer}
 tr.clickable:hover{background:var(--blue-soft)}
 .pill{display:inline-block;background:var(--concrete);border-radius:4px;padding:1px 8px;font-size:11px;font-family:var(--mono)}
+.pill.ok{background:#E7F5EC;color:var(--win)}
+.pill.err{background:#FBEAE4;color:var(--warn)}
 .hint{font-size:12px;color:var(--steel);margin-top:6px}
 .empty{color:var(--steel);font-size:13px;text-align:center;padding:16px}
 
@@ -155,12 +157,28 @@ tr.clickable:hover{background:var(--blue-soft)}
     <div class="content">
 
       <section class="page active" data-page="home">
-        <h2>今月の状況 <span>OVERVIEW</span></h2>
+        <h2 id="dashHeadline">今月の状況 <span>OVERVIEW</span></h2>
         <div class="statcards" id="homeStats">
           <div class="statcard"><b>—</b><span>保存済みリスト数</span></div>
           <div class="statcard key"><b>—</b><span>対象企業数(合計)</span></div>
         </div>
-        <h2>使い方</h2>
+        <h2 style="margin-top:20px">今月のAI営業社員の働き <span>THIS MONTH</span></h2>
+        <div class="statcards" id="dashThisMonth">
+          <div class="statcard"><b>—</b><span>営業対象企業数</span></div>
+          <div class="statcard"><b>—</b><span>送信試行数</span></div>
+          <div class="statcard key"><b>—</b><span>送信成功数</span></div>
+          <div class="statcard"><b>—</b><span>SKIP数</span></div>
+          <div class="statcard"><b>—</b><span>FAILED数</span></div>
+        </div>
+        <div class="statcards" id="dashOutcomes" style="margin-top:10px">
+          <div class="statcard"><b>—</b><span>累計送信成功数</span></div>
+          <div class="statcard"><b>—</b><span>返信あり(累計)</span></div>
+          <div class="statcard"><b>—</b><span>商談化(累計)</span></div>
+          <div class="statcard"><b>—</b><span>受注(累計)</span></div>
+        </div>
+        <h2 style="margin-top:20px">最近の営業履歴 <span>RECENT</span></h2>
+        <div id="dashRecentWrap"><div class="empty">接続すると表示されます</div></div>
+        <h2 style="margin-top:20px">使い方</h2>
         <div class="card">
           <p class="hint">
             1. 左メニューの「接続設定」でAPIキーを入力して接続します<br>
@@ -501,7 +519,7 @@ function goPage(pageId) {
   document.querySelectorAll(".navitem").forEach(n => n.classList.toggle("active", n === item));
   document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.dataset.page === pageId));
   document.getElementById("pageTitle").textContent = PAGE_TITLES[pageId];
-  if (pageId === "home") refreshHomeStats();
+  if (pageId === "home") { refreshHomeStats(); refreshDashboard(); }
   if (pageId === "sendlog") refreshSendLog();
   if (pageId === "exclude") refreshExclusions();
   if (pageId === "tmpl-body") refreshTemplates();
@@ -639,6 +657,7 @@ $("btnConnect").addEventListener("click", async () => {
     ["btnSaveFilter", "btnUploadCsv"].forEach(id => $(id).disabled = false);
     runPreview();
     refreshHomeStats();
+    refreshDashboard();
     refreshKillSwitch();
   } catch (e) {
     connected = false;
@@ -669,6 +688,37 @@ function refreshHomeStats() {
   $("homeStats").innerHTML = `
     <div class="statcard"><b>${lastLists.length.toLocaleString()}</b><span>保存済みリスト数</span></div>
     <div class="statcard key"><b>${totalCompanies.toLocaleString()}</b><span>対象企業数(合計)</span></div>`;
+}
+
+async function refreshDashboard() {
+  if (!connected) return;
+  try {
+    const d = await call("/api/tenant/dashboard");
+    $("dashHeadline").innerHTML = `今月、AI営業社員が${d.this_month.targeted_companies.toLocaleString()}社へ営業しました <span>OVERVIEW</span>`;
+    $("dashThisMonth").innerHTML = `
+      <div class="statcard"><b>${d.this_month.targeted_companies.toLocaleString()}</b><span>営業対象企業数</span></div>
+      <div class="statcard"><b>${d.this_month.attempts.toLocaleString()}</b><span>送信試行数</span></div>
+      <div class="statcard key"><b>${d.this_month.success.toLocaleString()}</b><span>送信成功数</span></div>
+      <div class="statcard"><b>${d.this_month.skip.toLocaleString()}</b><span>SKIP数</span></div>
+      <div class="statcard"><b>${d.this_month.failed.toLocaleString()}</b><span>FAILED数</span></div>`;
+    $("dashOutcomes").innerHTML = `
+      <div class="statcard"><b>${d.all_time.success.toLocaleString()}</b><span>累計送信成功数</span></div>
+      <div class="statcard"><b>${d.outcomes.replied.toLocaleString()}</b><span>返信あり(累計)</span></div>
+      <div class="statcard"><b>${d.outcomes.deal.toLocaleString()}</b><span>商談化(累計)</span></div>
+      <div class="statcard"><b>${d.outcomes.won.toLocaleString()}</b><span>受注(累計)</span></div>`;
+
+    const logEl = $("dashRecentWrap");
+    const lr = await call("/api/tenant/send-log?limit=10");
+    if (!lr.log.length) { logEl.innerHTML = `<div class="empty">まだ営業履歴がありません</div>`; return; }
+    logEl.innerHTML = `<table><tr><th>会社名</th><th>結果</th><th>詳細</th><th>日時</th></tr>` +
+      lr.log.map(x => `<tr><td>${x.company_name || "—"}</td>
+        <td><span class="pill${x.status === "SUCCESS" ? " ok" : (x.status.startsWith("FAILED") ? " err" : "")}">${x.status}</span></td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.reason_code || "—"}</td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at}</td></tr>`).join("") +
+      `</table>`;
+  } catch (e) {
+    $("dashRecentWrap").innerHTML = `<div class="result err">${e.message}</div>`;
+  }
 }
 
 $("btnGoLists").addEventListener("click", () => goPage("lists"));
@@ -1025,12 +1075,89 @@ async function refreshLists() {
   });
 }
 
+const MEMBER_FILTERS = {
+  "": "すべて", pending: "未送信", success: "成功", failed: "失敗", skip: "SKIP",
+  replied: "返信あり", deal: "商談あり", won: "受注あり",
+};
+const SEND_STATUS_LABELS = {
+  PENDING: "未送信", PROCESSING: "処理中", SUCCESS: "成功", SKIP: "対象外",
+  FAILED_RETRYABLE: "失敗(再試行可)", FAILED_UNSUPPORTED: "失敗(未対応)", STOPPED: "停止",
+};
+const SEND_STATUS_CLASS = {
+  SUCCESS: "ok", FAILED_RETRYABLE: "err", FAILED_UNSUPPORTED: "err", STOPPED: "err",
+};
+
+function bindMemberFilter(listId) {
+  document.querySelectorAll('input[name="memberFilter"]').forEach(input => {
+    input.addEventListener("change", () => renderMemberTable(listId, input.value));
+  });
+}
+
+async function renderMemberTable(listId, statusFilter) {
+  const wrap = $("memberTableWrap");
+  wrap.innerHTML = `<div class="empty">読み込み中...</div>`;
+  try {
+    const qs = statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : "";
+    const r = await call(`/api/tenant/lists/${listId}?limit=200${qs}`);
+    if (!r.members.length) { wrap.innerHTML = `<div class="empty">該当する企業がありません</div>`; return; }
+    wrap.innerHTML = `<table><tr><th>会社名</th><th>都道府県</th><th>状態</th><th>詳細</th>
+      <th>返信</th><th>商談</th><th>受注</th></tr>` +
+      r.members.map(m => {
+        const cls = SEND_STATUS_CLASS[m.send_status] || "";
+        return `<tr>
+          <td><a href="#" class="memberHistoryLink" data-id="${m.id}">${m.name}</a></td>
+          <td>${m.pref || "—"}</td>
+          <td><span class="pill${cls ? " " + cls : ""}">${SEND_STATUS_LABELS[m.send_status] || m.send_status}</span></td>
+          <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${m.reason_code || m.last_error || "—"}</td>
+          <td><input type="checkbox" class="outcomeBox" data-id="${m.id}" data-field="replied" ${m.replied ? "checked" : ""}></td>
+          <td><input type="checkbox" class="outcomeBox" data-id="${m.id}" data-field="deal" ${m.deal ? "checked" : ""}></td>
+          <td><input type="checkbox" class="outcomeBox" data-id="${m.id}" data-field="won" ${m.won ? "checked" : ""}></td>
+        </tr>`;
+      }).join("") + `</table>`;
+    wrap.querySelectorAll(".memberHistoryLink").forEach(a => {
+      a.addEventListener("click", (e) => { e.preventDefault(); showMemberHistory(Number(a.dataset.id)); });
+    });
+    wrap.querySelectorAll(".outcomeBox").forEach(cb => {
+      cb.addEventListener("change", () => recordOutcome(listId, Number(cb.dataset.id), cb.dataset.field, cb.checked));
+    });
+  } catch (e) {
+    wrap.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+async function recordOutcome(listId, companyId, field, value) {
+  try {
+    await call(`/api/tenant/lists/${listId}/outcome`,
+      { method: "POST", body: JSON.stringify({ company_id: companyId, field, value }) });
+  } catch (e) {
+    alert("記録に失敗しました: " + e.message);
+  }
+}
+
+async function showMemberHistory(companyId) {
+  const wrap = $("memberHistoryWrap");
+  wrap.innerHTML = `<h2 style="margin-top:20px">送信履歴 <span>#${companyId}</span></h2>
+    <div class="card"><div class="empty">読み込み中...</div></div>`;
+  try {
+    const r = await call(`/api/tenant/send-log?company_id=${companyId}&limit=50`);
+    const inner = !r.log.length ? `<div class="empty">この会社への送信履歴はまだありません</div>` :
+      `<table><tr><th>結果</th><th>詳細</th><th>日時</th></tr>` +
+      r.log.map(x => `<tr><td><span class="pill">${x.status}</span></td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.reason_code || "—"}</td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at}</td></tr>`).join("") +
+      `</table>`;
+    wrap.innerHTML = `<h2 style="margin-top:20px">送信履歴 <span>#${companyId}</span></h2>
+      <div class="card">${inner}</div>`;
+  } catch (e) {
+    wrap.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
 async function showDetail(id) {
   const el = $("detailWrap");
   el.innerHTML = `<div class="empty">読み込み中...</div>`;
   await refreshKillSwitch();
   try {
-    const r = await call(`/api/tenant/lists/${id}?limit=50`);
     el.innerHTML = `<h2>このリストへ送信 <span>SEND</span></h2>
       <div class="card">
         <p class="hint">問い合わせページが確認できている企業のみが送信対象になります。
@@ -1053,10 +1180,16 @@ async function showDetail(id) {
         <div class="btnrow"><button id="btnSend">送信する</button></div>
         <div id="sendResult"></div>
       </div>
-      <h2>リスト詳細 <span>#${id} 先頭50社</span></h2>` +
-      `<table><tr><th>会社名</th><th>都道府県</th><th>ランク</th><th>電話</th></tr>` +
-      r.members.map(m => `<tr><td>${m.name}</td><td>${m.pref || "—"}</td>
-        <td>${m.rank || "—"}</td><td>${m.phone || "—"}</td></tr>`).join("") + `</table>`;
+      <h2>リスト詳細 <span>#${id}</span></h2>
+      <div class="chips" id="memberFilter" style="margin-bottom:10px">
+        ${Object.entries(MEMBER_FILTERS).map(([key, label]) =>
+          `<label class="chip${key === "" ? " on" : ""}"><input type="radio" name="memberFilter"
+            value="${key}"${key === "" ? " checked" : ""}>${label}</label>`).join("")}
+      </div>
+      <div id="memberTableWrap"></div>
+      <div id="memberHistoryWrap"></div>`;
+    await renderMemberTable(id, "");
+    bindMemberFilter(id);
 
     $("sendTemplate").addEventListener("change", () => {
       const tmpl = lastTemplates.find(x => String(x.id) === $("sendTemplate").value);
@@ -1090,7 +1223,10 @@ async function showDetail(id) {
           { method: "POST", body: JSON.stringify({ subject, body, dry_run: dryRun }) });
         rEl.innerHTML = `<div class="result ok">${dryRun ? "[ドライラン] " : ""}` +
           `対象${sr.target_count.toLocaleString()}社 / ` +
-          `送信${sr.stats.sent} 失敗${sr.stats.failed} ガードで中止${sr.stats.blocked} 配信停止${sr.stats.suppressed}</div>`;
+          `送信${sr.stats.sent} 失敗${sr.stats.failed} ガードで中止${sr.stats.blocked} 配信停止${sr.stats.suppressed}` +
+          `${sr.stats.stopped ? ` Kill Switchで中止${sr.stats.stopped}` : ""}</div>`;
+        const checkedFilter = document.querySelector('input[name="memberFilter"]:checked');
+        await renderMemberTable(id, checkedFilter ? checkedFilter.value : "");
       } catch (e) {
         rEl.innerHTML = `<div class="result err">${e.message}</div>`;
       }

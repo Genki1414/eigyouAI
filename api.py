@@ -25,6 +25,10 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/tenant/lists/csv      {"name","csv"} → 顧客持込CSVを取り込む
   GET  /api/tenant/lists          自テナントのリスト一覧
   GET  /api/tenant/lists/<id>     リスト詳細(自テナントのものだけ。他社分は404)
+  POST /api/tenant/lists/<id>/send  {"subject","body","dry_run"} → リストへフォーム
+                           自動送信。dry_run既定true(=実サイトへは送らない)。
+                           can_contact()・冪等性・ペーシング上限はsend_campaign()
+                           経由でそのまま適用される(HANDOFF.mdの原則を厳守)
   ※ Authorization: Bearer <tenant.api_key>。テナントIDはこのキーからサーバ側で
     解決し、リクエストボディのtenant_idは一切信用しない(offers.resolve_tenant_by_key)
   GET  / , /list_builder.html  操作画面(list_builder.html)をこのサーバ自身から配信。
@@ -48,6 +52,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -71,6 +76,8 @@ ATTRIBUTION_WINDOW_DAYS = 45
 # 実送信(send/followup)まで叩ける強い権限のため既定値を持たせない
 # (未設定なら誰にも一致しない=常に401、というフェイルセーフにする)。
 SALES_ENGINE_API_KEY = os.environ.get("SALES_ENGINE_API_KEY")
+
+_SEND_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/send$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
@@ -289,6 +296,25 @@ def h_tenant_list_detail(con, tenant_id, list_id, qs):
     return 200, res
 
 
+def h_tenant_list_send(con, tenant_id, list_id, data):
+    """保存済みリストから実際にフォーム自動送信キャンペーンを走らせる。
+    dry_runは既定でTrue(=実サイトへは何も送らない)。実送信するには
+    明示的に dry_run:false を指定する必要がある(取り消せない操作のため)。"""
+    subject = (data.get("subject") or "").strip()
+    body = (data.get("body") or "").strip()
+    if not subject or not body:
+        return 400, {"error": "subjectとbodyは必須です"}
+    dry_run = data.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        dry_run = True
+    res = TL.send_list(con, tenant_id, list_id, subject, body, dry_run=dry_run)
+    if res is None:
+        return 404, {"error": "リストが見つかりません"}
+    if "error" in res:
+        return 400, res
+    return 200, res
+
+
 def verify_ops_bearer(auth_header: str) -> bool:
     """/api/ops/* 用。Authorization: Bearer <SALES_ENGINE_API_KEY> を検証する。
     SALES_ENGINE_API_KEYが未設定なら常にFalse(=常に401)にして、
@@ -345,7 +371,8 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
-        if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv"):
+        send_match = _SEND_PATH_RE.match(path)
+        if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv") or send_match:
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -355,8 +382,10 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_lists_preview(con, tenant["id"], data)
                 elif path == "/api/tenant/lists":
                     st, res = h_tenant_lists_create(con, tenant["id"], data)
-                else:
+                elif path == "/api/tenant/lists/csv":
                     st, res = h_tenant_lists_csv(con, tenant["id"], data)
+                else:
+                    st, res = h_tenant_list_send(con, tenant["id"], int(send_match.group(1)), data)
                 return self._json(st, res)
             except Exception as e:  # noqa: BLE001
                 return self._json(500, {"error": str(e)[:200]})
@@ -659,9 +688,33 @@ def self_test(port=8899):
     t("他テナントがCSVで持ち込んだ非公開企業はフィルタにも出てこない",
       st == 200 and not any(s["name"] == "テナントB専用企業" for s in r.get("sample", [])))
 
+    print("\n── 送信先リストからの送信(dry_run) ──")
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send", {"body": "本文のみ"}, token=key_a)
+    t("subjectが無いと400", st == 400)
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "テスト件名", "body": "テスト本文"}, token=key_a)
+    t("POST /api/tenant/lists/<id>/send はdry_run既定でtrue",
+      st == 200 and r.get("dry_run") is True and "stats" in r)
+    send_campaign_id = r.get("campaign_id")
+    t("キャンペーンが実際に作られている",
+      send_campaign_id and con.execute(
+          "SELECT COUNT(*) FROM campaigns WHERE id=?", (send_campaign_id,)).fetchone()[0] == 1)
+
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "2回目", "body": "2回目"}, token=key_a)
+    t("同じリストへの再送信は同じcampaign_idを使い回す(二重送信防止)",
+      r.get("campaign_id") == send_campaign_id)
+
+    st, r = post_auth(f"/api/tenant/lists/{list_b_id}/send",
+                      {"subject": "x", "body": "y"}, token=key_a)
+    t("他テナントのリストへは送信できない(404)", st == 404)
+
+    con.execute("DELETE FROM touches WHERE campaign_id=?", (send_campaign_id,))
+    con.execute("DELETE FROM campaigns WHERE id=?", (send_campaign_id,))
     con.execute("DELETE FROM target_list_members WHERE list_id IN (?,?)", (list_a_id, list_b_id))
     con.execute("DELETE FROM target_lists WHERE id IN (?,?)", (list_a_id, list_b_id))
     con.execute("DELETE FROM companies WHERE owner_tenant_id IN (?,?)", (tid_a, tid_b))
+    con.execute("DELETE FROM offers WHERE tenant_id IN (?,?)", (tid_a, tid_b))
     con.execute("DELETE FROM tenants WHERE id IN (?,?)", (tid_a, tid_b))
     con.commit()
 

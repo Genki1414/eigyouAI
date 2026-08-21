@@ -201,6 +201,7 @@ def migrate(con):
         ("form_send_log", "page_text_snippet", "TEXT"),  # 成功判定できなかった原因調査用
         ("campaigns", "offer_id", "INTEGER"),  # compose.pyで確定したオファー。送信時のテナント解決に使う
         ("tenants", "api_key", "TEXT"),  # target_listsのAPI認証キー(SaaS販売用テナントに発行)
+        ("target_lists", "campaign_id", "INTEGER"),  # send_list()で一度送信すると紐づく(二重送信防止)
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:

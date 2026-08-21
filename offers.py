@@ -128,8 +128,15 @@ def add_tenant(con, name, sender_email, kind="client", sender_name=None, sender_
         (name, kind, sender_name or name, sender_email, sender_address,
          optout_url or f"mailto:{sender_email}",
          api_key, now))
+    tid = cur.lastrowid
+    # target_lists.send_list()がcampaigns.offer_id経由でテナントを解決するため、
+    # 最低1件のオファーが無いと送信できない。target_ruleは呼び出し側で使わない
+    # (送信先リストの企業を直接指定するため)ので「絶対に一致しない」条件にしておく。
+    con.execute("""INSERT INTO offers (tenant_id,name,offer_text,price_yen,target_rule,
+        ng_words,created_at) VALUES (?,?,?,?,?,?,?)""",
+        (tid, "デフォルト", "送信先リストからの直接送信用", 0, "1=0", "[]", now))
     con.commit()
-    return cur.lastrowid, api_key
+    return tid, api_key
 
 
 def resolve_tenant_by_key(con, api_key):

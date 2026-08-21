@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS target_lists (
   source TEXT NOT NULL,          -- 'filter' | 'csv'
   filter_json TEXT,              -- source='filter'の場合の条件(再現・監査用)
   company_count INTEGER DEFAULT 0,
+  campaign_id INTEGER,           -- send_list()で一度送信すると紐づく。二重クリックで
+                                  -- 別キャンペーンが増殖しないよう、以後はこれを使い回す
   created_at TEXT NOT NULL,
   FOREIGN KEY(tenant_id) REFERENCES tenants(id)
 );
@@ -228,6 +230,59 @@ def get_list(con, tenant_id, list_id, limit=200, offset=0):
         FROM target_list_members m JOIN companies c ON c.id=m.company_id
         WHERE m.list_id=? LIMIT ? OFFSET ?""", (list_id, limit, offset)).fetchall()
     return {"list": dict(lst), "members": [dict(r) for r in members]}
+
+
+def send_list(con, tenant_id, list_id, subject, body, dry_run=True):
+    """保存済みリストからフォーム自動送信キャンペーンを作り、既存のsenders.send_campaign()
+    にそのまま委譲する。can_contact()・冪等性・FormSenderのペーシング上限はすべて
+    send_campaign()側の仕組みがそのまま効く(ここで独自の送信経路は作らない)。
+
+    二重クリック対策: このリストが初めて送信される時だけ新しいcampaignを作り、
+    以後はtarget_lists.campaign_idに記録した同じcampaignを使い回す。同じ
+    campaign_idへtouchesを追加してもUNIQUE(campaign_id, company_id, step)と
+    INSERT OR IGNOREで重複しない。既に送信済み(sent_at IS NOT NULL)の行は
+    send_campaign()側のWHERE条件で自動的に対象から外れるため、再送信を押しても
+    未送信分だけがもう一度試される(リトライにはなるが二重送信にはならない)。
+    """
+    import senders
+
+    lst = con.execute("SELECT * FROM target_lists WHERE id=? AND tenant_id=?",
+                       (list_id, tenant_id)).fetchone()
+    if not lst:
+        return None
+
+    offer = con.execute("SELECT id FROM offers WHERE tenant_id=? ORDER BY id LIMIT 1",
+                         (tenant_id,)).fetchone()
+    if not offer:
+        return {"error": "このテナントにはオファーが設定されていません。管理者に連絡してください"}
+
+    # フォーム自動送信は問い合わせURLが分かっている企業にしか行えない
+    members = con.execute("""SELECT c.id FROM target_list_members m
+        JOIN companies c ON c.id = m.company_id
+        WHERE m.list_id=? AND c.contact_url IS NOT NULL""", (list_id,)).fetchall()
+    if not members:
+        return {"error": "このリストにはフォーム送信可能な企業がありません"
+                          "(問い合わせURLが確認できた企業のみ送信対象になります)"}
+
+    if lst["campaign_id"]:
+        campaign_id = lst["campaign_id"]
+    else:
+        now = datetime.now().isoformat(timespec="seconds")
+        cur = con.execute("""INSERT INTO campaigns (name, started_at, target_rule, offer_id)
+            VALUES (?,?,?,?)""",
+            (f"[リスト送信] {lst['name']}", now, f"target_list:{list_id}", offer["id"]))
+        campaign_id = cur.lastrowid
+        con.execute("UPDATE target_lists SET campaign_id=? WHERE id=?", (campaign_id, list_id))
+
+    for m in members:
+        con.execute("""INSERT OR IGNORE INTO touches
+            (campaign_id, company_id, channel, variant, step, subject, body)
+            VALUES (?,?,'フォーム','A',1,?,?)""", (campaign_id, m["id"], subject, body))
+    con.commit()
+
+    stats = senders.send_campaign(con, campaign_id, step=1, dry_run=dry_run)
+    return {"campaign_id": campaign_id, "target_count": len(members),
+            "dry_run": dry_run, "stats": stats}
 
 
 if __name__ == "__main__":

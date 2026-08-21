@@ -38,7 +38,7 @@
 6. compose.py  — AIパーソナライズ文面生成。A/B/Cは「訴求軸」を変える(トーン違いではない)
                  A:実績称賛型 B:課題提起型 C:同業事例型
 7. metrics.py  — ファネル/CAC/LTV・チャネル別・文面別・ランク別の集計
-8. out/console.html — キャンペーンコンソール
+8. console.py  — out/console.html（キャンペーンコンソール）を実データから生成
 
 ## 実行順
 python3 generate_sample.py            # (本番は ingest.py + enrich.py)
@@ -48,6 +48,7 @@ python3 campaign.py create "2026年9月 S+A 初回接触" --target SA
 python3 compose.py --campaign 1       # 本番はAI生成 / --offline でテンプレ
 python3 campaign.py simulate 1        # 本番はここが実送信+反応入力に置き換わる
 python3 metrics.py
+python3 console.py                    # out/console.html を再生成
 
 ## 本番化で差し替える3点
 1. campaign.py simulate → 実送信API(FAX: メッセージプラス/秒速FAX, メール: SendGrid)

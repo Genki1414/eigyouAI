@@ -1,0 +1,486 @@
+"""
+console.py — キャンペーンコンソールの生成
+console.html（旧: 手書きのデモ数値を直書きした静的ファイル）を、実データから
+毎回生成する方式に置き換えたもの。enrich_review.py と同じ「TEMPLATE内の
+__DATA__ を実データのJSONで置換する」方式に揃えている。
+
+送信キャンペーンがまだ1件も実施されていなくても壊れずに「準備中」表示になる。
+FormSenderのβ検証(form_send_log)は、本番キャンペーン開始前でも唯一の実測値
+なので独立したセクションとして必ず表示する。
+
+使い方: python3 console.py                → out/console.html を生成
+        python3 console.py --campaign 1    → 特定キャンペーンに絞る
+"""
+import argparse
+import json
+import sqlite3
+from pathlib import Path
+
+BASE = Path(__file__).parent
+DB = BASE / "out" / "companies.db"
+MODEL_PATH = BASE / "out" / "model_v2.json"
+OUT = BASE / "out" / "console.html"
+
+
+def build_data(con, campaign_id=None):
+    import metrics as M
+    import offers as OF
+
+    metrics = M.compute(con, campaign_id)
+
+    campaign = None
+    if campaign_id:
+        campaign = con.execute("SELECT * FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+    else:
+        campaign = con.execute("SELECT * FROM campaigns ORDER BY id DESC LIMIT 1").fetchone()
+    campaign = dict(campaign) if campaign else None
+
+    model = json.loads(MODEL_PATH.read_text()) if MODEL_PATH.exists() else None
+
+    where, params = ("t.campaign_id=?", [campaign["id"]]) if campaign else ("1=1", [])
+    samples = con.execute(f"""SELECT t.channel, t.variant, t.step, t.subject, t.body,
+            t.responded, t.paid, c.name, c.pref, c.rank, c.score, c.score_v2
+        FROM touches t JOIN companies c ON c.id = t.company_id
+        WHERE {where} AND t.body IS NOT NULL AND t.body != ''
+        ORDER BY (t.paid + t.responded) DESC, t.id DESC LIMIT 6""", params).fetchall()
+    samples = [dict(r) for r in samples]
+
+    newleads = con.execute("""SELECT c.name, c.pref, c.rank, c.score, c.score_v2,
+            c.enrich_note, c.hiring_now
+        FROM companies c
+        WHERE c.dedup_of IS NULL AND c.prescore_selected=1
+          AND c.id NOT IN (SELECT company_id FROM touches)
+        ORDER BY COALESCE(c.score_v2, c.score) DESC LIMIT 8""").fetchall()
+    newleads = [dict(r) for r in newleads]
+
+    total = con.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
+    deduped = con.execute("SELECT COUNT(*) FROM companies WHERE dedup_of IS NOT NULL").fetchone()[0]
+    suppressed = con.execute("SELECT COUNT(*) FROM suppression").fetchone()[0]
+    dormant = con.execute("SELECT COUNT(*) FROM dormant").fetchone()[0]
+    prescore_selected = con.execute(
+        "SELECT COUNT(*) FROM companies WHERE prescore_selected=1").fetchone()[0]
+    contact_ready = con.execute(
+        "SELECT COUNT(*) FROM companies WHERE prescore_selected=1 AND contact_url IS NOT NULL "
+        "AND dedup_of IS NULL").fetchone()[0]
+    offer_rows = con.execute("""SELECT o.id, o.name, o.price_yen, o.target_rule
+        FROM offers o ORDER BY o.tenant_id, o.price_yen""").fetchall()
+
+    fb_total = con.execute("SELECT COUNT(*) FROM form_send_log").fetchone()[0]
+    fb_status = con.execute("""SELECT status, COUNT(*) n FROM form_send_log
+        GROUP BY status ORDER BY n DESC""").fetchall()
+    fb_reason = con.execute("""SELECT status, reason_code, COUNT(*) n FROM form_send_log
+        GROUP BY status, reason_code ORDER BY n DESC LIMIT 12""").fetchall()
+    fb_success = sum(r["n"] for r in fb_status if r["status"] == "SUCCESS")
+
+    return {
+        "generated_note": "生成時点のout/companies.dbの実データ（デモ数値ではない）",
+        "campaign": campaign,
+        "metrics": metrics,
+        "model": model,
+        "samples": samples,
+        "newleads": newleads,
+        "gate": {
+            "total_companies": total, "deduped": deduped, "suppressed": suppressed,
+            "dormant": dormant, "prescore_selected": prescore_selected,
+            "contact_ready": contact_ready, "offers": [dict(r) for r in offer_rows],
+        },
+        "form_beta": {
+            "total_attempts": fb_total,
+            "success": fb_success,
+            "success_rate": round(fb_success / fb_total * 100, 1) if fb_total else None,
+            "by_status": [dict(r) for r in fb_status],
+            "by_reason": [dict(r) for r in fb_reason],
+        },
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--campaign", type=int, default=None)
+    a = ap.parse_args()
+
+    con = sqlite3.connect(DB)
+    con.row_factory = sqlite3.Row
+    data = build_data(con, a.campaign)
+
+    html = TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False))
+    OUT.write_text(html, encoding="utf-8")
+    print(f"→ {OUT}")
+    print(f"  キャンペーン: {data['campaign']['name'] if data['campaign'] else '(未作成)'}")
+    print(f"  送信実績: {data['metrics']['overall']['sent']}件")
+    print(f"  フォームβ検証: {data['form_beta']['total_attempts']}件 "
+          f"(成功 {data['form_beta']['success']}件"
+          + (f" / {data['form_beta']['success_rate']}%" if data['form_beta']['success_rate'] else "")
+          + ")")
+
+
+TEMPLATE = r"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>足場AI営業エンジン — キャンペーンコンソール</title>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700;900&family=IBM+Plex+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --concrete:#EFF1F2; --surface:#FFFFFF; --ink:#16191D; --steel:#6E7880;
+  --line:#DDE1E4; --safety:#F2C511; --blue:#24589E; --blue-soft:#E8EFF8;
+  --win:#1E7A4D; --warn:#B4441F; --mono:'IBM Plex Mono',monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--concrete);color:var(--ink);font-family:'IBM Plex Sans JP',sans-serif;font-size:14px;line-height:1.6}
+.stripe{height:8px;background:repeating-linear-gradient(-45deg,var(--safety) 0 14px,var(--ink) 14px 28px)}
+header{background:var(--surface);border-bottom:1px solid var(--line);padding:20px 24px 18px}
+.wrap{max-width:1140px;margin:0 auto}
+.hd-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+h1{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:clamp(19px,4vw,26px);letter-spacing:.02em}
+h1 small{font-weight:700;font-size:11px;color:var(--steel);letter-spacing:.18em;display:block}
+.status{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.06em;
+  border-radius:99px;padding:5px 12px;white-space:nowrap;border:1px solid transparent}
+.status.live{background:#E7F5EC;color:var(--win);border-color:#BFE3CE}
+.status.pending{background:#FFF6DE;color:#8A6300;border-color:#F0DCA0}
+.camp{font-family:var(--mono);font-size:12px;color:var(--steel);margin-top:8px}
+.econ{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:14px}
+.card{background:var(--concrete);border:1px solid var(--line);border-radius:6px;padding:11px 14px}
+.card b{font-family:var(--mono);font-size:23px;font-weight:600;display:block;line-height:1.25}
+.card span{font-size:11px;color:var(--steel);letter-spacing:.06em}
+.card.key{background:var(--ink);border-color:var(--ink)} .card.key b{color:var(--safety)} .card.key span{color:#B9BEC4}
+.card em{font-style:normal;font-size:11px;color:var(--steel);font-family:var(--mono)}
+h2{font-family:'Zen Kaku Gothic New';font-weight:700;font-size:15px;letter-spacing:.04em;margin:28px 0 10px;display:flex;align-items:center;gap:8px}
+h2::before{content:"";width:4px;height:16px;background:var(--safety)}
+h2 span{font-family:var(--mono);font-size:11px;color:var(--steel);font-weight:500;letter-spacing:0}
+main{max-width:1140px;margin:0 auto;padding:8px 24px 60px}
+.empty{background:var(--surface);border:1px dashed var(--line);border-radius:8px;padding:18px;
+  font-size:13px;color:var(--steel);text-align:center}
+
+/* ファネル */
+.funnel{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px;overflow:hidden}
+.stage{display:grid;grid-template-columns:88px 1fr 96px;gap:12px;align-items:center;margin-bottom:9px}
+.stage label{font-size:12px;font-weight:700;text-align:right;color:var(--steel)}
+.stage .track{background:var(--concrete);border-radius:3px;height:30px;position:relative;overflow:hidden}
+.stage .fill{height:100%;background:var(--ink);display:flex;align-items:center;padding-left:9px;
+  color:#fff;font-family:var(--mono);font-size:12px;font-weight:600;transition:width .8s cubic-bezier(.2,.8,.2,1)}
+.stage:nth-child(1) .fill{background:#3A4148}
+.stage:nth-child(5) .fill{background:var(--blue)}
+.stage:nth-child(6) .fill{background:var(--win)}
+.stage .conv{font-family:var(--mono);font-size:12px;color:var(--steel)}
+.stage .conv b{color:var(--ink);font-weight:600}
+.drop{font-size:11px;color:var(--warn);font-weight:700}
+
+/* テーブル */
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+th{background:var(--concrete);font-size:11px;letter-spacing:.06em;color:var(--steel);text-align:left;padding:9px 12px;font-weight:700}
+td{padding:10px 12px;border-top:1px solid var(--line);font-size:13px}
+td.num{font-family:var(--mono);text-align:right}
+tr.best td{background:#FFFBEB}
+.pill{display:inline-block;background:var(--concrete);border-radius:4px;padding:1px 8px;font-size:11px;font-family:var(--mono)}
+.pill.win{background:var(--safety);font-weight:700}
+.microbar{display:inline-block;height:6px;background:var(--ink);border-radius:3px;vertical-align:middle;margin-right:6px}
+
+/* β検証(フォーム送信) */
+.betabox{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px}
+.beta-head{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;margin-bottom:14px}
+.beta-rate{font-family:var(--mono);font-size:32px;font-weight:600}
+.beta-rows{display:grid;gap:6px}
+.beta-row{display:grid;grid-template-columns:150px 1fr 40px;gap:10px;align-items:center;font-size:12px}
+.beta-row .lbl{font-family:var(--mono);font-size:11px;color:var(--steel);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.beta-row .track{background:var(--concrete);border-radius:3px;height:14px;position:relative}
+.beta-row .fill{height:100%;border-radius:3px}
+.beta-row .fill.ok{background:var(--win)} .beta-row .fill.skip{background:var(--safety)}
+.beta-row .fill.fail{background:var(--warn)}
+.beta-row .n{font-family:var(--mono);text-align:right}
+
+/* 学習モデル */
+.modelbox{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px}
+.vs{display:grid;grid-template-columns:1fr auto 1fr;gap:14px;align-items:center;margin-bottom:16px}
+.vsbox{border:1px solid var(--line);border-radius:6px;padding:12px;text-align:center}
+.vsbox.v2{border:2px solid var(--ink);background:#FFFBEB}
+.vsbox h4{font-size:11px;color:var(--steel);letter-spacing:.08em;font-weight:700;margin-bottom:6px}
+.vsbox b{font-family:var(--mono);font-size:26px;font-weight:600;display:block;line-height:1.2}
+.vsbox em{font-style:normal;font-size:11px;color:var(--steel);font-family:var(--mono)}
+.arrow{font-family:var(--mono);font-size:20px;color:var(--safety);font-weight:600}
+.coefs{display:grid;gap:5px}
+.coef{display:grid;grid-template-columns:132px 1fr;gap:10px;align-items:center;font-size:12px}
+.coef .cname{font-family:var(--mono);font-size:11px;color:var(--steel);text-align:right}
+.coef .cbar{height:16px;position:relative;background:var(--concrete);border-radius:3px}
+.coef .cbar i{position:absolute;top:0;height:100%;border-radius:3px}
+.coef .cbar i.pos{left:50%;background:var(--win)}
+.coef .cbar i.neg{right:50%;background:var(--warn)}
+.coef .cbar span{position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--steel);opacity:.4}
+.mnote{font-size:12px;color:var(--steel);margin-top:12px;padding-top:12px;border-top:1px dashed var(--line)}
+
+/* 文面サンプル */
+.msgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px}
+.msg{background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
+.msg-hd{padding:10px 13px;border-bottom:1px dashed var(--line);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.msg-hd .who{font-weight:700;font-size:13px}
+.msg-hd .who i{font-style:normal;font-size:11px;color:var(--steel);font-weight:400;display:block;font-family:var(--mono)}
+.flags{display:flex;gap:4px;flex-shrink:0}
+.flag{font-size:10px;font-family:var(--mono);border:1px solid var(--line);border-radius:3px;padding:1px 6px;color:var(--steel)}
+.flag.on{background:var(--win);color:#fff;border-color:var(--win)}
+.msg-subj{padding:8px 13px 0;font-size:12px;font-weight:700;color:var(--blue)}
+.msg-body{padding:8px 13px 13px;font-size:12px;white-space:pre-wrap;color:#2B3238;line-height:1.7;flex:1;
+  max-height:190px;overflow:auto}
+.readme{background:var(--blue-soft);border:1px solid #C4D6EC;border-radius:8px;padding:14px 16px;font-size:13px}
+.readme b{color:var(--blue)}
+.readme ul{margin:6px 0 0 18px} .readme li{margin-bottom:3px}
+footer{text-align:center;font-size:11px;color:var(--steel);padding:24px}
+@media(max-width:640px){
+  main{padding:8px 14px 50px} header{padding:16px 14px}
+  .stage{grid-template-columns:64px 1fr;row-gap:2px}
+  .stage .conv{grid-column:2;font-size:11px}
+  th:nth-child(n+5),td:nth-child(n+5){display:none}
+  .beta-row{grid-template-columns:96px 1fr 34px}
+}
+</style>
+</head>
+<body>
+<div class="stripe"></div>
+<header><div class="wrap">
+  <div class="hd-top">
+    <h1><small>ASHIBA AI SALES ENGINE</small>キャンペーンコンソール</h1>
+    <div class="status" id="status"></div>
+  </div>
+  <div class="camp" id="camp"></div>
+  <div class="econ" id="econ"></div>
+</div></header>
+<main>
+  <h2>獲得ファネル <span>SEND → PAID</span></h2>
+  <div id="funnelWrap"></div>
+
+  <h2>フォーム送信 β検証実績 <span>PLAYWRIGHT FORM SENDER</span></h2>
+  <div id="betaWrap"></div>
+
+  <h2>チャネル別成績 <span>WHICH CHANNEL WORKS</span></h2>
+  <div id="tblChWrap"></div>
+
+  <h2>文面A/Bテスト <span>WHICH MESSAGE WORKS</span></h2>
+  <div id="tblVaWrap"></div>
+
+  <h2>スコアランク別 検証 <span>DOES THE SCORE PREDICT?</span></h2>
+  <div id="tblRkWrap"></div>
+
+  <h2>多段フォローの累積 <span>SEQUENCE</span></h2>
+  <div id="seqWrap"></div>
+
+  <h2>スコアV2 — 実測からの学習 <span>MODEL LEARNING</span></h2>
+  <div id="modelWrap"></div>
+
+  <h2>次ロット候補（未接触） <span>NEXT BATCH</span></h2>
+  <div id="tblNewWrap"></div>
+
+  <h2>実際に送られた文面 <span>SAMPLE OUTPUT</span></h2>
+  <div id="msgsWrap"></div>
+
+  <h2>この数字の読み方 <span>WHAT TO DO NEXT</span></h2>
+  <div class="readme" id="insight"></div>
+
+  <h2>対象プールの状況 <span>PIPELINE</span></h2>
+  <div id="gateWrap"></div>
+</main>
+<footer id="foot"></footer>
+<script>
+const D = __DATA__;
+const M = D.metrics, O = M.overall;
+const yen = n => n==null ? "—" : n.toLocaleString()+"円";
+const VL = {A:"実績称賛型", B:"課題提起型", C:"同業事例型"};
+const empty = msg => `<div class="empty">${msg}</div>`;
+
+document.getElementById("status").outerHTML = O.sent > 0
+  ? `<div class="status live" id="status">● 稼働中</div>`
+  : `<div class="status pending" id="status">● 準備中（本番送信は未実施）</div>`;
+
+document.getElementById("camp").textContent = D.campaign
+  ? `CAMPAIGN #${D.campaign.id}  ${D.campaign.name}  /  対象 ${O.sent.toLocaleString()}社  /  開始 ${(D.campaign.started_at||"").slice(0,10)}`
+  : "キャンペーン未作成 / campaign.py でキャンペーンを作成すると、ここに実績が表示されます";
+
+document.getElementById("econ").innerHTML = `
+  <div class="card key"><b>${yen(O.cac_yen)}</b><span>CAC（有料1社の獲得コスト）</span></div>
+  <div class="card"><b>${O.paid}</b><span>有料転換 / ${O.sent}送信</span></div>
+  <div class="card"><b>${yen(O.mrr_yen)}</b><span>獲得MRR</span></div>
+  <div class="card"><b>${O.ltv_cac ?? "—"}<em>x</em></b><span>LTV / CAC</span></div>
+  <div class="card"><b>${yen(O.cost_yen)}</b><span>投下実費</span></div>`;
+
+if (O.sent === 0) {
+  document.getElementById("funnelWrap").innerHTML = empty(
+    "まだ本番送信がありません。キャンペーン作成→文面生成→送信を実行すると、ここに獲得ファネルが表示されます。");
+} else {
+  const stages = [
+    ["送信", O.sent, null], ["到達", O.delivered, O.rate_delivered],
+    ["反応", O.responded, O.rate_responded], ["無料登録", O.signed_up, O.rate_signup],
+    ["積算実行", O.activated, O.rate_activated], ["有料転換", O.paid, O.rate_paid]];
+  document.getElementById("funnelWrap").innerHTML = `<div class="funnel">` + stages.map(([l,v,r])=>{
+    const w = Math.max(v/O.sent*100, 2.5);
+    const weak = r!==null && r < 35 && l!=="反応";
+    return `<div class="stage"><label>${l}</label>
+      <div class="track"><div class="fill" style="width:${w}%">${v.toLocaleString()}</div></div>
+      <div class="conv">${r===null?"—":`<b>${r}%</b>`} ${weak?'<span class="drop">↓要改善</span>':""}</div></div>`;
+  }).join("") + `</div>`;
+}
+
+// フォーム送信β検証(form_send_log。本番キャンペーン開始前でも唯一の実測値)
+const FB = D.form_beta;
+if (FB.total_attempts === 0) {
+  document.getElementById("betaWrap").innerHTML = empty("まだフォーム送信の試行がありません。");
+} else {
+  const kindOf = s => s === "SUCCESS" ? "ok" : (s && s.startsWith("SKIP") ? "skip" : "fail");
+  const maxN = Math.max(...FB.by_status.map(r=>r.n));
+  document.getElementById("betaWrap").innerHTML = `<div class="betabox">
+    <div class="beta-head">
+      <div><div class="beta-rate">${FB.success_rate ?? "—"}<em style="font-size:16px">%</em></div>
+        <div style="font-size:11px;color:var(--steel)">成功率(${FB.success}/${FB.total_attempts}件試行)</div></div>
+    </div>
+    <div class="beta-rows">${FB.by_status.map(r=>`
+      <div class="beta-row"><div class="lbl">${r.status}</div>
+        <div class="track"><div class="fill ${kindOf(r.status)}" style="width:${Math.max(r.n/maxN*100,3)}%"></div></div>
+        <div class="n">${r.n}</div></div>`).join("")}</div>
+    <div class="mnote">送信成功率は100%を目指す設計ではない(CAPTCHA・採用専用フォーム等はSKIPが正しい挙動)。
+      内訳の詳細は下記reason_code別。</div>
+    <div class="beta-rows" style="margin-top:10px">${FB.by_reason.map(r=>`
+      <div class="beta-row"><div class="lbl">${r.reason_code || r.status}</div>
+        <div class="track"><div class="fill ${kindOf(r.status)}" style="width:${Math.max(r.n/maxN*100,3)}%"></div></div>
+        <div class="n">${r.n}</div></div>`).join("")}</div>
+  </div>`;
+}
+
+function tableHtml(rows, head, labelFn){
+  if (!rows.length) return empty("データがありません。");
+  const max = Math.max(...rows.map(r=>r[1].rate_responded));
+  return `<table><tr><th>${head}</th><th class="num">送信</th><th class="num">反応率</th><th class="num">有料</th><th class="num">CAC</th></tr>` +
+   rows.map(([k,m])=>`<tr class="${m.rate_responded===max&&max>0?"best":""}">
+     <td>${labelFn(k)} ${m.rate_responded===max&&max>0?'<span class="pill win">最良</span>':""}</td>
+     <td class="num">${m.sent.toLocaleString()}</td>
+     <td class="num"><span class="microbar" style="width:${max>0?m.rate_responded/max*46:0}px"></span>${m.rate_responded}%</td>
+     <td class="num">${m.paid}</td>
+     <td class="num">${m.cac_yen?yen(m.cac_yen):"—"}</td></tr>`).join("") + `</table>`;
+}
+document.getElementById("tblChWrap").innerHTML = tableHtml(
+  Object.entries(M.by_channel).sort((a,b)=>b[1].rate_responded-a[1].rate_responded), "チャネル", k=>k);
+document.getElementById("tblVaWrap").innerHTML = tableHtml(
+  Object.entries(M.by_variant).sort((a,b)=>b[1].rate_responded-a[1].rate_responded), "文面バリアント", k=>`<span class="pill">${k}</span> ${VL[k]||k}`);
+document.getElementById("tblRkWrap").innerHTML = tableHtml(
+  Object.entries(M.by_rank).filter(([,m])=>m.sent>0), "スコアランク", k=>`<span class="pill">${k}</span>ランク`);
+
+// 多段フォローの累積
+const steps = Object.entries(M.by_step).sort();
+if (!steps.length) {
+  document.getElementById("seqWrap").innerHTML = empty("まだフォロー送信がありません。");
+} else {
+  let cumR=0, cumP=0;
+  const totR = steps.reduce((a,[,m])=>a+m.responded,0) || 1;
+  document.getElementById("seqWrap").innerHTML = `<div class="funnel">` + steps.map(([st,m],i)=>{
+    cumR+=m.responded; cumP+=m.paid;
+    const w = Math.max(m.responded/totR*100, 3);
+    const label = ["初回接触","D+14 別チャネル","D+35 最終接触"][i] || `Step${st}`;
+    return `<div class="stage"><label>Step${st}</label>
+     <div class="track"><div class="fill" style="width:${w}%;background:${["#16191D","#3C6FB5","#8A9299"][i]||"#8A9299"}">${m.responded}件</div></div>
+     <div class="conv">${m.rate_responded}% <b>累計${cumR}</b></div></div>
+     <div style="font-size:11px;color:var(--steel);margin:-6px 0 10px 100px;font-family:var(--mono)">${label} / 送信${m.sent.toLocaleString()} / 有料${m.paid}</div>`;
+  }).join("") + (steps[0][1].responded > 0 ? `<div class="mnote">初回だけで止めていたら反応は ${steps[0][1].responded}件。3段まで回して <b>${cumR}件（${(cumR/steps[0][1].responded).toFixed(1)}倍）</b>、有料は ${steps[0][1].paid}→${cumP}社。追加コストはチャネル単価の安い順に配分している。</div>` : "") + `</div>`;
+}
+
+// 学習モデル
+const mo = D.model;
+if (!mo) {
+  document.getElementById("modelWrap").innerHTML = empty(
+    "まだ学習データが足りません(反応30件以上が必要)。learn.pyは接触数が増えてから実行してください。");
+} else {
+  const CN = {va_A:"文面A(実績称賛)",va_B:"文面B(課題提起)",va_C:"文面C(同業事例)",ch_mail:"チャネル:メール",
+   ch_fax:"チャネル:FAX",ch_dm:"チャネル:郵送DM",is_tobi:"とび・土工",is_kaitai:"解体",
+   hiring_now:"求人出稿中",has_website:"HPあり",website_quality:"HP品質",log_emp:"従業員規模",
+   log_capital:"資本金",google_reviews:"レビュー数",prime_ratio:"元請比率",license_seq_pct:"許可番号順位(社歴代理)"};
+  const top = Object.entries(mo.coef).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).slice(0,8);
+  const mx = Math.max(...top.map(([,v])=>Math.abs(v)));
+  document.getElementById("modelWrap").innerHTML = `<div class="modelbox">
+   <div class="vs">
+     <div class="vsbox"><h4>V1 手書きルール</h4><b>${mo.lift_v1}<em>x</em></b><em>AUC ${mo.auc_v1}</em></div>
+     <div class="arrow">▶</div>
+     <div class="vsbox ${mo.promoted?'v2':''}"><h4>V2 実測から学習</h4><b>${mo.lift_v2}<em>x</em></b><em>AUC ${mo.auc_v2}</em></div>
+   </div>
+   <div class="coefs">${top.map(([k,v])=>`
+     <div class="coef"><div class="cname">${CN[k]||k}</div>
+       <div class="cbar"><span></span>
+         <i class="${v>0?"pos":"neg"}" style="width:${Math.abs(v)/mx*48}%"></i></div></div>`).join("")}</div>
+   <div class="mnote">学習データ ${mo.n_samples.toLocaleString()}件 / 反応 ${mo.n_positive}件。
+   採用モデル: <b>${mo.active_model==='v2'?'V2(学習モデル)':'V1(手書きルール)のまま'}</b>${mo.promoted?'':' — V2が昇格条件を満たさなかったため'}。
+   緑が反応を上げる要因、赤が下げる要因。</div>
+  </div>`;
+}
+
+// 次ロット
+document.getElementById("tblNewWrap").innerHTML = D.newleads.length ? `<table>
+ <tr><th>会社</th><th class="num">V1</th><th class="num">V2予測</th><th>AI所見</th></tr>` +
+ D.newleads.map(n=>`<tr>
+   <td><b>${n.name}</b> <span class="pill">${n.pref}</span>${n.hiring_now?' <span class="pill win">求人中</span>':""}</td>
+   <td class="num">${(n.score??0).toFixed(0)}</td>
+   <td class="num"><b>${n.score_v2!=null?n.score_v2.toFixed(1):"—"}</b></td>
+   <td style="font-size:12px;color:var(--steel)">${(n.enrich_note||"(未エンリッチ)").slice(0,34)}</td></tr>`).join("") + `</table>`
+ : empty("対象条件(prescore_selected=1・未接触)に合う候補がありません。");
+
+document.getElementById("msgsWrap").innerHTML = D.samples.length ? `<div class="msgs">` +
+ D.samples.map(s=>`
+  <div class="msg">
+    <div class="msg-hd">
+      <div class="who">${s.name}<i>${s.pref} / Step${s.step} / ${s.channel} / 型${s.variant||"-"}</i></div>
+      <div class="flags">
+        <span class="flag ${s.responded?"on":""}">反応</span>
+        <span class="flag ${s.paid?"on":""}">有料</span>
+      </div>
+    </div>
+    ${s.subject && s.subject!=="-" ? `<div class="msg-subj">件名: ${s.subject}</div>`:""}
+    <div class="msg-body">${s.body}</div>
+  </div>`).join("") + `</div>`
+ : empty("まだ送信された文面がありません。");
+
+// 示唆の自動生成
+const chEntries = Object.entries(M.by_channel);
+const vaEntries = Object.entries(M.by_variant);
+if (!chEntries.length) {
+  document.getElementById("insight").innerHTML =
+    `<b>まだ判断材料がありません。</b> 本番キャンペーンを送信すると、ここに次の一手（効いたチャネル・文面・ボトルネック）が自動で表示されます。`;
+} else {
+  const chSorted = chEntries.slice().sort((a,b)=>b[1].rate_responded-a[1].rate_responded);
+  const vaSorted = vaEntries.slice().sort((a,b)=>b[1].rate_responded-a[1].rate_responded);
+  const cheapest = chEntries.filter(([,m])=>m.cac_yen).sort((a,b)=>a[1].cac_yen-b[1].cac_yen)[0];
+  const rk = Object.entries(M.by_rank).filter(([,m])=>m.sent>20);
+  const rkOK = rk.length>1 && rk[0][1].rate_responded > rk[rk.length-1][1].rate_responded;
+  const stages2 = [["到達",O.rate_delivered],["反応",O.rate_responded],["無料登録",O.rate_signup],["積算実行",O.rate_activated],["有料転換",O.rate_paid]];
+  const weakest = stages2.filter(s=>s[1]!==null).sort((a,b)=>a[1]-b[1])[0];
+  document.getElementById("insight").innerHTML = `
+   <ul>
+    <li><b>効いたチャネル:</b> ${chSorted[0][0]}（反応率 ${chSorted[0][1].rate_responded}%）。${cheapest?`CACが最も安いのは ${cheapest[0]} の ${yen(cheapest[1].cac_yen)} で、次回はここに予算を寄せる。`:""}</li>
+    ${vaSorted.length ? `<li><b>効いた文面:</b> ${VL[vaSorted[0][0]]||vaSorted[0][0]}（${vaSorted[0][1].rate_responded}%）。最下位の${VL[vaSorted[vaSorted.length-1][0]]||vaSorted[vaSorted.length-1][0]}は次回ローテーションから外し、勝ち型の派生を新バリアントとして投入する。</li>` : ""}
+    <li><b>スコアの妥当性:</b> ${rkOK?"上位ランクほど反応率が高く、スコアリングは機能している。":"ランク間の差がまだ小さい。接触数が増えてから再評価する。"}</li>
+    ${weakest ? `<li><b>最大のボトルネック:</b> 「${weakest[0]}」段階（転換 ${weakest[1]}%）。ここを1段直すのが、送信数を増やすより費用対効果が高い。</li>` : ""}
+    <li><b>M&Aでの意味:</b> CAC ${yen(O.cac_yen)} / LTV比 ${O.ltv_cac??"—"}倍 という数字が出た時点で、買い手は「この会社は営業が再現できる」と判断できる。</li>
+   </ul>`;
+}
+
+// 対象プールの状況
+const G = D.gate;
+document.getElementById("gateWrap").innerHTML = `
+  <div class="econ">
+    <div class="card"><b>${G.total_companies.toLocaleString()}</b><span>企業データ総数</span></div>
+    <div class="card"><b>${G.prescore_selected.toLocaleString()}</b><span>事前絞込 選出済み</span></div>
+    <div class="card"><b>${G.contact_ready.toLocaleString()}</b><span>フォームURL確定済み</span></div>
+    <div class="card"><b>${G.deduped.toLocaleString()}</b><span>重複統合</span></div>
+    <div class="card"><b>${G.suppressed.toLocaleString()}</b><span>配信停止</span></div>
+    <div class="card"><b>${G.dormant.toLocaleString()}</b><span>休眠プール</span></div>
+  </div>
+  <div style="margin-top:12px">${tableHtmlOffers(G.offers)}</div>`;
+function tableHtmlOffers(offers){
+  if (!offers.length) return empty("オファーが未登録です。offers.py init を実行してください。");
+  return `<table><tr><th>オファー</th><th class="num">価格</th><th>対象条件</th></tr>` +
+   offers.map(o=>`<tr><td><b>${o.name}</b></td>
+     <td class="num">${o.price_yen?yen(o.price_yen)+'/月':'無料'}</td>
+     <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${o.target_rule}</td></tr>`).join("") + `</table>`;
+}
+
+document.getElementById("foot").textContent = D.generated_note + " / LTV = MRR × 24ヶ月想定";
+</script>
+</body>
+</html>
+"""
+
+if __name__ == "__main__":
+    main()

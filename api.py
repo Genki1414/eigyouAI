@@ -19,6 +19,15 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            step=send/followupは必ずsenders.send_campaign()経由になり、
                            db.can_contact()をバイパスしない(HANDOFF.mdの原則を厳守)
 
+  ── 送信先リスト(SaaSとして他社に販売する側。テナントごとのapi_keyで認証) ──
+  POST /api/tenant/lists/preview  {"filters"} → 該当件数のプレビュー(保存しない)
+  POST /api/tenant/lists          {"name","filters"} → フィルタ型リストを保存
+  POST /api/tenant/lists/csv      {"name","csv"} → 顧客持込CSVを取り込む
+  GET  /api/tenant/lists          自テナントのリスト一覧
+  GET  /api/tenant/lists/<id>     リスト詳細(自テナントのものだけ。他社分は404)
+  ※ Authorization: Bearer <tenant.api_key>。テナントIDはこのキーからサーバ側で
+    解決し、リクエストボディのtenant_idは一切信用しない(offers.resolve_tenant_by_key)
+
 設計の要点:
   - touch_id で「どの接触が効いたか」を紐付ける。これが取れないと学習データにならない
   - touch_id が無い流入も受ける（自然流入・紹介）。company_id で照合し、
@@ -45,7 +54,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import db
 import metrics
+import offers
 import run as R
+import target_lists as TL
 
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "dev-secret-change-me")
 LP_URL = os.environ.get("LP_URL", "https://ashibase.jp/sekisan")
@@ -213,6 +224,61 @@ def sign(raw: bytes) -> str:
     return hmac.new(WEBHOOK_SECRET.encode(), raw, hashlib.sha256).hexdigest()
 
 
+def verify_tenant_bearer(con, auth_header: str):
+    """/api/tenant/* 用。Authorization: Bearer <tenant.api_key> からテナント行を
+    解決する。運用専用の SALES_ENGINE_API_KEY とは完全に別の認証で、
+    このキーはテナント自身のリスト作成・閲覧しかできない(run-step等には使えない)。
+    見つからなければNone(=呼び出し側で401にする)。"""
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header[len("Bearer "):]
+    return offers.resolve_tenant_by_key(con, token)
+
+
+# ── 送信先リスト(SaaS販売用) ─────────────────
+def h_tenant_lists_preview(con, tenant_id, data):
+    filters = data.get("filters") or {}
+    if not isinstance(filters, dict):
+        return 400, {"error": "filtersはオブジェクトで指定してください"}
+    return 200, TL.preview_filter(con, tenant_id, filters)
+
+
+def h_tenant_lists_create(con, tenant_id, data):
+    name = (data.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "nameは必須です"}
+    filters = data.get("filters") or {}
+    if not isinstance(filters, dict):
+        return 400, {"error": "filtersはオブジェクトで指定してください"}
+    return 200, TL.create_from_filter(con, tenant_id, name, filters)
+
+
+def h_tenant_lists_csv(con, tenant_id, data):
+    name = (data.get("name") or "").strip()
+    csv_text = data.get("csv")
+    if not name or not csv_text:
+        return 400, {"error": "nameとcsvは必須です"}
+    if len(csv_text) > 10_000_000:  # 10MB上限(暴走・誤操作の被害抑制)
+        return 400, {"error": "CSVが大きすぎます(上限10MB)"}
+    res = TL.create_from_csv(con, tenant_id, name, csv_text)
+    if "error" in res:
+        return 400, res
+    return 200, res
+
+
+def h_tenant_lists_list(con, tenant_id):
+    return 200, {"lists": TL.list_lists(con, tenant_id)}
+
+
+def h_tenant_list_detail(con, tenant_id, list_id, qs):
+    limit = min(int(qs.get("limit", ["200"])[0]), 1000)
+    offset = int(qs.get("offset", ["0"])[0])
+    res = TL.get_list(con, tenant_id, list_id, limit=limit, offset=offset)
+    if not res:
+        return 404, {"error": "リストが見つかりません"}
+    return 200, res
+
+
 def verify_ops_bearer(auth_header: str) -> bool:
     """/api/ops/* 用。Authorization: Bearer <SALES_ENGINE_API_KEY> を検証する。
     SALES_ENGINE_API_KEYが未設定なら常にFalse(=常に401)にして、
@@ -269,6 +335,24 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
+        if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv"):
+            con = self._con()
+            try:
+                tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
+                if not tenant:
+                    return self._json(401, {"error": "unauthorized"})
+                if path == "/api/tenant/lists/preview":
+                    st, res = h_tenant_lists_preview(con, tenant["id"], data)
+                elif path == "/api/tenant/lists":
+                    st, res = h_tenant_lists_create(con, tenant["id"], data)
+                else:
+                    st, res = h_tenant_lists_csv(con, tenant["id"], data)
+                return self._json(st, res)
+            except Exception as e:  # noqa: BLE001
+                return self._json(500, {"error": str(e)[:200]})
+            finally:
+                con.close()
+
         con = self._con()
         try:
             if path == "/api/signup":
@@ -300,6 +384,26 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, R.status_dict(con))
                 campaign = qs.get("campaignId", [None])[0]
                 return self._json(200, metrics.compute(con, int(campaign) if campaign else None))
+            finally:
+                con.close()
+
+        if u.path == "/api/tenant/lists" or u.path.startswith("/api/tenant/lists/"):
+            con = self._con()
+            try:
+                tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
+                if not tenant:
+                    return self._json(401, {"error": "unauthorized"})
+                if u.path == "/api/tenant/lists":
+                    st, res = h_tenant_lists_list(con, tenant["id"])
+                else:
+                    list_id_str = u.path[len("/api/tenant/lists/"):]
+                    if not list_id_str.isdigit():
+                        st, res = 404, {"error": "not found"}
+                    else:
+                        st, res = h_tenant_list_detail(con, tenant["id"], int(list_id_str), qs)
+                return self._json(st, res)
+            except Exception as e:  # noqa: BLE001
+                return self._json(500, {"error": str(e)[:200]})
             finally:
                 con.close()
 
@@ -345,6 +449,7 @@ def serve(port=8787):
     print("  GET  /t/<touch_id>  /health")
     print("  Stock Factory連携: GET /api/ops/status /api/ops/metrics  "
           "POST /api/ops/run-step  (要 SALES_ENGINE_API_KEY)")
+    print("  送信先リスト(SaaS): /api/tenant/lists*  (要 テナントごとのapi_key)")
     if not SALES_ENGINE_API_KEY:
         print("  ⚠ SALES_ENGINE_API_KEY 未設定のため /api/ops/* は常に401を返します")
     srv.serve_forever()
@@ -495,6 +600,51 @@ def self_test(port=8899):
     t("POST /api/ops/run-stepも認証必須(401)", st == 401)
     st, r = post_auth("/api/ops/run-step", {"step": "dedup"}, token=ops_key)
     t("POST /api/ops/run-step: dedup", st == 200 and r.get("ok"))
+
+    print("\n── 送信先リスト(SaaS販売用テナントAPI) ──")
+    import offers as OF
+    con.execute("DELETE FROM tenants WHERE name LIKE 'test-tenant-%'")
+    con.commit()
+    tid_a, key_a = OF.add_tenant(con, "test-tenant-A", "a@example.co.jp")
+    tid_b, key_b = OF.add_tenant(con, "test-tenant-B", "b@example.co.jp")
+
+    st, r = post_auth("/api/tenant/lists/preview", {"filters": {"pref": "東京都"}})
+    t("認証ヘッダなしのPOST /api/tenant/lists/previewは401", st == 401)
+    st, r = post_auth("/api/tenant/lists/preview", {"filters": {"pref": "東京都"}}, token=key_a)
+    t("正しいキーでプレビュー取得", st == 200 and "count" in r)
+
+    st, r = post_auth("/api/tenant/lists", {"name": "テストA_東京都", "filters": {"pref": "東京都"}},
+                      token=key_a)
+    t("POST /api/tenant/lists: フィルタ型リスト作成", st == 200 and bool(r.get("list_id")))
+    list_a_id = r.get("list_id")
+
+    csv_text = "会社名,都道府県\nテナントB専用企業,福岡県\n"
+    st, r = post_auth("/api/tenant/lists/csv", {"name": "B持込リスト", "csv": csv_text}, token=key_b)
+    t("POST /api/tenant/lists/csv: CSV取込", st == 200 and r.get("new_companies", 0) >= 1)
+    list_b_id = r.get("list_id")
+
+    st, r = get_auth("/api/tenant/lists", token=key_a)
+    t("GET /api/tenant/lists は自テナント分のみ返す",
+      st == 200 and all(l["id"] != list_b_id for l in r.get("lists", [])))
+
+    st, r = get_auth(f"/api/tenant/lists/{list_a_id}", token=key_a)
+    t("GET /api/tenant/lists/<id> で自分のリストは見える", st == 200 and "members" in r)
+
+    st, r = get_auth(f"/api/tenant/lists/{list_b_id}", token=key_a)
+    t("他テナントのリストIDを指定しても404(横断閲覧できない)", st == 404)
+
+    st, r = get_auth(f"/api/tenant/lists/{list_a_id}", token=key_b)
+    t("逆方向も同様に404", st == 404)
+
+    st, r = post_auth("/api/tenant/lists/preview", {"filters": {"pref": "福岡県"}}, token=key_a)
+    t("他テナントがCSVで持ち込んだ非公開企業はフィルタにも出てこない",
+      st == 200 and not any(s["name"] == "テナントB専用企業" for s in r.get("sample", [])))
+
+    con.execute("DELETE FROM target_list_members WHERE list_id IN (?,?)", (list_a_id, list_b_id))
+    con.execute("DELETE FROM target_lists WHERE id IN (?,?)", (list_a_id, list_b_id))
+    con.execute("DELETE FROM companies WHERE owner_tenant_id IN (?,?)", (tid_a, tid_b))
+    con.execute("DELETE FROM tenants WHERE id IN (?,?)", (tid_a, tid_b))
+    con.commit()
 
     print("\n── can_contact()バイパス防止の検証（最重要） ──")
     # 配信停止されていない会社を1社選び、未送信の接触を1件作ってから配信停止する。

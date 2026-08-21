@@ -22,6 +22,9 @@ CREATE INDEX IF NOT EXISTS idx_touch_step ON touches(campaign_id, step);
 CREATE INDEX IF NOT EXISTS idx_touch_co   ON touches(company_id);
 CREATE INDEX IF NOT EXISTS idx_formlog_co ON form_send_log(company_id);
 CREATE INDEX IF NOT EXISTS idx_formlog_status ON form_send_log(status);
+CREATE INDEX IF NOT EXISTS idx_companies_owner ON companies(owner_tenant_id);
+CREATE INDEX IF NOT EXISTS idx_tlist_tenant ON target_lists(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_tlm_list ON target_list_members(list_id);
 """
 
 SCHEMA = """
@@ -174,6 +177,13 @@ def migrate(con):
     """既存DBを壊さずに最新スキーマへ寄せる。何度実行しても安全(冪等)。"""
     C.OUT_DIR.mkdir(exist_ok=True)
     con.executescript(SCHEMA)
+    # 耐障害化・マルチオファー・送信先リストのテーブルも常に作る(実行順序に依存させない)。
+    # 下のALTER列(tenants.api_key等)より前に置くこと — でないと対象テーブルが
+    # まだ存在せずALTERが失敗する
+    import resilience, offers as _offers, target_lists as _tl
+    con.executescript(resilience.SCHEMA)
+    con.executescript(_offers.SCHEMA)
+    con.executescript(_tl.SCHEMA)
     # 旧バージョンで欠けている列を後付け
     for table, col, ddl in [
         ("companies", "name_norm", "TEXT"), ("companies", "score_v2", "REAL"),
@@ -186,17 +196,15 @@ def migrate(con):
         ("companies", "has_contact_form", "INTEGER"),  # 問い合わせフォーム有無(mikomeru由来)
         ("companies", "corporate_no", "TEXT"),  # 法人番号(国税庁13桁)。mikomeru取込で判明した分のみ
         ("companies", "data_source", "TEXT"),  # NULL=国交省名簿(既定) / "mikomeru"=mikomeru由来の新規追加
+        ("companies", "owner_tenant_id", "INTEGER"),  # NULL=全テナント共有マスタ / 値あり=そのテナント専用(CSV取込)
         ("touches", "step", "INTEGER DEFAULT 1"),
         ("form_send_log", "page_text_snippet", "TEXT"),  # 成功判定できなかった原因調査用
         ("campaigns", "offer_id", "INTEGER"),  # compose.pyで確定したオファー。送信時のテナント解決に使う
+        ("tenants", "api_key", "TEXT"),  # target_listsのAPI認証キー(SaaS販売用テナントに発行)
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-    # 耐障害化・マルチオファーのテーブルも常に作る（実行順序に依存させない）
-    import resilience, offers as _offers
-    con.executescript(resilience.SCHEMA)
-    con.executescript(_offers.SCHEMA)
     con.executescript(INDEXES)   # 列追加のあとにインデックスを張る
     con.execute("""INSERT INTO meta (key, value) VALUES ('schema_version', ?)
                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",

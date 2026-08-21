@@ -20,9 +20,12 @@ offers.py — オファーとテナントの分離
   python3 offers.py init          # 標準オファーを投入
   python3 offers.py list
   python3 offers.py add --tenant 1 --name "与信スコア" --price 29800
+  python3 offers.py add-tenant --name "○○建材株式会社" --sender-email info@example.co.jp
+                                   # 他社に販売するテナントを追加。api_keyを1回だけ表示する
 """
 import argparse
 import json
+import secrets
 from datetime import datetime
 
 SCHEMA = """
@@ -34,6 +37,7 @@ CREATE TABLE IF NOT EXISTS tenants (
   sender_email TEXT,
   sender_address TEXT,
   optout_url TEXT,
+  api_key TEXT UNIQUE,            -- target_lists.py等、テナント自身が叩くAPIの認証キー
   created_at TEXT
 );
 
@@ -107,6 +111,36 @@ def init(con):
     print(f"テナント1件・オファー{len(SEED_OFFERS)}件を投入")
 
 
+def generate_api_key():
+    return "tk_" + secrets.token_urlsafe(32)
+
+
+def add_tenant(con, name, sender_email, kind="client", sender_name=None, sender_address="",
+               optout_url=None):
+    """他社に販売するテナントを追加する。api_keyはここで1回だけ生成し、
+    呼び出し側(CLI)が画面に表示する。DBには平文で保持する(現状の他の秘密情報
+    の扱いと同水準。将来ハッシュ化するなら移行スクリプトが要る)。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    api_key = generate_api_key()
+    cur = con.execute("""INSERT INTO tenants
+        (name,kind,sender_name,sender_email,sender_address,optout_url,api_key,created_at)
+        VALUES (?,?,?,?,?,?,?,?)""",
+        (name, kind, sender_name or name, sender_email, sender_address,
+         optout_url or f"mailto:{sender_email}",
+         api_key, now))
+    con.commit()
+    return cur.lastrowid, api_key
+
+
+def resolve_tenant_by_key(con, api_key):
+    """Authorization: Bearer <api_key> からテナントを解決する。
+    target_lists.py・api.pyの/api/tenant/*系エンドポイントが使う。
+    クライアントが指定したtenant_idは一切信用せず、必ずここを経由すること。"""
+    if not api_key:
+        return None
+    return con.execute("SELECT * FROM tenants WHERE api_key=?", (api_key,)).fetchone()
+
+
 def listing(con):
     rows = con.execute("""SELECT o.*, t.name tname, t.kind FROM offers o
         JOIN tenants t ON t.id=o.tenant_id ORDER BY t.id, o.price_yen""").fetchall()
@@ -156,6 +190,11 @@ if __name__ == "__main__":
     a.add_argument("--tenant", type=int, default=1); a.add_argument("--name", required=True)
     a.add_argument("--price", type=int, default=0); a.add_argument("--text", default="")
     a.add_argument("--rule", default="rank IN ('S','A')")
+    at = sub.add_parser("add-tenant")
+    at.add_argument("--name", required=True)
+    at.add_argument("--sender-email", required=True)
+    at.add_argument("--sender-address", default="")
+    at.add_argument("--kind", default="client", choices=["own", "client", "acquirer"])
     args = ap.parse_args()
 
     import db
@@ -172,3 +211,10 @@ if __name__ == "__main__":
             (args.tenant, args.name, args.text or args.name, None, args.price,
              args.rule, "[]", datetime.now().isoformat(timespec="seconds")))
         con.commit(); print(f"オファー「{args.name}」を追加")
+    elif args.cmd == "add-tenant":
+        tid, api_key = add_tenant(con, args.name, args.sender_email, kind=args.kind,
+                                   sender_address=args.sender_address)
+        print(f"テナント「{args.name}」(id={tid}) を追加しました")
+        print(f"api_key: {api_key}")
+        print("  ↑ この値は今しか表示されません。顧客に安全な方法で渡してください"
+              "(このAPIキーで target_lists の作成・閲覧ができます)")

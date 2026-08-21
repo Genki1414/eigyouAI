@@ -47,7 +47,8 @@ IM.md・console.html に出ている数字を、そのまま買い手や顧客�
 | `ingest_mikomeru.py` | mikomeru CSV取込（既存社にはURL情報のみ書き足し・新規は追加） | **T9で実装** |
 | `prescore.py` | AI不要の事前絞込（資本金/連番/層化サンプリング） | 触らない |
 | `enrich.py` | AIエンリッチメント（HP/求人/レビュー） | APIキー設定のみ |
-| `offers.py` | テナント・オファー定義（マルチプロダクト） | オファー追加時 |
+| `offers.py` | テナント・オファー定義（マルチプロダクト）+ `add-tenant`でSaaS販売先を追加 | オファー追加時 |
+| `target_lists.py` | テナントごとの送信先リスト作成（フィルタ型・CSV取込型） | **T12で実装** |
 | `scoring.py` | スコアV1（4軸100点） | 触らない |
 | `campaign.py` | キャンペーン作成（ガード適用） | 触らない |
 | `compose.py` | AI文面生成 + NGワード検査 | 触らない |
@@ -76,6 +77,7 @@ IM.md・console.html に出ている数字を、そのまま買い手や顧客�
 |---|---|---|
 | `dashboard.html` | リード司令塔 | S/Aランク・推奨チャネル・AI所見 |
 | `console.py` → `out/console.html` | キャンペーンコンソール(実データから毎回生成) | ファネル・CAC・A/B・モデル昇格状況・フォーム送信β検証実績 |
+| `list_builder.html` | 送信先リスト作成(SaaS顧客向け。テナントAPIキーで接続) | フィルタ絞込・CSV取込・保存済みリスト |
 | `lp.html` | 無料積算ツールLP | ⚠ 「お客様の声」は要削除 |
 
 ### ドキュメント

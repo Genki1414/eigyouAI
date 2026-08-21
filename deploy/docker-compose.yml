@@ -3,13 +3,17 @@ services:
     build: { context: .., dockerfile: deploy/Dockerfile }
     container_name: eigyouai-api
     env_file: [../.env]
-    ports: ["127.0.0.1:8787:8787"]
+    ports: ["8787:8787"]
     volumes: ["engine-data:/app/out"]
     restart: unless-stopped
     depends_on: { postgres: { condition: service_healthy } }
     # Stock Factory Runtime（同一ホスト上の別コンテナ）から http://eigyouai-api:8787
-    # で到達できるようにする。ホストの127.0.0.1限定publish（上のports）は
-    # ホスト自身からの疎通確認用にそのまま残す——外部公開範囲は広げない。
+    # で到達できるようにする。
+    # ⚠ 暫定措置(2026-08-21): list_builder.py(送信先リストSaaS)の動作確認のため、
+    #   一時的に 0.0.0.0:8787 で外部公開している(以前は127.0.0.1限定)。
+    #   TLSが無いため、Authorization: Bearerのテナントapi_keyが平文で流れる。
+    #   実際の顧客に使わせる前に、リバースプロキシ経由のHTTPS化に必ず戻すこと
+    #   (HANDOFF.md T12参照)。それまでは動作確認用途に限定する。
     networks: [default, stockfactory-shared]
 
   # バッチ（cronで定期実行）

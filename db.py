@@ -27,6 +27,7 @@ CREATE INDEX IF NOT EXISTS idx_tlist_tenant ON target_lists(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tlm_list ON target_list_members(list_id);
 CREATE INDEX IF NOT EXISTS idx_msgtmpl_tenant ON message_templates(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_sendtmpl_tenant ON sender_templates(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_staff_tenant ON staff(tenant_id);
 """
 
 SCHEMA = """

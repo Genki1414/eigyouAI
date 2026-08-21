@@ -420,6 +420,20 @@ mikomeruの「リスト取得」機能で業種(とび・土工工事/解体工�
     - `list_builder.html`の`tmpl-sender`ページ(保存・一覧・有効化・削除)を実装
     - api.py testに、保存・一覧・テナント分離・有効化後に実際に
       `tenants.sender_*`へ反映されること・削除の確認を追加
+  - **担当者管理**(4/7): 1つのapi_keyをテナント全体で使い回すのではなく、
+    担当者ごとに個別のapi_keyを発行できるようにした(退職・異動時にその
+    担当者のキーだけ失効させられる)。`offers.py`に`staff`テーブル
+    (id, tenant_id, name, email, api_key, created_at)を新設し、
+    `offers.resolve_tenant_by_key()`が`tenants.api_key`だけでなく
+    `staff.api_key`も見るように拡張。どちらのキーで認証しても解決される
+    `tenant_id`は同じで、担当者ごとに見えるデータが変わるわけではない
+    (テナント単位でデータ共有、というこのSaaSの設計方針どおり)
+    - 新規API: `GET/POST /api/tenant/staff`, `POST /api/tenant/staff/revoke`。
+      一覧応答にapi_keyは含めない(発行直後の応答でしか返さない)
+    - `list_builder.html`の`staff`ページ(追加・一覧・失効)を実装。
+      発行したAPIキーは「この画面でしか表示されない」ことを明記
+    - api.py testに、担当者専用キーで実際にテナントのデータへアクセスできる
+      こと・失効後は401になること・テナント分離の確認を追加
 - 未対応(次フェーズ): 顧客の新規登録・課金・自分でのAPIキー発行UI
 
 **⚠ 暫定措置・要対応(2026-08-21)**: `list_builder.html`の動作確認のため、

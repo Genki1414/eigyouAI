@@ -47,8 +47,14 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            送信者情報(tenants.sender_*)へ反映。反映先は
                            senders.send_campaign()が読む列そのものなので、
                            送信ロジック側は変更不要
-  ※ Authorization: Bearer <tenant.api_key>。テナントIDはこのキーからサーバ側で
-    解決し、リクエストボディのtenant_idは一切信用しない(offers.resolve_tenant_by_key)
+  GET  /api/tenant/staff          自テナントの担当者一覧
+  POST /api/tenant/staff               {"name","email"} → 担当者追加。
+                           発行したapi_keyはこの応答でしか返さない
+  POST /api/tenant/staff/revoke        {"staff_id"} → 担当者のapi_keyを失効
+  ※ Authorization: Bearer <tenant.api_key または staff.api_key>。テナントIDは
+    このキーからサーバ側で解決し、リクエストボディのtenant_idは一切信用しない
+    (offers.resolve_tenant_by_key。担当者ごとのキーでもテナント全体のキーでも
+    解決されるtenant_idは同じで、見えるデータに差は無い)
   GET  / , /list_builder.html  操作画面(list_builder.html)をこのサーバ自身から配信。
                            別ドメインから配信すると、このAPIがまだ平文HTTPのため
                            ブラウザの混在コンテンツ制限でfetch()がブロックされるための対応
@@ -418,6 +424,28 @@ def h_tenant_sender_templates_activate(con, tenant_id, data):
     return 200, {"ok": True}
 
 
+def h_tenant_staff_list(con, tenant_id):
+    return 200, {"staff": offers.list_staff(con, tenant_id)}
+
+
+def h_tenant_staff_add(con, tenant_id, data):
+    name = (data.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "nameは必須です"}
+    email = (data.get("email") or "").strip() or None
+    staff_id, api_key = offers.add_staff(con, tenant_id, name, email=email)
+    return 200, {"ok": True, "staff_id": staff_id, "api_key": api_key}
+
+
+def h_tenant_staff_revoke(con, tenant_id, data):
+    staff_id = data.get("staff_id")
+    if not isinstance(staff_id, int):
+        return 400, {"error": "staff_idは必須です"}
+    if not offers.revoke_staff(con, tenant_id, staff_id):
+        return 404, {"error": "担当者が見つかりません"}
+    return 200, {"ok": True}
+
+
 def h_tenant_list_send(con, tenant_id, list_id, data):
     """保存済みリストから実際にフォーム自動送信キャンペーンを走らせる。
     dry_runは既定でTrue(=実サイトへは何も送らない)。実送信するには
@@ -565,6 +593,22 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
+        if path in ("/api/tenant/staff", "/api/tenant/staff/revoke"):
+            con = self._con()
+            try:
+                tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
+                if not tenant:
+                    return self._json(401, {"error": "unauthorized"})
+                if path == "/api/tenant/staff":
+                    st, res = h_tenant_staff_add(con, tenant["id"], data)
+                else:
+                    st, res = h_tenant_staff_revoke(con, tenant["id"], data)
+                return self._json(st, res)
+            except Exception as e:  # noqa: BLE001
+                return self._json(500, {"error": str(e)[:200]})
+            finally:
+                con.close()
+
         con = self._con()
         try:
             if path == "/api/signup":
@@ -613,7 +657,8 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/exclusions"
                 or u.path == "/api/tenant/companies/search"
                 or u.path == "/api/tenant/templates"
-                or u.path == "/api/tenant/sender-templates"):
+                or u.path == "/api/tenant/sender-templates"
+                or u.path == "/api/tenant/staff"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -629,6 +674,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_templates_list(con, tenant["id"])
                 elif u.path == "/api/tenant/sender-templates":
                     st, res = h_tenant_sender_templates_list(con, tenant["id"])
+                elif u.path == "/api/tenant/staff":
+                    st, res = h_tenant_staff_list(con, tenant["id"])
                 elif u.path == "/api/tenant/lists":
                     st, res = h_tenant_lists_list(con, tenant["id"])
                 else:
@@ -1031,6 +1078,41 @@ def self_test(port=8899):
       st == 200 and all(x["id"] != stmpl_id for x in r.get("templates", [])))
 
     con.execute("DELETE FROM sender_templates WHERE tenant_id IN (?,?)", (tid_a, tid_b))
+    con.commit()
+
+    print("\n── 担当者管理 ──")
+    st, r = post_auth("/api/tenant/staff", {"email": "no-name@example.co.jp"}, token=key_a)
+    t("nameが無いと400", st == 400)
+    st, r = post_auth("/api/tenant/staff", {"name": "担当 太郎", "email": "taro@test-a.example.co.jp"},
+                      token=key_a)
+    t("POST /api/tenant/staff で担当者追加、api_keyが返る",
+      st == 200 and bool(r.get("staff_id")) and r.get("api_key", "").startswith("tk_"))
+    staff_id = r.get("staff_id")
+    staff_key = r.get("api_key")
+
+    st, r = get_auth("/api/tenant/staff", token=key_a)
+    t("GET /api/tenant/staff に追加した担当者が出る(api_keyは含まれない)",
+      st == 200 and any(s["id"] == staff_id and s["name"] == "担当 太郎" for s in r.get("staff", []))
+      and all("api_key" not in s for s in r.get("staff", [])))
+    st, r = get_auth("/api/tenant/staff", token=key_b)
+    t("他テナントの担当者は見えない(テナント分離)",
+      st == 200 and all(s["id"] != staff_id for s in r.get("staff", [])))
+
+    st, r = get_auth("/api/tenant/lists", token=staff_key)
+    t("担当者専用のapi_keyでも同じテナントのデータにアクセスできる", st == 200)
+
+    st, r = post_auth("/api/tenant/staff/revoke", {"staff_id": staff_id}, token=key_b)
+    t("他テナントは担当者を失効できない(404)", st == 404)
+    st, r = post_auth("/api/tenant/staff/revoke", {"staff_id": staff_id}, token=key_a)
+    t("POST /api/tenant/staff/revoke で失効", st == 200 and r.get("ok"))
+
+    st, r = get_auth("/api/tenant/lists", token=staff_key)
+    t("失効後は担当者のapi_keyが使えなくなる(401)", st == 401)
+    st, r = get_auth("/api/tenant/staff", token=key_a)
+    t("失効後はGET /api/tenant/staffに出てこない",
+      st == 200 and all(s["id"] != staff_id for s in r.get("staff", [])))
+
+    con.execute("DELETE FROM staff WHERE tenant_id IN (?,?)", (tid_a, tid_b))
     con.commit()
 
     con.execute("DELETE FROM touches WHERE campaign_id=?", (send_campaign_id,))

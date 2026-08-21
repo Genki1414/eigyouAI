@@ -54,6 +54,19 @@ CREATE TABLE IF NOT EXISTS offers (
   created_at TEXT,
   FOREIGN KEY(tenant_id) REFERENCES tenants(id)
 );
+
+-- テナント配下の担当者。1つのapi_keyをテナント全体で使い回すのではなく、
+-- 担当者ごとに個別のapi_keyを発行できるようにする(退職時に個別失効できる)。
+-- 認証で解決されるtenant_idはどの担当者でも同じ(=データはテナント単位で共有)。
+CREATE TABLE IF NOT EXISTS staff (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  email TEXT,
+  api_key TEXT UNIQUE NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(tenant_id) REFERENCES tenants(id)
+);
 """
 
 # 自社の既存事業を、そのままオファーとして定義する
@@ -142,10 +155,45 @@ def add_tenant(con, name, sender_email, kind="client", sender_name=None, sender_
 def resolve_tenant_by_key(con, api_key):
     """Authorization: Bearer <api_key> からテナントを解決する。
     target_lists.py・api.pyの/api/tenant/*系エンドポイントが使う。
-    クライアントが指定したtenant_idは一切信用せず、必ずここを経由すること。"""
+    クライアントが指定したtenant_idは一切信用せず、必ずここを経由すること。
+
+    テナント自身のapi_keyだけでなく、staff.api_key(担当者ごとの個別キー)
+    も見る。どちらで認証しても解決されるtenant_idは同じで、データは
+    テナント単位で共有される(担当者ごとに見えるデータが変わるわけではない)。"""
     if not api_key:
         return None
-    return con.execute("SELECT * FROM tenants WHERE api_key=?", (api_key,)).fetchone()
+    row = con.execute("SELECT * FROM tenants WHERE api_key=?", (api_key,)).fetchone()
+    if row:
+        return row
+    staff = con.execute("SELECT tenant_id FROM staff WHERE api_key=?", (api_key,)).fetchone()
+    if not staff:
+        return None
+    return con.execute("SELECT * FROM tenants WHERE id=?", (staff["tenant_id"],)).fetchone()
+
+
+def add_staff(con, tenant_id, name, email=None):
+    """担当者を追加し、その担当者専用のapi_keyを発行する。
+    api_keyは生成時にしか分からない(以後DBには平文で残るが、呼び出し側の
+    画面には1回しか出さない運用を想定)。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    api_key = generate_api_key()
+    cur = con.execute("""INSERT INTO staff (tenant_id, name, email, api_key, created_at)
+        VALUES (?,?,?,?,?)""", (tenant_id, name, email, api_key, now))
+    con.commit()
+    return cur.lastrowid, api_key
+
+
+def list_staff(con, tenant_id):
+    rows = con.execute("""SELECT id, name, email, created_at FROM staff
+        WHERE tenant_id=? ORDER BY created_at DESC""", (tenant_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def revoke_staff(con, tenant_id, staff_id):
+    """担当者のapi_keyを失効させる(行ごと削除。以後そのキーでは認証できない)。"""
+    cur = con.execute("DELETE FROM staff WHERE id=? AND tenant_id=?", (staff_id, tenant_id))
+    con.commit()
+    return cur.rowcount > 0
 
 
 def listing(con):

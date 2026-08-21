@@ -254,8 +254,26 @@ tr.clickable:hover{background:var(--blue-soft)}
 
       <section class="page" data-page="staff">
         <h2>担当者管理 <span>STAFF</span></h2>
-        <div class="card"><p class="hint">準備中の機能です。1つのAPIキーを複数名で使うか、
-          担当者ごとのアクセス権を分ける機能を追加予定です。</p></div>
+        <div class="card">
+          <p class="hint">担当者ごとに個別のAPIキーを発行できます。退職・異動時は
+            そのキーだけを失効させれば、他の担当者やテナント全体には影響しません。
+            発行したAPIキーはこの画面でしか表示されません(後から確認できないため、
+            必ずその場で控えてください)。</p>
+          <div class="row" style="margin-top:10px">
+            <div>
+              <label>担当者名</label>
+              <input type="text" id="stName" placeholder="例: 山田太郎">
+            </div>
+            <div>
+              <label>メールアドレス(任意)</label>
+              <input type="text" id="stEmail" placeholder="例: yamada@example.co.jp">
+            </div>
+          </div>
+          <div class="btnrow"><button id="btnAddStaff">追加</button></div>
+          <div id="staffResult"></div>
+        </div>
+        <h2 style="margin-top:20px">担当者一覧 <span>STAFF LIST</span></h2>
+        <div id="staffListWrap"><div class="empty">接続すると表示されます</div></div>
       </section>
 
       <section class="page" data-page="news">
@@ -394,6 +412,7 @@ function goPage(pageId) {
   if (pageId === "exclude") refreshExclusions();
   if (pageId === "tmpl-body") refreshTemplates();
   if (pageId === "tmpl-sender") refreshSenderTemplates();
+  if (pageId === "staff") refreshStaff();
 }
 document.querySelectorAll(".navitem").forEach(item => {
   if (item.id === "navLogout") return; // ログアウトは専用ハンドラ(下)で扱う
@@ -719,6 +738,47 @@ $("btnSaveSenderTemplate").addEventListener("click", async () => {
     $("sName").value = ""; $("sSenderName").value = ""; $("sSenderEmail").value = "";
     $("sSenderAddress").value = ""; $("sOptoutUrl").value = "";
     await refreshSenderTemplates();
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+});
+
+async function refreshStaff() {
+  if (!connected) return;
+  const r = await call("/api/tenant/staff");
+  const el = $("staffListWrap");
+  if (!r.staff.length) { el.innerHTML = `<div class="empty">登録済みの担当者はいません</div>`; return; }
+  el.innerHTML = `<table><tr><th>名前</th><th>メール</th><th>追加日時</th><th></th></tr>` +
+    r.staff.map(x => `<tr><td>${x.name}</td><td>${x.email || "—"}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.created_at}</td>
+      <td><button class="ghost staffRevokeBtn" data-id="${x.id}">失効</button></td></tr>`).join("") +
+    `</table>`;
+  el.querySelectorAll(".staffRevokeBtn").forEach(btn => {
+    btn.addEventListener("click", () => revokeStaff(Number(btn.dataset.id)));
+  });
+}
+
+async function revokeStaff(id) {
+  if (!confirm("このAPIキーを失効させます。以後このキーではアクセスできなくなります。よろしいですか?")) return;
+  try {
+    await call("/api/tenant/staff/revoke", { method: "POST", body: JSON.stringify({ staff_id: id }) });
+    await refreshStaff();
+  } catch (e) {
+    $("staffListWrap").innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+$("btnAddStaff").addEventListener("click", async () => {
+  const name = $("stName").value.trim();
+  const email = $("stEmail").value.trim();
+  const el = $("staffResult");
+  if (!name) { el.innerHTML = `<div class="result err">担当者名を入力してください</div>`; return; }
+  try {
+    const r = await call("/api/tenant/staff", { method: "POST", body: JSON.stringify({ name, email }) });
+    el.innerHTML = `<div class="result ok">追加しました。APIキー(この画面でしか表示されません):<br>
+      <code style="user-select:all">${r.api_key}</code></div>`;
+    $("stName").value = ""; $("stEmail").value = "";
+    await refreshStaff();
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }

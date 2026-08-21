@@ -305,8 +305,15 @@ def navigate_and_submit(start_url, values, *, headless=True):
                 try:
                     page.goto(start_url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
                 except Exception as e:  # noqa: BLE001
-                    result.status = "FAILED_RETRYABLE"
-                    result.reason_code = "goto_failed"
+                    msg = str(e)
+                    if "ERR_CERT_" in msg or "ERR_SSL_" in msg:
+                        # 相手サイト側のTLS証明書不備。再試行しても同じ結果になるだけなので
+                        # リトライ対象にしない(FAILED_RETRYABLEにしない)
+                        result.status = "FAILED_UNSUPPORTED"
+                        result.reason_code = "invalid_certificate"
+                    else:
+                        result.status = "FAILED_RETRYABLE"
+                        result.reason_code = "goto_failed"
                     result.error_message = f"{type(e).__name__}: {e}"
                     return result
 

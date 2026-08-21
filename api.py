@@ -51,6 +51,8 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/tenant/staff               {"name","email"} → 担当者追加。
                            発行したapi_keyはこの応答でしか返さない
   POST /api/tenant/staff/revoke        {"staff_id"} → 担当者のapi_keyを失効
+  GET  /api/tenant/announcements  公開中のお知らせ一覧(全テナント共通。
+                           投稿はannouncements_cli.py、Web管理画面は作らない)
   ※ Authorization: Bearer <tenant.api_key または staff.api_key>。テナントIDは
     このキーからサーバ側で解決し、リクエストボディのtenant_idは一切信用しない
     (offers.resolve_tenant_by_key。担当者ごとのキーでもテナント全体のキーでも
@@ -446,6 +448,10 @@ def h_tenant_staff_revoke(con, tenant_id, data):
     return 200, {"ok": True}
 
 
+def h_tenant_announcements_list(con):
+    return 200, {"announcements": db.list_announcements(con, published_only=True)}
+
+
 def h_tenant_list_send(con, tenant_id, list_id, data):
     """保存済みリストから実際にフォーム自動送信キャンペーンを走らせる。
     dry_runは既定でTrue(=実サイトへは何も送らない)。実送信するには
@@ -658,7 +664,8 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/companies/search"
                 or u.path == "/api/tenant/templates"
                 or u.path == "/api/tenant/sender-templates"
-                or u.path == "/api/tenant/staff"):
+                or u.path == "/api/tenant/staff"
+                or u.path == "/api/tenant/announcements"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -676,6 +683,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_sender_templates_list(con, tenant["id"])
                 elif u.path == "/api/tenant/staff":
                     st, res = h_tenant_staff_list(con, tenant["id"])
+                elif u.path == "/api/tenant/announcements":
+                    st, res = h_tenant_announcements_list(con)
                 elif u.path == "/api/tenant/lists":
                     st, res = h_tenant_lists_list(con, tenant["id"])
                 else:
@@ -1113,6 +1122,21 @@ def self_test(port=8899):
       st == 200 and all(s["id"] != staff_id for s in r.get("staff", [])))
 
     con.execute("DELETE FROM staff WHERE tenant_id IN (?,?)", (tid_a, tid_b))
+    con.commit()
+
+    print("\n── お知らせ ──")
+    ann_pub_id = db.add_announcement(con, "テスト告知(公開)", "本文", published=True)
+    ann_draft_id = db.add_announcement(con, "テスト告知(非公開)", "本文", published=False)
+    st, r = get_auth("/api/tenant/announcements")
+    t("認証ヘッダなしのGET /api/tenant/announcementsは401", st == 401)
+    st, r = get_auth("/api/tenant/announcements", token=key_a)
+    ids = [a["id"] for a in r.get("announcements", [])]
+    t("公開中のお知らせが取れる", st == 200 and ann_pub_id in ids)
+    t("非公開のお知らせは出てこない", ann_draft_id not in ids)
+    st, r = get_auth("/api/tenant/announcements", token=key_b)
+    t("お知らせはテナントを問わず全員に見える(全テナント共通)",
+      st == 200 and ann_pub_id in [a["id"] for a in r.get("announcements", [])])
+    con.execute("DELETE FROM announcements WHERE id IN (?,?)", (ann_pub_id, ann_draft_id))
     con.commit()
 
     con.execute("DELETE FROM touches WHERE campaign_id=?", (send_campaign_id,))

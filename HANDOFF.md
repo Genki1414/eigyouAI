@@ -434,6 +434,17 @@ mikomeruの「リスト取得」機能で業種(とび・土工工事/解体工�
       発行したAPIキーは「この画面でしか表示されない」ことを明記
     - api.py testに、担当者専用キーで実際にテナントのデータへアクセスできる
       こと・失効後は401になること・テナント分離の確認を追加
+  - **お知らせ**(5/7): 全テナント共通の告知機能。他の機能と違いテナントごとの
+      Web管理画面は作らず、`suppress_cli.py`・`offers.py`と同じ「CLIで運用側
+      (HQ)が投稿する」方針にした(このプロジェクト全体の一貫した設計判断)
+    - `announcements`テーブル(id, title, body, published, created_at)を
+      新設。tenant_idを持たない(=全テナントに同じ内容が見える)
+    - 新規CLI: `announcements_cli.py`(`add`/`list`/`publish`/`unpublish`)
+    - 新規API: `GET /api/tenant/announcements`(公開中のみ返す。認証は必要だが
+      テナントによる絞り込みはしない)
+    - `list_builder.html`の`news`ページを実装(一覧表示のみ)
+    - api.py testに、未認証401・公開中のものだけ返る・非公開は出ない・
+      全テナントに同じ内容が見えることの確認を追加
 - 未対応(次フェーズ): 顧客の新規登録・課金・自分でのAPIキー発行UI
 
 **⚠ 暫定措置・要対応(2026-08-21)**: `list_builder.html`の動作確認のため、

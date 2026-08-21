@@ -278,7 +278,7 @@ tr.clickable:hover{background:var(--blue-soft)}
 
       <section class="page" data-page="news">
         <h2>お知らせ一覧 <span>NEWS</span></h2>
-        <div class="card"><p class="hint">現在お知らせはありません。</p></div>
+        <div id="newsWrap"><div class="empty">接続すると表示されます</div></div>
       </section>
 
       <section class="page" data-page="otherlog">
@@ -413,6 +413,7 @@ function goPage(pageId) {
   if (pageId === "tmpl-body") refreshTemplates();
   if (pageId === "tmpl-sender") refreshSenderTemplates();
   if (pageId === "staff") refreshStaff();
+  if (pageId === "news") refreshAnnouncements();
 }
 document.querySelectorAll(".navitem").forEach(item => {
   if (item.id === "navLogout") return; // ログアウトは専用ハンドラ(下)で扱う
@@ -783,6 +784,23 @@ $("btnAddStaff").addEventListener("click", async () => {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }
 });
+
+async function refreshAnnouncements() {
+  if (!connected) return;
+  const el = $("newsWrap");
+  el.innerHTML = `<div class="empty">読み込み中...</div>`;
+  try {
+    const r = await call("/api/tenant/announcements");
+    if (!r.announcements.length) { el.innerHTML = `<div class="empty">現在お知らせはありません。</div>`; return; }
+    el.innerHTML = r.announcements.map(a => `<div class="card">
+      <div style="font-family:var(--mono);font-size:11px;color:var(--steel)">${a.created_at}</div>
+      <h3 style="margin:6px 0">${a.title}</h3>
+      <p style="white-space:pre-wrap">${a.body}</p>
+    </div>`).join("");
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
 
 function currentFilters() {
   const prefs = [...prefsWrap.querySelectorAll("input:checked")].map(c => c.value);

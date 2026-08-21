@@ -120,6 +120,16 @@ CREATE TABLE IF NOT EXISTS sender_templates (
   created_at TEXT NOT NULL
 );
 
+-- お知らせ(全テナント共通の告知)。運用側(HQ)がannouncements_cli.pyで
+-- 投稿する。他のテナント別テーブルと違いtenant_idを持たない=全員に見える。
+CREATE TABLE IF NOT EXISTS announcements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  published INTEGER DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
 -- 監査ログ: 誰がいつ何を実行したか。デューデリで運用実態を示す材料になる。
 CREATE TABLE IF NOT EXISTS run_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -436,6 +446,30 @@ def activate_sender_template(con, tenant_id, template_id):
          tenant_id))
     con.commit()
     return True
+
+
+# ── お知らせ(全テナント共通。投稿はannouncements_cli.py) ──
+def add_announcement(con, title, body, published=True):
+    cur = con.execute("""INSERT INTO announcements (title, body, published, created_at)
+        VALUES (?,?,?,?)""",
+        (title, body, 1 if published else 0, datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    return cur.lastrowid
+
+
+def list_announcements(con, published_only=True):
+    q = "SELECT id, title, body, published, created_at FROM announcements"
+    if published_only:
+        q += " WHERE published=1"
+    q += " ORDER BY created_at DESC"
+    return [dict(r) for r in con.execute(q).fetchall()]
+
+
+def set_announcement_published(con, announcement_id, published):
+    cur = con.execute("UPDATE announcements SET published=? WHERE id=?",
+                       (1 if published else 0, announcement_id))
+    con.commit()
+    return cur.rowcount > 0
 
 
 # ── 許可番号の連番(社歴の代理変数) ──────────

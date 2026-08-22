@@ -624,6 +624,65 @@ Caddyはポート競合で起動できなかった。そのため最終的には
   月額売上に対する粗利試算)の3コマンド。原価情報は顧客向け画面
   (list_builder.html)には一切露出していない(このCLIのみで見る)
 
+### T14. 初回実送信で発覚した重大バグの修正 + MIKOMERU相当の目視確認機能(2026-08-22)
+
+**背景**: β版リリース後、初めて実在企業7社(秋田県)へ本番フォーム送信を実行した際、
+画面上は「送信7 失敗0」と出ていたが、実際にはPlaywrightが一度もサイトへ触れて
+いなかった(冪等キーの汚染により「送信済み」として即スキップされていた)。原因は
+以下3つの重なりで、いずれも「ドライランと本番送信が同じ状態を共有していた」ことに
+起因する:
+
+1. `send_campaign()`のSELECTが`sent_at IS NULL`のみを対象にしており、ドライランで
+   立った`sent_at`を除外していた(対象0件の場合`None`を返し、list_builder.html側で
+   `Cannot read properties of null`のエラーになっていた)
+2. 冪等キーが`dry_run`の有無を問わず同一形式(`send:{campaign_id}:{company_id}:{step}`)
+   だったため、ドライランが冪等キーを占有し、後続の本番送信が「送信済み(冪等キー
+   一致)」として`_deliver()`まで到達せずスキップされていた
+3. `can_contact()`の生涯接触上限・最短間隔(`MIN_TOUCH_INTERVAL_DAYS`)判定が、
+   ドライラン分の`sent_at`も本当の接触としてカウントしており、ドライラン直後の
+   本番送信が「最短間隔未満」でガードに阻まれる状態だった
+
+いずれも`touches.note`の`"provider_id=mock_"`接頭辞(既存のドライラン判別規約)で
+本番/ドライランを区別するよう修正。あわせて`send_list()`のtouches作成を
+`INSERT OR IGNORE`から`ON CONFLICT DO UPDATE`(未送信の行のみ)に変え、ドライラン後に
+件名・本文を直して再送信した場合に最新の内容が反映されるようにした。
+汚染されてしまった実データ(冪等キー・touches・target_list_members)は
+本番サーバー上で手動クリーンアップして復旧させ、その後の再送信で実際に
+Playwrightが動いたことを確認している(結果は7社中0件成功・5件「送信ボタンは
+押したが完了確認できず」・2件CAPTCHAでSKIP — 実測値であり、成功率の低さ自体が
+今後の`form_navigator.py`改善課題)。回帰テストを`senders.py test`に追加済み
+(「ドライラン後の本番送信(冪等キー分離)」)。
+
+**MIKOMERU相当のフォーム送信機能整備(同日)**: 実マニュアルを見た上で、
+自社の「フォーム送信」領域(自動送信/自動送信ログ)がMIKOMERUとどれだけ違うかを
+洗い出し、最も価値の高い差分から着手した:
+
+- **送信前後スクリーンショット**(MIKOMERUの「送信前画像」「送信後画像」相当):
+  `form_navigator.navigate_and_submit()`に`screenshot_dir`引数を追加し、
+  問い合わせページ到達直後(入力前)と送信ボタン押下後(送信を試みた場合のみ)に
+  `page.screenshot()`を撮って`out/form_screenshots/`配下へ保存(Dockerの
+  `engine-data`ボリューム上なので永続化される)。パスは`form_send_log`の
+  新規列`screenshot_before_path`/`screenshot_after_path`に記録。撮影・保存の
+  失敗は送信処理自体を止めない(あくまで補助情報)。
+- 配信は`GET /api/tenant/send-log/{id}/screenshot?kind=before|after`
+  (テナント認証必須。`form_send_log.tenant_id`が一致する記録のみ返す=
+  テナント分離)。list_builder.htmlの自動送信ログ画面に「確認」ボタンを追加し、
+  クリックで画像をモーダル表示する(Bearer認証のため`<a href>`では開けず、
+  `fetch()`でBlobとして取得し`URL.createObjectURL()`で表示)。
+- `h_tenant_send_log`に`?q=`(会社名部分一致)・`?status=`(カンマ区切りで
+  複数ステータス指定)フィルタと、`counts`(ステータス別内訳。フィルタ前の
+  全体件数)を追加。画面上部にMIKOMERU同様の集計バッジ(クリックでON/OFF
+  切替可能なフィルタ)を表示するようにした。
+- `form_send_log.status`の日本語ラベル対応表(`LOG_STATUS_LABELS`)を新設し、
+  MIKOMERUの「営業拒否」に相当する`SKIP_NO_SOLICIT`をそのまま「営業拒否」と
+  表示するようにした(検出ロジック自体は既存の`_detect_no_solicit()`が
+  以前から実装済みだった。UI表現のみの追随)。
+- **今夜やらなかったこと**: MIKOMERUの「自動入力機能(手動送信サポート)」
+  (自動送信に失敗したサイトへ、Chrome拡張でワンクリック入力→人が最終送信する
+  補助機能)。ブラウザ拡張の新規開発が必要な別工程のため、次回以降の課題として
+  残している。「会社情報」「その他」領域(リスト取得・CSV検索等)の
+  MIKOMERU比較・改修も未着手。
+
 ---
 
 ## 3. やってはいけないこと

@@ -99,6 +99,8 @@ class NavigationResult:
     page_title: Optional[str] = None
     page_text_snippet: Optional[str] = None   # 診断用。成功判定できなかった時の原因調査に使う
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    screenshot_before_path: Optional[str] = None   # 問い合わせページ到達直後(入力前)
+    screenshot_after_path: Optional[str] = None    # 送信ボタン押下後(送信を試みた場合のみ)
 
 
 def _text_blob(page, el):
@@ -369,9 +371,28 @@ def _fill_selects(page):
 
 
 # ── メイン ───────────────────────────────
-def navigate_and_submit(start_url, values, *, headless=True):
+def _save_screenshot(page, screenshot_dir, run_id, suffix):
+    """送信前後の目視確認用スクリーンショット(MIKOMERU同等機能)。
+    撮影・保存に失敗しても送信処理自体は止めない(あくまで補助情報のため)。"""
+    if not screenshot_dir:
+        return None
+    try:
+        from pathlib import Path
+        d = Path(screenshot_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{run_id}_{suffix}.png"
+        page.screenshot(path=str(path), timeout=ACTION_TIMEOUT_MS)
+        return str(path)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None):
     """フォームへの一連の操作を行い、NavigationResultを返す。
     values: {"company","name","email","phone","message","subject", ...} の埋める値の辞書。
+    screenshot_dir: 指定すると、問い合わせページ到達直後(送信前)と送信ボタン押下後
+    (送信後)のスクリーンショットをこの配下に保存する(Noneなら撮影しない。テストでは
+    Playwright未起動のケースが多いため既定でOFF)。
     例外は投げない(FAILED_RETRYABLEにしたい一時エラーだけは呼び出し側で判断できるよう
     resultのstatusで表現する。senders.py側でR.Retryableへ変換するかはそちら任せ)。"""
     from playwright.sync_api import sync_playwright
@@ -404,6 +425,8 @@ def navigate_and_submit(start_url, values, *, headless=True):
                     result.page_title = page.title()
                 except Exception:  # noqa: BLE001
                     pass
+                result.screenshot_before_path = _save_screenshot(
+                    page, screenshot_dir, result.run_id, "before")
 
                 page_text = _page_text(page)
 
@@ -525,6 +548,8 @@ def navigate_and_submit(start_url, values, *, headless=True):
                 except Exception:  # noqa: BLE001
                     pass
 
+                result.screenshot_after_path = _save_screenshot(
+                    page, screenshot_dir, result.run_id, "after")
                 result.final_url = page.url
                 final_text = _page_text(page)
                 result.page_text_snippet = final_text[:400]

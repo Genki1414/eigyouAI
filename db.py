@@ -339,6 +339,10 @@ def migrate(con):
         ("touches", "email_bounced_at", "TEXT"),
         ("touches", "email_bounce_type", "TEXT"),
         ("touches", "email_unsubscribed_at", "TEXT"),
+        # 送信前後のスクリーンショット(MIKOMERU同等の目視確認機能)。
+        # ファイル自体はout/form_screenshots/配下に保存し、ここにはパスのみ持つ。
+        ("form_send_log", "screenshot_before_path", "TEXT"),
+        ("form_send_log", "screenshot_after_path", "TEXT"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:

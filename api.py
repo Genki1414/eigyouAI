@@ -42,6 +42,9 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            経由でそのまま適用される(HANDOFF.mdの原則を厳守)
   GET  /api/tenant/send-log       自テナントのフォーム自動送信履歴(form_send_log)。
                            ?company_id=で1社分の履歴だけに絞り込める
+  GET  /api/tenant/send-log/{id}/screenshot?kind=before|after
+                           送信前後のスクリーンショット画像(PNG)。自テナントの
+                           記録のみ取得可(テナント分離)。無ければ404
   GET  /api/tenant/companies/search?q=  除外設定対象を探す簡易企業検索(2文字以上)
   GET  /api/tenant/exclusions     自テナントの送信除外設定一覧
   POST /api/tenant/exclusions          {"company_id","reason"} → 除外に追加
@@ -128,6 +131,7 @@ SALES_ENGINE_API_KEY = os.environ.get("SALES_ENGINE_API_KEY")
 
 _SEND_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/send$")
 _OUTCOME_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/outcome$")
+_SCREENSHOT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/screenshot$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
@@ -368,22 +372,57 @@ def h_tenant_list_member_outcome(con, tenant_id, list_id, data):
 def h_tenant_send_log(con, tenant_id, qs):
     """テナント自身のフォーム自動送信履歴(form_send_log)。他テナント分は
     tenant_id=?で絞り込んでいるため見えない。?company_id=で1社分の履歴
-    (何度目のどの結果か、時系列)だけに絞り込める。"""
+    (何度目のどの結果か、時系列)だけに絞り込める。
+    ?q=で会社名の部分一致検索、?status=SUCCESS,FAILED_UNSUPPORTEDのようにカンマ区切り
+    で複数の結果ステータスに絞り込める(MIKOMERU同等の検索・結果フィルタ)。
+    countsは(company_id/qの絞り込みは反映しつつ)statusでは絞り込む前の内訳件数
+    ——一覧上部の集計バッジ用(チェックを外した項目の件数も見えている必要があるため)。"""
     limit = min(int(qs.get("limit", ["100"])[0]), 500)
     offset = int(qs.get("offset", ["0"])[0])
     company_id = qs.get("company_id", [None])[0]
-    q = """SELECT l.id, l.company_id, c.name company_name, l.status, l.reason_code,
-            l.started_at, l.finished_at, l.retry_count, l.execution_seconds
-        FROM form_send_log l LEFT JOIN companies c ON c.id = l.company_id
-        WHERE l.tenant_id=?"""
-    params = [tenant_id]
+    name_q = (qs.get("q", [""])[0] or "").strip()
+    statuses = [s for s in (qs.get("status", [""])[0] or "").split(",") if s]
+
+    base_where = "l.tenant_id=?"
+    base_params = [tenant_id]
     if company_id and company_id.isdigit():
-        q += " AND l.company_id=?"
-        params.append(int(company_id))
+        base_where += " AND l.company_id=?"
+        base_params.append(int(company_id))
+    if name_q:
+        base_where += " AND c.name LIKE ?"
+        base_params.append(f"%{name_q}%")
+
+    q = f"""SELECT l.id, l.company_id, c.name company_name, l.status, l.reason_code,
+            l.started_at, l.finished_at, l.retry_count, l.execution_seconds,
+            (l.screenshot_before_path IS NOT NULL) has_screenshot_before,
+            (l.screenshot_after_path IS NOT NULL) has_screenshot_after
+        FROM form_send_log l LEFT JOIN companies c ON c.id = l.company_id
+        WHERE {base_where}"""
+    params = list(base_params)
+    if statuses:
+        q += f" AND l.status IN ({','.join('?' * len(statuses))})"
+        params += statuses
     q += " ORDER BY l.id DESC LIMIT ? OFFSET ?"
     params += [limit, offset]
     rows = con.execute(q, params).fetchall()
-    return 200, {"log": [dict(r) for r in rows]}
+
+    count_rows = con.execute(f"""SELECT l.status, COUNT(*) n FROM form_send_log l
+        LEFT JOIN companies c ON c.id = l.company_id WHERE {base_where}
+        GROUP BY l.status""", base_params).fetchall()
+    counts = {r["status"]: r["n"] for r in count_rows}
+    return 200, {"log": [dict(r) for r in rows], "counts": counts}
+
+
+def h_tenant_send_log_screenshot_path(con, tenant_id, log_id, kind):
+    """送信前後スクリーンショットのファイルパスを、テナント本人の記録であることを
+    確認した上で返す(他テナントの送信ログは company_id/tenant_id が一致しないため
+    見えない=テナント分離)。kindは'before'か'after'のみ受け付ける。"""
+    if kind not in ("before", "after"):
+        return None
+    col = "screenshot_before_path" if kind == "before" else "screenshot_after_path"
+    row = con.execute(f"SELECT {col} AS p FROM form_send_log WHERE id=? AND tenant_id=?",
+                       (log_id, tenant_id)).fetchone()
+    return row["p"] if row else None
 
 
 def h_tenant_companies_search(con, tenant_id, qs):
@@ -785,6 +824,29 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             return self.wfile.write(body)
+
+        shot_match = _SCREENSHOT_PATH_RE.match(u.path)
+        if shot_match:
+            con = self._con()
+            try:
+                tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
+                if not tenant:
+                    return self._json(401, {"error": "unauthorized"})
+                kind = qs.get("kind", [None])[0]
+                path_str = h_tenant_send_log_screenshot_path(con, tenant["id"], int(shot_match.group(1)), kind)
+                if not path_str:
+                    return self._json(404, {"error": "not found"})
+                p = Path(path_str)
+                if not p.is_file():
+                    return self._json(404, {"error": "not found"})
+                body = p.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                return self.wfile.write(body)
+            finally:
+                con.close()
 
         if u.path in ("/api/ops/status", "/api/ops/metrics", "/api/ops/kill-switch"):
             if not verify_ops_bearer(self.headers.get("Authorization")):
@@ -1237,22 +1299,78 @@ def self_test(port=8899):
 
     print("\n── 自動送信ログ ──")
     # dry_runはform_send_logへ書かない(Playwrightに触れないため)ので、
-    # ログ表示自体の検証用に1件だけ手で入れる
+    # ログ表示自体の検証用に1件だけ手で入れる。送信前画像も併せて検証する
+    # (MIKOMERU同等の目視確認機能。送信後画像は無い状態=NULLのケースとして残す)。
+    import tempfile as _tempfile
+    shot_dir = Path(_tempfile.mkdtemp(prefix="eigyouai-test-shots-"))
+    shot_path = shot_dir / "test_before.png"
+    shot_path.write_bytes(b"\x89PNG\r\n\x1a\ntest-image-bytes")
     con.execute("""INSERT INTO form_send_log (company_id, tenant_id, target_url, started_at,
-        status, reason_code) VALUES (1, ?, 'https://example.co.jp', ?, 'SUCCESS', 'success_text_matched')""",
-        (tid_a, datetime.now().isoformat(timespec="seconds")))
+        status, reason_code, screenshot_before_path)
+        VALUES (1, ?, 'https://example.co.jp', ?, 'SUCCESS', 'success_text_matched', ?)""",
+        (tid_a, datetime.now().isoformat(timespec="seconds"), str(shot_path)))
     con.commit()
+    log_id = con.execute("SELECT id FROM form_send_log WHERE tenant_id=? ORDER BY id DESC LIMIT 1",
+                          (tid_a,)).fetchone()[0]
     st, r = get_auth("/api/tenant/send-log")
     t("認証ヘッダなしのGET /api/tenant/send-logは401", st == 401)
     st, r = get_auth("/api/tenant/send-log", token=key_a)
     t("自テナントの送信ログが取れる",
       st == 200 and len(r.get("log", [])) == 1 and r["log"][0]["status"] == "SUCCESS")
+    t("has_screenshot_before/afterが正しい", r["log"][0]["has_screenshot_before"] == 1
+      and r["log"][0]["has_screenshot_after"] == 0)
     st, r = get_auth("/api/tenant/send-log?company_id=1", token=key_a)
     t("?company_id=で1社分に絞り込める", st == 200 and len(r.get("log", [])) == 1)
     st, r = get_auth("/api/tenant/send-log?company_id=999999999", token=key_a)
     t("該当しない企業IDでは0件になる", st == 200 and len(r.get("log", [])) == 0)
     st, r = get_auth("/api/tenant/send-log", token=key_b)
     t("他テナントのログは見えない", st == 200 and len(r.get("log", [])) == 0)
+
+    print("\n── 自動送信ログの検索・結果フィルタ・集計 ──")
+    other_cid = con.execute("SELECT id FROM companies WHERE id != 1 LIMIT 1").fetchone()[0]
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, target_url, started_at,
+        status, reason_code) VALUES (?, ?, 'https://example.co.jp', ?, 'FAILED_UNSUPPORTED',
+        'success_not_confirmed')""",
+        (other_cid, tid_a, datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    st, r = get_auth("/api/tenant/send-log", token=key_a)
+    t("countsに両方のステータスの内訳が出る",
+      r["counts"].get("SUCCESS") == 1 and r["counts"].get("FAILED_UNSUPPORTED") == 1)
+    st, r = get_auth("/api/tenant/send-log?status=SUCCESS", token=key_a)
+    t("?status=で1種類だけに絞り込める",
+      len(r["log"]) == 1 and r["log"][0]["status"] == "SUCCESS")
+    t("絞り込んでもcountsは全体の内訳のまま(バッジ表示用)",
+      r["counts"].get("FAILED_UNSUPPORTED") == 1)
+    st, r = get_auth("/api/tenant/send-log?status=SUCCESS,FAILED_UNSUPPORTED", token=key_a)
+    t("?status=をカンマ区切りで複数指定できる", len(r["log"]) == 2)
+    company1_name = con.execute("SELECT name FROM companies WHERE id=1").fetchone()[0]
+    st, r = get_auth(f"/api/tenant/send-log?q={urllib.parse.quote(company1_name)}", token=key_a)
+    t("?q=で会社名の部分一致検索ができる",
+      len(r["log"]) == 1 and r["log"][0]["company_id"] == 1)
+
+    print("\n── 送信前後スクリーンショット ──")
+    def get_raw(path, token=None):
+        req = urllib.request.Request(
+            base + path, headers={"Authorization": f"Bearer {token}"} if token else {})
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, resp.read(), resp.headers.get("Content-Type")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), None
+
+    st, body, ctype = get_raw(f"/api/tenant/send-log/{log_id}/screenshot?kind=before")
+    t("認証ヘッダなしのGET .../screenshotは401", st == 401)
+    st, body, ctype = get_raw(f"/api/tenant/send-log/{log_id}/screenshot?kind=before", token=key_a)
+    t("自テナントの送信前画像が取得できる", st == 200 and ctype == "image/png"
+      and body == shot_path.read_bytes())
+    st, body, ctype = get_raw(f"/api/tenant/send-log/{log_id}/screenshot?kind=after", token=key_a)
+    t("送信後画像が無い場合は404", st == 404)
+    st, body, ctype = get_raw(f"/api/tenant/send-log/{log_id}/screenshot?kind=bogus", token=key_a)
+    t("不正なkindは404", st == 404)
+    st, body, ctype = get_raw(f"/api/tenant/send-log/{log_id}/screenshot?kind=before", token=key_b)
+    t("他テナントは自分の送信前画像として取得できない(テナント分離)", st == 404)
+    st, body, ctype = get_raw("/api/tenant/send-log/999999999/screenshot?kind=before", token=key_a)
+    t("存在しないログIDは404", st == 404)
 
     print("\n── β版ダッシュボード ──")
     st, r = get_auth("/api/tenant/dashboard")

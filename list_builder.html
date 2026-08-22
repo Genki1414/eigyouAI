@@ -74,6 +74,25 @@ tr.clickable:hover{background:var(--blue-soft)}
 .pill{display:inline-block;background:var(--concrete);border-radius:4px;padding:1px 8px;font-size:11px;font-family:var(--mono)}
 .pill.ok{background:#E7F5EC;color:var(--win)}
 .pill.err{background:#FBEAE4;color:var(--warn)}
+.pill.warn{background:#FCEFDD;color:#8A5A12}
+.countpills{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.countpill{font-family:var(--mono);font-size:12px;padding:5px 12px;border-radius:99px;background:var(--concrete);
+  border:1px solid var(--line);cursor:pointer;user-select:none}
+.countpill.ok{background:#E7F5EC;color:var(--win);border-color:transparent}
+.countpill.err{background:#FBEAE4;color:var(--warn);border-color:transparent}
+.countpill.warn{background:#FCEFDD;color:#8A5A12;border-color:transparent}
+.countpill.off{opacity:.4}
+.shotbtn{font-size:11px;padding:4px 9px;border-radius:5px}
+
+/* スクリーンショット確認モーダル */
+.imgmodal{display:none;position:fixed;inset:0;background:rgba(22,25,29,.82);z-index:100;
+  align-items:center;justify-content:center;padding:24px}
+.imgmodal.open{display:flex}
+.imgmodal-inner{background:var(--surface);border-radius:8px;max-width:min(900px,100%);max-height:100%;
+  overflow:auto;padding:12px}
+.imgmodal-inner img{max-width:100%;display:block;border:1px solid var(--line);border-radius:4px}
+.imgmodal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:12px}
+.imgmodal-head b{font-size:13px}
 .hint{font-size:12px;color:var(--steel);margin-top:6px}
 .empty{color:var(--steel);font-size:13px;text-align:center;padding:16px}
 
@@ -201,7 +220,19 @@ tr.clickable:hover{background:var(--blue-soft)}
 
       <section class="page" data-page="sendlog">
         <h2>自動送信ログ <span>SEND LOG</span></h2>
-        <div id="sendLogWrap"><div class="empty">接続すると表示されます</div></div>
+        <div class="card">
+          <div class="row" style="margin-bottom:0">
+            <div>
+              <label>会社名で検索</label>
+              <input type="text" id="sendLogSearch" placeholder="会社名の一部を入力">
+            </div>
+            <div style="display:flex;align-items:flex-end">
+              <button class="ghost" id="btnSendLogSearch">検索</button>
+            </div>
+          </div>
+          <div id="sendLogCounts" class="countpills"></div>
+        </div>
+        <div id="sendLogWrap" style="margin-top:12px"><div class="empty">接続すると表示されます</div></div>
       </section>
 
       <section class="page" data-page="tmpl-body">
@@ -505,6 +536,16 @@ tr.clickable:hover{background:var(--blue-soft)}
     </div>
   </div>
 </div>
+
+<div class="imgmodal" id="imgModal">
+  <div class="imgmodal-inner">
+    <div class="imgmodal-head">
+      <b id="imgModalTitle">画像</b>
+      <button class="ghost" id="imgModalClose">閉じる</button>
+    </div>
+    <img id="imgModalImg" alt="スクリーンショット">
+  </div>
+</div>
 <script>
 // ── ナビゲーション(単一ページ内の切替。リロードなし) ──
 const PAGE_TITLES = {
@@ -623,6 +664,7 @@ document.getElementById("fCapital").addEventListener("change", e => {
 });
 
 let API = "", KEY = "", connected = false, lastLists = [], lastTemplates = [];
+let sendLogExcluded = new Set();   // countpillsでOFFにしたstatus(除外リスト)
 const $ = id => document.getElementById(id);
 
 // このページがapi.py自身から配信されている場合は、同一オリジンを既定値にする
@@ -723,23 +765,77 @@ async function refreshDashboard() {
 
 $("btnGoLists").addEventListener("click", () => goPage("lists"));
 
+async function showScreenshot(logId, kind, companyName) {
+  const modal = $("imgModal"), img = $("imgModalImg");
+  $("imgModalTitle").textContent = `${companyName || "—"}(${kind === "before" ? "送信前" : "送信後"})`;
+  img.removeAttribute("src");
+  modal.classList.add("open");
+  try {
+    const res = await fetch(API.replace(/\/$/, "") + `/api/tenant/send-log/${logId}/screenshot?kind=${kind}`,
+      { headers: { "Authorization": "Bearer " + KEY } });
+    if (!res.ok) throw new Error("画像を取得できませんでした(HTTP " + res.status + ")");
+    const blob = await res.blob();
+    img.src = URL.createObjectURL(blob);
+  } catch (e) {
+    $("imgModalTitle").textContent = e.message;
+  }
+}
+$("imgModalClose").addEventListener("click", () => $("imgModal").classList.remove("open"));
+$("imgModal").addEventListener("click", (e) => { if (e.target.id === "imgModal") $("imgModal").classList.remove("open"); });
+
 async function refreshSendLog() {
   if (!connected) return;
   const el = $("sendLogWrap");
   el.innerHTML = `<div class="empty">読み込み中...</div>`;
   try {
-    const r = await call("/api/tenant/send-log?limit=100");
-    if (!r.log.length) { el.innerHTML = `<div class="empty">まだ送信履歴がありません</div>`; return; }
-    el.innerHTML = `<table><tr><th>会社名</th><th>結果</th><th>詳細</th><th>日時</th></tr>` +
-      r.log.map(x => `<tr><td>${x.company_name || "—"}</td>
-        <td><span class="pill">${x.status}</span></td>
+    const q = $("sendLogSearch").value.trim();
+    const statuses = Object.keys(LOG_STATUS_LABELS).filter(s => !sendLogExcluded.has(s));
+    const qs = new URLSearchParams({ limit: "200" });
+    if (q) qs.set("q", q);
+    if (statuses.length < Object.keys(LOG_STATUS_LABELS).length) qs.set("status", statuses.join(","));
+    const r = await call(`/api/tenant/send-log?${qs.toString()}`);
+
+    const counts = r.counts || {};
+    $("sendLogCounts").innerHTML = Object.entries(LOG_STATUS_LABELS).map(([status, label]) => {
+      const n = counts[status] || 0;
+      const cls = LOG_STATUS_CLASS[status] || "";
+      const off = sendLogExcluded.has(status) ? " off" : "";
+      return `<span class="countpill${cls ? " " + cls : ""}${off}" data-status="${status}">${label}: ${n}件</span>`;
+    }).join("");
+    $("sendLogCounts").querySelectorAll(".countpill").forEach(pill => {
+      pill.addEventListener("click", () => {
+        const s = pill.dataset.status;
+        if (sendLogExcluded.has(s)) sendLogExcluded.delete(s); else sendLogExcluded.add(s);
+        refreshSendLog();
+      });
+    });
+
+    if (!r.log.length) { el.innerHTML = `<div class="empty">該当する送信履歴がありません</div>`; return; }
+    el.innerHTML = `<table><tr><th>会社名</th><th>結果</th><th>詳細</th>
+        <th>送信前</th><th>送信後</th><th>日時</th></tr>` +
+      r.log.map(x => {
+        const cls = LOG_STATUS_CLASS[x.status] || "";
+        const label = LOG_STATUS_LABELS[x.status] || x.status;
+        return `<tr><td>${x.company_name || "—"}</td>
+        <td><span class="pill${cls ? " " + cls : ""}">${label}</span></td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.reason_code || "—"}</td>
-        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at}</td></tr>`).join("") +
+        <td>${x.has_screenshot_before ? `<button class="ghost shotbtn" data-id="${x.id}" data-kind="before">確認</button>` : "—"}</td>
+        <td>${x.has_screenshot_after ? `<button class="ghost shotbtn" data-id="${x.id}" data-kind="after">確認</button>` : "—"}</td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at}</td></tr>`;
+      }).join("") +
       `</table>`;
+    el.querySelectorAll(".shotbtn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const tr = btn.closest("tr");
+        showScreenshot(Number(btn.dataset.id), btn.dataset.kind, tr.querySelector("td").textContent);
+      });
+    });
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }
 }
+$("btnSendLogSearch").addEventListener("click", refreshSendLog);
+$("sendLogSearch").addEventListener("keydown", (e) => { if (e.key === "Enter") refreshSendLog(); });
 
 async function refreshExclusions() {
   if (!connected) return;
@@ -1092,6 +1188,19 @@ const SEND_STATUS_LABELS = {
 };
 const SEND_STATUS_CLASS = {
   SUCCESS: "ok", FAILED_RETRYABLE: "err", FAILED_UNSUPPORTED: "err", STOPPED: "err",
+};
+// 自動送信ログ(form_send_log)の詳細ステータス。MIKOMERUの成功/失敗/営業拒否等の
+// 分類に合わせつつ、こちらはSKIPの種類まで区別して残す(なぜ送れなかったかの原因調査用)。
+const LOG_STATUS_LABELS = {
+  SUCCESS: "成功", FAILED_RETRYABLE: "一時的な失敗", FAILED_UNSUPPORTED: "失敗(未対応)",
+  SKIP_NO_SOLICIT: "営業拒否", SKIP_CAPTCHA: "対象外(CAPTCHA)",
+  SKIP_RECRUIT_ONLY: "対象外(採用専用)", SKIP_SUPPORT_ONLY: "対象外(会員専用)",
+  SKIP_BOT_CHALLENGE: "対象外(bot判定)",
+};
+const LOG_STATUS_CLASS = {
+  SUCCESS: "ok", FAILED_RETRYABLE: "warn", FAILED_UNSUPPORTED: "err",
+  SKIP_NO_SOLICIT: "warn", SKIP_CAPTCHA: "", SKIP_RECRUIT_ONLY: "", SKIP_SUPPORT_ONLY: "",
+  SKIP_BOT_CHALLENGE: "",
 };
 
 function bindMemberFilter(listId) {

@@ -261,8 +261,9 @@ def _log_form_send(con, company_id, result, target_url, tenant_id=None, offer_id
          status, reason_code, detected_fields, filled_fields, submit_attempted,
          success_evidence, error_message, retryable, playwright_run_id, final_url, page_title,
          page_text_snippet, retry_count, execution_seconds, ai_tokens_input, ai_tokens_output,
-         ai_cost_yen, external_api_cost_yen, estimated_server_cost_yen, total_estimated_cost_yen)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+         ai_cost_yen, external_api_cost_yen, estimated_server_cost_yen, total_estimated_cost_yen,
+         screenshot_before_path, screenshot_after_path)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (company_id, tenant_id, offer_id, list_id, target_url, result.contact_url_used,
          started_at or datetime.now().isoformat(timespec="seconds"),
          datetime.now().isoformat(timespec="seconds"),
@@ -274,7 +275,8 @@ def _log_form_send(con, company_id, result, target_url, tenant_id=None, offer_id
          result.final_url if keep_debug_fields else None,
          result.page_title if keep_debug_fields else None,
          result.page_text_snippet if keep_debug_fields else None,
-         retry_count, execution_seconds, 0, 0, 0.0, 0.0, server_cost, server_cost))
+         retry_count, execution_seconds, 0, 0, 0.0, 0.0, server_cost, server_cost,
+         result.screenshot_before_path, result.screenshot_after_path))
     con.commit()
 
 
@@ -358,12 +360,14 @@ class FormSender(BaseSender):
                                raw={"status": "SKIP_QUOTA_EXCEEDED", "reason_code": quota_reason})
 
         import form_navigator as FN
+        import config as C
         started_at = datetime.now().isoformat(timespec="seconds")
         t0 = _time.monotonic()
         values = {"company": sender.name, "name": sender.name, "email": sender.email,
                   "phone": "", "address": sender.address or "", "subject": subject or "",
                   "message": body, "furigana": "アシベース"}
-        result = FN.navigate_and_submit(to.contact_url, values)
+        result = FN.navigate_and_submit(to.contact_url, values,
+                                         screenshot_dir=C.OUT_DIR / "form_screenshots")
         execution_seconds = _time.monotonic() - t0
         _log_form_send(self.con, to.company_id, result, to.contact_url,
                         tenant_id=self.tenant_id, offer_id=self.offer_id, list_id=self.list_id,

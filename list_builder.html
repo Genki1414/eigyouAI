@@ -305,6 +305,34 @@ tr.clickable:hover{background:var(--blue-soft)}
             <label>配信停止案内URL(任意。未指定なら現在の設定を維持)</label>
             <input type="text" id="sOptoutUrl" placeholder="例: https://example.co.jp/optout">
           </div>
+          <p class="hint" style="margin-top:14px">以下は任意項目です。姓・名・フリガナ・郵便番号が
+            別々の入力欄になっている問い合わせフォームで、より正確に自動入力するために使います。
+            未入力の場合、姓欄には上の「送信者名」がそのまま入り、名欄・フリガナ欄は空のまま
+            送信されます(誤った内容を入れて送るよりは空欄の方が安全なため)。</p>
+          <div class="row" style="margin-top:6px">
+            <div>
+              <label>姓(任意)</label>
+              <input type="text" id="sLastName" placeholder="例: 中川">
+            </div>
+            <div>
+              <label>名(任意)</label>
+              <input type="text" id="sFirstName" placeholder="例: 太郎">
+            </div>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <div>
+              <label>姓フリガナ(任意)</label>
+              <input type="text" id="sLastNameKana" placeholder="例: ナカガワ">
+            </div>
+            <div>
+              <label>名フリガナ(任意)</label>
+              <input type="text" id="sFirstNameKana" placeholder="例: タロウ">
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label>郵便番号(任意)</label>
+            <input type="text" id="sPostalCode" placeholder="例: 100-0001" style="max-width:200px">
+          </div>
           <div class="btnrow"><button id="btnSaveSenderTemplate">保存</button></div>
           <div id="sTmplResult"></div>
         </div>
@@ -1100,14 +1128,21 @@ $("btnSaveSenderTemplate").addEventListener("click", async () => {
   const sender_email = $("sSenderEmail").value.trim();
   const sender_address = $("sSenderAddress").value.trim();
   const optout_url = $("sOptoutUrl").value.trim();
+  const last_name = $("sLastName").value.trim();
+  const first_name = $("sFirstName").value.trim();
+  const last_name_kana = $("sLastNameKana").value.trim();
+  const first_name_kana = $("sFirstNameKana").value.trim();
+  const postal_code = $("sPostalCode").value.trim();
   const el = $("sTmplResult");
   if (!name || !sender_name || !sender_email) { el.innerHTML = `<div class="result err">テンプレート名・送信者名・返信先メールアドレスは必須です</div>`; return; }
   try {
-    await call("/api/tenant/sender-templates",
-      { method: "POST", body: JSON.stringify({ name, sender_name, sender_email, sender_address, optout_url }) });
+    await call("/api/tenant/sender-templates", { method: "POST", body: JSON.stringify({
+      name, sender_name, sender_email, sender_address, optout_url,
+      last_name, first_name, last_name_kana, first_name_kana, postal_code }) });
     el.innerHTML = `<div class="result ok">保存しました</div>`;
-    $("sName").value = ""; $("sSenderName").value = ""; $("sSenderEmail").value = "";
-    $("sSenderAddress").value = ""; $("sOptoutUrl").value = "";
+    ["sName", "sSenderName", "sSenderEmail", "sSenderAddress", "sOptoutUrl",
+     "sLastName", "sFirstName", "sLastNameKana", "sFirstNameKana", "sPostalCode"]
+      .forEach(id => $(id).value = "");
     await refreshSenderTemplates();
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;

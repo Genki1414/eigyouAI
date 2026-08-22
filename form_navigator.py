@@ -471,8 +471,10 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                     if not kind:
                         continue
                     detected[kind] = detected.get(kind, 0) + 1
-                    fill_value = values.get(kind) or (values.get("name") if kind in
-                                                        ("last_name", "first_name") else None)
+                    # 呼び出し側(senders.py)が姓・名それぞれの妥当な既定値を
+                    # 決めて渡す(未設定の名を会社名で埋める、といった代替は
+                    # ここでは行わない。呼び出し側の送信者情報の解釈の話のため)
+                    fill_value = values.get(kind)
                     if fill_value:
                         try:
                             el.fill(fill_value, timeout=ACTION_TIMEOUT_MS)

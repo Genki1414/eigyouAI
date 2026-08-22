@@ -564,9 +564,17 @@ def h_tenant_sender_templates_add(con, tenant_id, data):
     sender_email = (data.get("sender_email") or "").strip()
     if not name or not sender_name or not sender_email:
         return 400, {"error": "name・sender_name・sender_emailは必須です"}
+    # last_name〜postal_codeは任意(姓・名・フリガナ・郵便番号が別欄の問い合わせ
+    # フォーム向け)。空文字はNoneに正規化し、未設定として扱う
+    def opt(key):
+        return (data.get(key) or "").strip() or None
     tid = db.add_sender_template(con, tenant_id, name, sender_name, sender_email,
                                   sender_address=(data.get("sender_address") or "").strip(),
-                                  optout_url=(data.get("optout_url") or "").strip() or None)
+                                  optout_url=opt("optout_url"),
+                                  last_name=opt("last_name"), first_name=opt("first_name"),
+                                  last_name_kana=opt("last_name_kana"),
+                                  first_name_kana=opt("first_name_kana"),
+                                  postal_code=opt("postal_code"))
     return 200, {"ok": True, "template_id": tid}
 
 

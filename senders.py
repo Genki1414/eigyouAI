@@ -52,11 +52,19 @@ class Recipient:
 
 @dataclass
 class Sender:
-    """テナントの送信者情報。特定電子メール法の表示義務を満たすために必須。"""
+    """テナントの送信者情報。特定電子メール法の表示義務を満たすために必須。
+    last_name〜postal_codeは任意(姓・名・フリガナ・郵便番号が別欄の問い合わせ
+    フォーム向け。MIKOMERU同等)。未設定ならFormSender側で妥当な既定値へ
+    フォールバックする(姓欄には会社名、名欄・フリガナ欄は空、というように)。"""
     name: str
     email: str
     address: str
     optout_url: str
+    last_name: str = ""
+    first_name: str = ""
+    last_name_kana: str = ""
+    first_name_kana: str = ""
+    postal_code: str = ""
 
 
 # ── 基底クラス ──────────────────────────────
@@ -363,9 +371,16 @@ class FormSender(BaseSender):
         import config as C
         started_at = datetime.now().isoformat(timespec="seconds")
         t0 = _time.monotonic()
+        # 姓・名・フリガナ・郵便番号は任意設定。未設定の場合、姓欄には会社名を
+        # 入れておく(空欄より許容されやすい)が、名欄・フリガナ欄は空のままにする
+        # (以前は名欄にも会社名を複製し、フリガナ欄には固定文字列"アシベース"を
+        # 入れていたが、カスタムの送信者名を設定したテナントでは明らかに不自然な
+        # 内容になってしまうため、確実な値が無い項目は空欄のままにする方針にした)
+        furigana = f"{sender.last_name_kana}{sender.first_name_kana}".strip()
         values = {"company": sender.name, "name": sender.name, "email": sender.email,
-                  "phone": "", "address": sender.address or "", "subject": subject or "",
-                  "message": body, "furigana": "アシベース"}
+                  "phone": "", "address": sender.address or "", "postal_code": sender.postal_code or "",
+                  "last_name": sender.last_name or sender.name, "first_name": sender.first_name or "",
+                  "subject": subject or "", "message": body, "furigana": furigana}
         result = FN.navigate_and_submit(to.contact_url, values,
                                          screenshot_dir=C.OUT_DIR / "form_screenshots")
         execution_seconds = _time.monotonic() - t0
@@ -408,7 +423,9 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
     q = """SELECT t.id tid, t.channel, t.subject, t.body, t.company_id, t.step,
                   c.name, c.email, c.fax, c.phone, c.address, c.contact_url,
                   o.id offer_id, tn.id tenant_id, tl.id list_id,
-                  tn.sender_name sname, tn.sender_email, tn.sender_address, tn.optout_url
+                  tn.sender_name sname, tn.sender_email, tn.sender_address, tn.optout_url,
+                  tn.sender_last_name, tn.sender_first_name, tn.sender_last_name_kana,
+                  tn.sender_first_name_kana, tn.sender_postal_code
            FROM touches t
            JOIN companies c ON c.id = t.company_id
            LEFT JOIN campaigns cp ON cp.id = t.campaign_id
@@ -455,7 +472,11 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
             name=r["sname"] or "AshiBase（足場ベース）",
             email=r["sender_email"] or "info@ashibase.jp",
             address=r["sender_address"] or "",
-            optout_url=r["optout_url"] or "https://ashibase.jp/optout")
+            optout_url=r["optout_url"] or "https://ashibase.jp/optout",
+            last_name=r["sender_last_name"] or "", first_name=r["sender_first_name"] or "",
+            last_name_kana=r["sender_last_name_kana"] or "",
+            first_name_kana=r["sender_first_name_kana"] or "",
+            postal_code=r["sender_postal_code"] or "")
         to = Recipient(company_id=r["company_id"], name=r["name"], email=r["email"],
                        fax=r["fax"], phone=r["phone"], address=r["address"],
                        contact_url=r["contact_url"])
@@ -650,6 +671,80 @@ if __name__ == "__main__":
             con.execute("DELETE FROM campaigns WHERE id=?", (dr_cid,))
             con.execute("DELETE FROM companies WHERE id=999998")
             con.execute("DELETE FROM idempotency WHERE key LIKE '%:999998:1'")
+            con.commit()
+
+        print("\n── 送信元の姓・名・フリガナ・郵便番号(未設定/設定済みの両方) ──")
+        # 過去のバグ: 姓欄・名欄の両方に会社名(sender.name)をそのまま複製し、
+        # フリガナ欄は常に固定文字列"アシベース"を入れていた。カスタムの送信者名を
+        # 設定したテナント(例: "東北三上機材株式会社")では明らかに不自然な内容に
+        # なってしまう。未設定なら姓欄=会社名/名欄・フリガナ欄=空、設定済みなら
+        # その値をそのまま使う、という2パターンを確認する。
+        import offers as OF
+        con.execute("DELETE FROM companies WHERE id=999997")
+        con.execute("""INSERT INTO companies (id, name, contact_url)
+            VALUES (999997, 'テスト_送信元情報確認', 'https://example.co.jp/contact/')""")
+        con.commit()
+
+        def _capture_values(tenant_id, offer_name):
+            offer_id = con.execute("SELECT id FROM offers WHERE tenant_id=?", (tenant_id,)).fetchone()[0]
+            cur = con.execute("""INSERT INTO campaigns (name, started_at, target_rule, offer_id)
+                VALUES (?,?,?,?)""",
+                (offer_name, datetime.now().isoformat(timespec="seconds"), "ALL", offer_id))
+            cid = cur.lastrowid
+            con.execute("""INSERT INTO touches (campaign_id, company_id, channel, variant, step,
+                subject, body) VALUES (?,999997,'フォーム','A',1,'件名','本文')""", (cid,))
+            con.commit()
+            captured = {}
+            import form_navigator as FN
+            orig_navigate = FN.navigate_and_submit
+            FN.navigate_and_submit = lambda url, values, **k: (
+                captured.update(values),
+                FN.NavigationResult(status="SUCCESS", reason_code="success_text_matched",
+                                    submit_attempted=True))[-1]
+            try:
+                send_campaign(con, cid, step=1, dry_run=False)
+            finally:
+                FN.navigate_and_submit = orig_navigate
+                con.execute("DELETE FROM touches WHERE campaign_id=?", (cid,))
+                con.execute("DELETE FROM campaigns WHERE id=?", (cid,))
+                con.commit()
+            return captured
+
+        orig_ks2, orig_ks2_reason = db.kill_switch_status(con)
+        db.set_global_kill_switch(con, False, updated_by="test")
+        try:
+            tid_default, _ = OF.add_tenant(con, "test-sender-default", "default@example.co.jp",
+                                            sender_name="東北三上機材株式会社")
+            v_default = _capture_values(tid_default, "test-sender-default-campaign")
+            ok_default = (v_default.get("last_name") == "東北三上機材株式会社"
+                          and v_default.get("first_name") == "" and v_default.get("furigana") == ""
+                          and v_default.get("postal_code") == "")
+            print(f"  未設定時: last_name={v_default.get('last_name')!r} "
+                  f"first_name={v_default.get('first_name')!r} furigana={v_default.get('furigana')!r}")
+            print(f"  {'✓' if ok_default else '✗'} 未設定なら姓欄=会社名/名欄・フリガナ欄・郵便番号は空"
+                  "(以前は名欄にも会社名を複製しフリガナは固定文字列だった)")
+
+            tid_custom, _ = OF.add_tenant(con, "test-sender-custom", "custom@example.co.jp",
+                                           sender_name="東北三上機材株式会社")
+            con.execute("""UPDATE tenants SET sender_last_name=?, sender_first_name=?,
+                sender_last_name_kana=?, sender_first_name_kana=?, sender_postal_code=?
+                WHERE id=?""", ("中川", "太郎", "ナカガワ", "タロウ", "980-0021", tid_custom))
+            con.commit()
+            v_custom = _capture_values(tid_custom, "test-sender-custom-campaign")
+            ok_custom = (v_custom.get("last_name") == "中川" and v_custom.get("first_name") == "太郎"
+                         and v_custom.get("furigana") == "ナカガワタロウ"
+                         and v_custom.get("postal_code") == "980-0021")
+            print(f"  設定済み時: last_name={v_custom.get('last_name')!r} "
+                  f"first_name={v_custom.get('first_name')!r} furigana={v_custom.get('furigana')!r} "
+                  f"postal_code={v_custom.get('postal_code')!r}")
+            print(f"  {'✓' if ok_custom else '✗'} 設定済みならその値がそのまま使われる")
+        finally:
+            db.set_global_kill_switch(con, orig_ks2, reason=orig_ks2_reason, updated_by="test-restore")
+            con.execute("DELETE FROM companies WHERE id=999997")
+            for tname in ("test-sender-default", "test-sender-custom"):
+                for row in con.execute("SELECT id FROM tenants WHERE name=?", (tname,)).fetchall():
+                    con.execute("DELETE FROM offers WHERE tenant_id=?", (row["id"],))
+                    con.execute("DELETE FROM tenants WHERE id=?", (row["id"],))
             con.commit()
 
         print("\n── フォーム送信ペーシング上限 ──")

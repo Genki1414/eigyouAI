@@ -705,6 +705,28 @@ Playwrightが動いたことを確認している(結果は7社中0件成功・5
     MIKOMERU比較・改修は未着手。ブックマークレットは実ブラウザで一度も
     動作確認していない(jsdomでのロジック検証のみ)ため、実際に使う前に
     人の手で一度、本物の問い合わせフォームで試すこと。
+- **送信元の姓・名・フリガナ・郵便番号(MIKOMERU相当の項目)**: `tenants`/
+  `sender_templates`に`sender_last_name`/`sender_first_name`/
+  `sender_last_name_kana`/`sender_first_name_kana`/`sender_postal_code`を
+  追加(すべて任意項目)。「送信元テンプレート」画面に入力欄を追加した。
+  あわせて2つの実バグを修正した:
+  - 以前は姓欄・名欄の両方に会社名(`sender.name`)をそのまま複製していた
+    (`form_navigator.py`の`fill_value = values.get(kind) or (values.get("name")
+    if kind in ("last_name","first_name") else None)`という暗黙のフォールバック)。
+    姓・名が別欄の問い合わせフォームで、名欄にも会社名が入ってしまう不自然な
+    内容になっていた。フォールバックを削除し、呼び出し側(`senders.py`)が
+    姓欄=会社名(未設定時)/名欄=空、と明示的に決めるようにした。
+  - フリガナ欄には常に固定文字列`"アシベース"`が入っていた。今夜の実送信で
+    テナントが送信者名を「東北三上機材株式会社」にカスタマイズしていたのに
+    フリガナだけ「アシベース」のまま送っていた可能性がある(初回実送信時の
+    バグ)。姓カナ・名カナが未設定ならフリガナ欄は空にするよう修正。
+  - 郵便番号も新たに`values["postal_code"]`として渡すようにした
+    (`_FIELD_HINTS["postal_code"]`自体は以前から検出対応していたが、
+    値を渡していなかったため常に空欄で送信されていた。多くのフォームで
+    郵便番号は必須項目のため、これが未確認成功(`success_not_confirmed`)の
+    一因だった可能性がある)。
+  - `senders.py test`に検証を追加(未設定/設定済みの両パターンで
+    `FN.navigate_and_submit`へ渡る`values`の中身を直接確認)。
 
 ---
 

@@ -1014,8 +1014,15 @@ async function runPreview() {
   try {
     const r = await call("/api/tenant/lists/preview", { method: "POST", body: JSON.stringify({ filters: currentFilters() }) });
     if (seq !== previewSeq) return;
+    const sampleTable = !r.sample.length ? "" :
+      `<table style="margin-top:8px"><tr><th>会社名</th><th>都道府県</th><th>ランク</th></tr>` +
+      r.sample.map(c => `<tr><td>${c.name}</td><td>${c.pref || "—"}</td><td>${c.rank || "—"}</td></tr>`).join("") +
+      `</table>` +
+      (r.count_before_cap > r.sample.length
+        ? `<p class="hint" style="margin-top:4px">先頭${r.sample.length}社を表示(保存前のプレビューのため。全件は保存後に「保存済みリスト」で確認できます)</p>`
+        : "");
     el.innerHTML = `<div class="result ok">該当 ${r.count_before_cap.toLocaleString()}社` +
-      (r.capped ? `(上限20,000件のため実際に保存されるのは20,000社)` : ``) + `</div>`;
+      (r.capped ? `(上限20,000件のため実際に保存されるのは20,000社)` : ``) + `</div>` + sampleTable;
   } catch (e) {
     if (seq !== previewSeq) return;
     el.innerHTML = `<div class="result err">${e.message}</div>`;

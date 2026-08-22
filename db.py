@@ -391,6 +391,21 @@ def migrate(con):
         ("sender_templates", "sender_last_name_kana", "TEXT"),
         ("sender_templates", "sender_first_name_kana", "TEXT"),
         ("sender_templates", "sender_postal_code", "TEXT"),
+        # 送信元の都道府県・市区町村・丁目番地・ビル名/部屋番号・電話番号(MIKOMERU同等)。
+        # 従来はsender_address 1本のfree textだったが、住所が郵便番号/都道府県/市区町村/
+        # 丁目番地/建物名で別々の入力欄になっている問い合わせフォームには埋められなかった。
+        # sender_addressは後方互換のため残し、フォーム入力の実体はこちらの構造化項目を優先する
+        # (form_navigator.pyの新設kind: prefecture/city/block/building)。
+        ("tenants", "sender_prefecture", "TEXT"), ("tenants", "sender_city", "TEXT"),
+        ("tenants", "sender_block", "TEXT"), ("tenants", "sender_building", "TEXT"),
+        ("tenants", "sender_phone", "TEXT"),
+        ("sender_templates", "sender_prefecture", "TEXT"), ("sender_templates", "sender_city", "TEXT"),
+        ("sender_templates", "sender_block", "TEXT"), ("sender_templates", "sender_building", "TEXT"),
+        ("sender_templates", "sender_phone", "TEXT"),
+        # 送信結果ごとの備考(MIKOMERUの「架電済み」等の営業メモ)と、自動入力アシスト後に
+        # 人が手動でフォームを完了させたことを示すフラグ(MIKOMERUの「手動送信済み」相当)。
+        ("form_send_log", "note", "TEXT"),
+        ("form_send_log", "manual_sent_at", "TEXT"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
@@ -561,17 +576,20 @@ def delete_message_template(con, tenant_id, template_id):
 # ── 送信元テンプレート(送信者名・返信先等のパターン登録) ──
 def add_sender_template(con, tenant_id, name, sender_name, sender_email,
                          sender_address="", optout_url=None, last_name=None, first_name=None,
-                         last_name_kana=None, first_name_kana=None, postal_code=None):
-    """last_name〜postal_codeはすべて任意項目。姓・名・フリガナ・郵便番号が別欄の
-    問い合わせフォーム向け(MIKOMERU同等)。未指定なら空のまま保存し、送信時に
-    senders.py側で妥当な既定値へフォールバックする。"""
+                         last_name_kana=None, first_name_kana=None, postal_code=None,
+                         prefecture=None, city=None, block=None, building=None, phone=None):
+    """last_name〜phoneはすべて任意項目。姓・名・フリガナ・郵便番号・住所(都道府県/
+    市区町村/丁目番地/建物名)・電話番号が別欄の問い合わせフォーム向け(MIKOMERU同等)。
+    未指定なら空のまま保存し、送信時にsenders.py側で妥当な既定値へフォールバックする。"""
     cur = con.execute("""INSERT INTO sender_templates
         (tenant_id, name, sender_name, sender_email, sender_address, optout_url,
          sender_last_name, sender_first_name, sender_last_name_kana, sender_first_name_kana,
-         sender_postal_code, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+         sender_postal_code, sender_prefecture, sender_city, sender_block, sender_building,
+         sender_phone, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (tenant_id, name, sender_name, sender_email, sender_address, optout_url,
          last_name, first_name, last_name_kana, first_name_kana, postal_code,
+         prefecture, city, block, building, phone,
          datetime.now().isoformat(timespec="seconds")))
     con.commit()
     return cur.lastrowid
@@ -580,7 +598,8 @@ def add_sender_template(con, tenant_id, name, sender_name, sender_email,
 def list_sender_templates(con, tenant_id):
     rows = con.execute("""SELECT id, name, sender_name, sender_email, sender_address,
         optout_url, sender_last_name, sender_first_name, sender_last_name_kana,
-        sender_first_name_kana, sender_postal_code, created_at FROM sender_templates
+        sender_first_name_kana, sender_postal_code, sender_prefecture, sender_city,
+        sender_block, sender_building, sender_phone, created_at FROM sender_templates
         WHERE tenant_id=? ORDER BY created_at DESC""", (tenant_id,)).fetchall()
     return [dict(r) for r in rows]
 
@@ -598,18 +617,41 @@ def activate_sender_template(con, tenant_id, template_id):
     送信ロジック側には一切手を入れずに反映できる。"""
     row = con.execute("""SELECT sender_name, sender_email, sender_address, optout_url,
         sender_last_name, sender_first_name, sender_last_name_kana, sender_first_name_kana,
-        sender_postal_code
+        sender_postal_code, sender_prefecture, sender_city, sender_block, sender_building,
+        sender_phone
         FROM sender_templates WHERE id=? AND tenant_id=?""", (template_id, tenant_id)).fetchone()
     if not row:
         return False
     con.execute("""UPDATE tenants SET sender_name=?, sender_email=?, sender_address=?,
         optout_url=?, sender_last_name=?, sender_first_name=?, sender_last_name_kana=?,
-        sender_first_name_kana=?, sender_postal_code=? WHERE id=?""",
+        sender_first_name_kana=?, sender_postal_code=?, sender_prefecture=?, sender_city=?,
+        sender_block=?, sender_building=?, sender_phone=? WHERE id=?""",
         (row["sender_name"], row["sender_email"], row["sender_address"], row["optout_url"],
          row["sender_last_name"], row["sender_first_name"], row["sender_last_name_kana"],
-         row["sender_first_name_kana"], row["sender_postal_code"], tenant_id))
+         row["sender_first_name_kana"], row["sender_postal_code"], row["sender_prefecture"],
+         row["sender_city"], row["sender_block"], row["sender_building"], row["sender_phone"],
+         tenant_id))
     con.commit()
     return True
+
+
+# ── 送信ログの備考・手動送信済みフラグ(MIKOMERU同等) ──
+def update_form_send_log_note(con, tenant_id, log_id, note):
+    cur = con.execute("UPDATE form_send_log SET note=? WHERE id=? AND tenant_id=?",
+                       (note, log_id, tenant_id))
+    con.commit()
+    return cur.rowcount > 0
+
+
+def set_form_send_log_manual_sent(con, tenant_id, log_id, manual_sent):
+    """自動入力アシスト後、人が実際にフォームを送信し終えたことを記録する
+    (MIKOMERUの「手動送信済み」チェック相当)。取り消し(チェックを外す)もできるよう
+    manual_sent=Falseならmanual_sent_atをNULLへ戻す。"""
+    value = datetime.now().isoformat(timespec="seconds") if manual_sent else None
+    cur = con.execute("UPDATE form_send_log SET manual_sent_at=? WHERE id=? AND tenant_id=?",
+                       (value, log_id, tenant_id))
+    con.commit()
+    return cur.rowcount > 0
 
 
 # ── 予約送信(MIKOMERU同等の「送信開始日時を指定する」機能) ──

@@ -889,6 +889,63 @@ Playwrightが動いたことを確認している(結果は7社中0件成功・5
 
 ---
 
+### T16. MIKOMERUマニュアル(自動送信画面)を参照した機能・UX拡充(2026-08-22)
+
+ユーザーからMIKOMERUの「自動送信を行う」マニュアルのスクリーンショット一式(リストで送信画面・
+送信元情報入力・送信文章テンプレート/マージタグ・送信中の進捗画面・送信ログ詳細)を渡され、
+「あとは画像のようにして」と依頼された。以下を実装し、すべて実ブラウザ(Playwright、
+`PLAYWRIGHT_CHROMIUM_PATH`)でクリックまで通した確認を行った。
+
+- **マージタグ(`##TO_COMPANY_NAME##`/`##FROM_FAMILY_NAME##`)**: `senders.py`に
+  `render_merge_tags(text, to, sender)`を新設。`send_campaign()`が実送信直前に
+  `touches.subject`/`body`へ適用する(DBには元のテンプレート文字列のまま保持し、
+  送信の都度その時点の宛先名・送信元姓で描画する設計)。`list_builder.html`の
+  送信文章テンプレート・送信フォーム双方にヒント文言を追加。
+  `POST /api/tenant/lists/{id}/preview-message`(新設)でリスト内の1社をサンプルに
+  実際にどう置換されるかを事前確認できる「プレビュー」ボタンも追加した
+  (`senders.render_merge_tags()`をそのまま呼ぶため、実送信時とロジックが二重化しない)。
+
+- **送信元住所の構造化+電話番号**: `tenants`/`sender_templates`に
+  `sender_prefecture`/`sender_city`/`sender_block`/`sender_building`/`sender_phone`を追加。
+  未設定なら従来の`sender_address`(単一自由記述)にフォールバックする設計
+  (`structured_address = "".join(filter(None, [prefecture, city, block, building])) or sender_address`)。
+  `form_navigator.py`の`_FIELD_HINTS`/`_classify_field`に`prefecture`/`city`/`block`/`building`
+  のkindを追加(住所が都道府県/市区町村/丁目番地/建物名で別欄になっている問い合わせフォームに
+  対応。これまでは全部「address」1本に丸められて空振りしていた)。
+  `chrome_extension/background.js`の自動入力アシスト側のHINTS/orderにも同じ内容を反映して同期。
+
+- **自動送信ログの備考・手動送信済み(MIKOMERU同等)**: `form_send_log`に`note`(自由記述の
+  営業メモ)・`manual_sent_at`(自動入力アシスト後に人が実際に送信し終えたことを示す日時。
+  チェックを外すとNULLに戻る)を追加。`list_builder.html`の自動送信ログ表にインラインの
+  備考入力(600msデバウンスで自動保存)・手動送信済みチェックボックス列・お問い合わせURL列を
+  追加した。CSVダウンロードボタン(`GET /api/tenant/send-log/csv`)も新設(現在の検索/絞り込みを
+  反映してエクスポート)。
+
+- **テンプレート選択不能バグの再検証**: 前回(T15)の修正がコミット済みであることを確認。
+  実ブラウザで接続→テンプレート登録→プルダウン確認まで再度通し、正常に動作することを確認した。
+
+- **送信中の進捗表示(MIKOMERU同等の見た目)**: `TL.send_list()`は同期処理のため、真の
+  パーセンテージ進捗は実装していない(そのためには非同期ジョブ化という大きな設計変更が
+  必要になる)。**正直な注記**として、送信ボタンを押すと専用の進捗カードへ切り替わり
+  (不定進捗のアニメーションバー→完了で緑の100%バー+「完了」ボタン)、MIKOMERUと同じ
+  画面遷移の「型」を再現しているが、バーの動き自体は実際の処理%を表していない
+  (処理中であることを示す演出)。「完了」を押すと送信結果とリスト詳細へスクロールする。
+
+`api.py test`(183/183)・`senders.py test`・`form_navigator.py test`(7/7)・
+`test_concurrency.py`・`storage.py test`はすべて再確認済み。開発中、
+`target_list_members`に`id`列が存在しない(複合キーテーブル)ことに気づかず
+`ORDER BY m.id`と書いてSQLエラーになるバグを実ブラウザテストの手前で発見・修正した
+(自己テストのみでは気づけなかったはずのバグで、`h_tenant_list_preview_message()`を
+直接呼んで再現・修正)。
+
+**未着手のまま残した項目**: MIKOMERUマニュアルにあった「URLアクセスの記録」(本文中のURLの
+クリック計測)は、リダイレクト用の追跡URLを発行する新規インフラが必要な大きめの機能のため
+今回は着手していない(T2のメール送信基盤と同様、必要なら別途スコープを相談してから着手する
+のが良い)。また、拡張機能配布はまだ「未パッケージをデベロッパーモードで読み込む」段階で、
+Chrome ウェブストア公開等は行っていない。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

@@ -32,6 +32,10 @@ function fillFieldsInPage(values) {
     email: ["メールアドレス", "メール", "eメール", "e-mail", "email", "mail"],
     phone: ["電話番号", "電話番号(必須)", "tel", "phone"],
     postal_code: ["郵便番号", "〒", "zip", "postal"],
+    prefecture: ["都道府県", "都道府県名", "prefecture", "pref"],
+    city: ["市区町村", "市町村", "city"],
+    block: ["丁目番地", "丁目・番地", "町名・番地", "丁目", "番地"],
+    building: ["ビル名", "建物名", "マンション名", "部屋番号", "building"],
     address: ["住所", "所在地", "address"],
     message: ["お問い合わせ内容", "ご相談内容", "内容", "メッセージ", "message", "ご要望", "本文", "comment"],
     company: ["会社名", "法人名", "貴社名", "御社名", "団体名", "company", "organization"],
@@ -52,7 +56,8 @@ function fillFieldsInPage(values) {
   function classify(el) {
     var t = textFor(el), tag = el.tagName.toLowerCase();
     if (tag === "textarea") return "message";
-    var order = ["email", "phone", "postal_code", "address", "company", "subject", "furigana", "name", "last_name", "first_name"];
+    var order = ["email", "phone", "postal_code", "prefecture", "city", "block", "building",
+                 "address", "company", "subject", "furigana", "name", "last_name", "first_name"];
     for (var i = 0; i < order.length; i++) {
       var kind = order[i];
       for (var j = 0; j < HINTS[kind].length; j++) {

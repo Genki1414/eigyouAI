@@ -137,6 +137,9 @@ tr.clickable:hover{background:var(--blue-soft)}
   .card{border:none;padding:0}
   #btnPrintManual{display:none}
 }
+@keyframes progressSlide{0%{margin-left:-30%}100%{margin-left:100%}}
+#sendProgressBar.indeterminate{animation:progressSlide 1.2s ease-in-out infinite}
+#sendProgressBar.done{width:100% !important;background:var(--win)}
 </style>
 </head>
 <body>
@@ -240,8 +243,9 @@ tr.clickable:hover{background:var(--blue-soft)}
               <label>会社名で検索</label>
               <input type="text" id="sendLogSearch" placeholder="会社名の一部を入力">
             </div>
-            <div style="display:flex;align-items:flex-end">
+            <div style="display:flex;align-items:flex-end;gap:8px">
               <button class="ghost" id="btnSendLogSearch">検索</button>
+              <button class="ghost" id="btnSendLogCsv">📥 ダウンロード</button>
             </div>
           </div>
           <div id="sendLogCounts" class="countpills"></div>
@@ -267,6 +271,9 @@ tr.clickable:hover{background:var(--blue-soft)}
           <div style="margin-top:10px">
             <label>本文</label>
             <textarea id="tBody" rows="4" placeholder="本文を入力してください"></textarea>
+            <p class="hint" style="margin-top:4px">件名・本文に <code>##TO_COMPANY_NAME##</code>
+              と入力すると送信先の会社名に、<code>##FROM_FAMILY_NAME##</code> と入力すると
+              上で入力された送信元の姓に置き換えて送信されます。</p>
           </div>
           <div class="btnrow"><button id="btnSaveTemplate">保存</button></div>
           <div id="tmplResult"></div>
@@ -329,9 +336,38 @@ tr.clickable:hover{background:var(--blue-soft)}
               <input type="text" id="sFirstNameKana" placeholder="例: タロウ">
             </div>
           </div>
-          <div style="margin-top:10px">
-            <label>郵便番号(任意)</label>
-            <input type="text" id="sPostalCode" placeholder="例: 100-0001" style="max-width:200px">
+          <div class="row" style="margin-top:10px">
+            <div>
+              <label>郵便番号(任意)</label>
+              <input type="text" id="sPostalCode" placeholder="例: 100-0001">
+            </div>
+            <div>
+              <label>都道府県(任意)</label>
+              <input type="text" id="sPrefecture" placeholder="例: 東京都">
+            </div>
+          </div>
+          <p class="hint" style="margin-top:14px">以下も任意項目です。住所が都道府県/市区町村/
+            丁目番地/建物名で別々の入力欄になっている問い合わせフォーム向けです。未入力の場合、
+            上の「住所」欄がそのまま単一住所欄に使われます。</p>
+          <div class="row" style="margin-top:6px">
+            <div>
+              <label>市区町村(任意)</label>
+              <input type="text" id="sCity" placeholder="例: 千代田区丸の内">
+            </div>
+            <div>
+              <label>丁目番地(任意)</label>
+              <input type="text" id="sBlock" placeholder="例: 1-1-1">
+            </div>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <div>
+              <label>ビル名・部屋番号(任意)</label>
+              <input type="text" id="sBuilding" placeholder="例: 〇〇ビル3F">
+            </div>
+            <div>
+              <label>電話番号(任意)</label>
+              <input type="text" id="sPhone" placeholder="例: 03-1234-5678">
+            </div>
           </div>
           <div class="btnrow"><button id="btnSaveSenderTemplate">保存</button></div>
           <div id="sTmplResult"></div>
@@ -612,6 +648,20 @@ tr.clickable:hover{background:var(--blue-soft)}
     <img id="imgModalImg" alt="スクリーンショット">
   </div>
 </div>
+
+<div class="imgmodal" id="previewModal">
+  <div class="imgmodal-inner" style="max-width:560px">
+    <div class="imgmodal-head">
+      <b>送信文章プレビュー</b>
+      <button class="ghost" id="previewModalClose">閉じる</button>
+    </div>
+    <p class="hint" id="previewModalSample"></p>
+    <div style="background:var(--concrete);border-radius:6px;padding:12px;margin-top:8px">
+      <div style="font-weight:700;margin-bottom:8px" id="previewModalSubject"></div>
+      <div style="white-space:pre-wrap;font-size:13px;line-height:1.7" id="previewModalBody"></div>
+    </div>
+  </div>
+</div>
 <script>
 // ── ナビゲーション(単一ページ内の切替。リロードなし) ──
 const PAGE_TITLES = {
@@ -887,6 +937,8 @@ async function showScreenshot(logId, kind, companyName) {
 }
 $("imgModalClose").addEventListener("click", () => $("imgModal").classList.remove("open"));
 $("imgModal").addEventListener("click", (e) => { if (e.target.id === "imgModal") $("imgModal").classList.remove("open"); });
+$("previewModalClose").addEventListener("click", () => $("previewModal").classList.remove("open"));
+$("previewModal").addEventListener("click", (e) => { if (e.target.id === "previewModal") $("previewModal").classList.remove("open"); });
 
 async function refreshSendLog() {
   if (!connected) return;
@@ -916,18 +968,26 @@ async function refreshSendLog() {
     });
 
     if (!r.log.length) { el.innerHTML = `<div class="empty">該当する送信履歴がありません</div>`; return; }
-    el.innerHTML = `<table><tr><th>会社名</th><th>結果</th><th>詳細</th>
-        <th>送信前</th><th>送信後</th><th>自動入力</th><th>日時</th></tr>` +
+    el.innerHTML = `<table><tr><th>会社名</th><th>お問い合わせURL</th><th>結果</th><th>詳細</th>
+        <th>送信前</th><th>送信後</th><th>自動入力</th><th>手動送信済み</th><th>備考</th>
+        <th>日時</th></tr>` +
       r.log.map(x => {
         const cls = LOG_STATUS_CLASS[x.status] || "";
         const label = LOG_STATUS_LABELS[x.status] || x.status;
         const canAssist = AUTOFILL_ELIGIBLE_STATUSES.has(x.status);
+        const url = x.contact_url || x.target_url || "";
         return `<tr><td>${x.company_name || "—"}</td>
+        <td>${url ? `<a href="${url}" target="_blank" rel="noopener" style="font-size:11px">${url}</a>` : "—"}</td>
         <td><span class="pill${cls ? " " + cls : ""}">${label}</span></td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.reason_code || "—"}</td>
         <td>${x.has_screenshot_before ? `<button class="ghost shotbtn" data-id="${x.id}" data-kind="before">確認</button>` : "—"}</td>
         <td>${x.has_screenshot_after ? `<button class="ghost shotbtn" data-id="${x.id}" data-kind="after">確認</button>` : "—"}</td>
         <td>${canAssist ? `<button class="ghost autofillbtn" data-id="${x.id}">自動入力</button>` : "—"}</td>
+        <td><label style="display:flex;align-items:center;gap:4px;font-weight:400;cursor:pointer">
+          <input type="checkbox" class="manualSentChk" data-id="${x.id}" style="width:auto"
+            ${x.manual_sent_at ? "checked" : ""}></label></td>
+        <td><input type="text" class="noteInput" data-id="${x.id}" value="${(x.note || "").replace(/"/g, "&quot;")}"
+          placeholder="例: 架電済み" style="font-size:11px;padding:4px 6px"></td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at}</td></tr>`;
       }).join("") +
       `</table>`;
@@ -940,8 +1000,56 @@ async function refreshSendLog() {
     el.querySelectorAll(".autofillbtn").forEach(btn => {
       btn.addEventListener("click", () => queueAutofill(Number(btn.dataset.id), btn));
     });
+    el.querySelectorAll(".manualSentChk").forEach(chk => {
+      chk.addEventListener("change", async () => {
+        chk.disabled = true;
+        try {
+          await call(`/api/tenant/send-log/${chk.dataset.id}/manual-sent`,
+            { method: "POST", body: JSON.stringify({ manual_sent: chk.checked }) });
+        } catch (e) {
+          alert("更新に失敗しました: " + e.message);
+          chk.checked = !chk.checked;
+        } finally {
+          chk.disabled = false;
+        }
+      });
+    });
+    el.querySelectorAll(".noteInput").forEach(inp => {
+      let timer = null;
+      inp.addEventListener("input", () => {
+        clearTimeout(timer);
+        timer = setTimeout(async () => {
+          try {
+            await call(`/api/tenant/send-log/${inp.dataset.id}/note`,
+              { method: "POST", body: JSON.stringify({ note: inp.value.trim() }) });
+          } catch (e) {
+            alert("備考の更新に失敗しました: " + e.message);
+          }
+        }, 600);
+      });
+    });
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+async function downloadSendLogCsv() {
+  try {
+    const q = $("sendLogSearch").value.trim();
+    const statuses = Object.keys(LOG_STATUS_LABELS).filter(s => !sendLogExcluded.has(s));
+    const qs = new URLSearchParams();
+    if (q) qs.set("q", q);
+    if (statuses.length < Object.keys(LOG_STATUS_LABELS).length) qs.set("status", statuses.join(","));
+    const r = await call(`/api/tenant/send-log/csv?${qs.toString()}`);
+    const blob = new Blob(["﻿" + r.csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `send_log_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (e) {
+    alert("CSVダウンロードに失敗しました: " + e.message);
   }
 }
 
@@ -965,6 +1073,7 @@ async function queueAutofill(logId, btn) {
 }
 $("btnSendLogSearch").addEventListener("click", refreshSendLog);
 $("sendLogSearch").addEventListener("keydown", (e) => { if (e.key === "Enter") refreshSendLog(); });
+$("btnSendLogCsv").addEventListener("click", downloadSendLogCsv);
 
 async function refreshExclusions() {
   if (!connected) return;
@@ -1124,15 +1233,22 @@ $("btnSaveSenderTemplate").addEventListener("click", async () => {
   const last_name_kana = $("sLastNameKana").value.trim();
   const first_name_kana = $("sFirstNameKana").value.trim();
   const postal_code = $("sPostalCode").value.trim();
+  const prefecture = $("sPrefecture").value.trim();
+  const city = $("sCity").value.trim();
+  const block = $("sBlock").value.trim();
+  const building = $("sBuilding").value.trim();
+  const phone = $("sPhone").value.trim();
   const el = $("sTmplResult");
   if (!name || !sender_name || !sender_email) { el.innerHTML = `<div class="result err">テンプレート名・送信者名・返信先メールアドレスは必須です</div>`; return; }
   try {
     await call("/api/tenant/sender-templates", { method: "POST", body: JSON.stringify({
       name, sender_name, sender_email, sender_address, optout_url,
-      last_name, first_name, last_name_kana, first_name_kana, postal_code }) });
+      last_name, first_name, last_name_kana, first_name_kana, postal_code,
+      prefecture, city, block, building, phone }) });
     el.innerHTML = `<div class="result ok">保存しました</div>`;
     ["sName", "sSenderName", "sSenderEmail", "sSenderAddress", "sOptoutUrl",
-     "sLastName", "sFirstName", "sLastNameKana", "sFirstNameKana", "sPostalCode"]
+     "sLastName", "sFirstName", "sLastNameKana", "sFirstNameKana", "sPostalCode",
+     "sPrefecture", "sCity", "sBlock", "sBuilding", "sPhone"]
       .forEach(id => $(id).value = "");
     await refreshSenderTemplates();
   } catch (e) {
@@ -1435,6 +1551,9 @@ async function showDetail(id) {
           <div><label>件名</label><input type="text" id="sendSubject" placeholder="例: 積算のお手伝いをさせてください"></div>
           <div><label>本文</label><textarea id="sendBody" rows="3" placeholder="本文を入力してください"></textarea></div>
         </div>
+        <p class="hint" style="margin-top:4px"><code>##TO_COMPANY_NAME##</code>(送信先の会社名)・
+          <code>##FROM_FAMILY_NAME##</code>(送信元の姓)が使えます。</p>
+        <div class="btnrow" style="margin-top:4px"><button class="ghost" id="btnPreviewMessage">👁️ プレビュー</button></div>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
           <input type="checkbox" id="sendDryRun" checked style="width:auto">
           <span id="sendDryRunLabel">ドライラン(実際には送信しません)</span>
@@ -1448,6 +1567,21 @@ async function showDetail(id) {
         </div>
         <div class="btnrow"><button id="btnSend">送信する</button></div>
         <div id="sendResult"></div>
+        <div id="sendProgressWrap" style="display:none;margin-top:12px">
+          <p class="hint">送信には時間がかかる場合があります。件数・混雑状況によっては数分かかることもあります。
+            画面を閉じても処理は続きます。</p>
+          <div class="card" style="background:var(--concrete)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <b id="sendProgressBadge">処理中</b>
+            </div>
+            <div style="height:10px;background:var(--line);border-radius:6px;overflow:hidden;position:relative">
+              <div id="sendProgressBar" style="height:100%;width:30%;background:#7c3aed;border-radius:6px"></div>
+            </div>
+            <div class="btnrow" id="sendProgressDoneRow" style="margin-top:12px;display:none">
+              <button id="btnSendProgressDone">完了</button>
+            </div>
+          </div>
+        </div>
       </div>
       <h2>予約済みの送信 <span>SCHEDULED</span></h2>
       <div id="scheduledSendsWrap"><div class="empty">読み込み中...</div></div>
@@ -1470,6 +1604,22 @@ async function showDetail(id) {
     $("sendTemplate").addEventListener("change", () => {
       const tmpl = lastTemplates.find(x => String(x.id) === $("sendTemplate").value);
       if (tmpl) { $("sendSubject").value = tmpl.subject; $("sendBody").value = tmpl.body; }
+    });
+
+    $("btnPreviewMessage").addEventListener("click", async () => {
+      const subject = $("sendSubject").value.trim();
+      const body = $("sendBody").value.trim();
+      if (!subject && !body) { alert("件名または本文を入力してください"); return; }
+      try {
+        const r = await call(`/api/tenant/lists/${id}/preview-message`,
+          { method: "POST", body: JSON.stringify({ subject, body }) });
+        $("previewModalSample").textContent = `サンプル送信先: ${r.sample_company}`;
+        $("previewModalSubject").textContent = r.subject || "(件名なし)";
+        $("previewModalBody").textContent = r.body || "(本文なし)";
+        $("previewModal").classList.add("open");
+      } catch (e) {
+        alert("プレビューに失敗しました: " + e.message);
+      }
     });
 
     const dryRunBox = $("sendDryRun"), dryRunLabel = $("sendDryRunLabel");
@@ -1507,14 +1657,46 @@ async function showDetail(id) {
       if (!scheduling && !dryRun
           && !confirm("本番送信します。実際の企業サイトへ送信され、取り消せません。よろしいですか?")) return;
 
-      rEl.innerHTML = `<div class="result">${scheduling ? "予約中…" : "送信中…"}</div>`;
-      try {
-        const payload = { subject, body, dry_run: dryRun };
-        if (scheduledAt) payload.scheduled_at = scheduledAt;
-        const sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
-        if (sr.scheduled) {
+      if (scheduling) {
+        rEl.innerHTML = `<div class="result">予約中…</div>`;
+        try {
+          const payload = { subject, body, dry_run: dryRun, scheduled_at: scheduledAt };
+          const sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
           rEl.innerHTML = `<div class="result ok">予約しました(${sr.scheduled_at}に開始)</div>`;
           await refreshScheduledSends(id);
+        } catch (e) {
+          rEl.innerHTML = `<div class="result err">${e.message}</div>`;
+        }
+        return;
+      }
+
+      // MIKOMERU同様、送信中は専用の進捗表示に切り替える(自動送信は同期処理のため
+      // 実際のパーセンテージは分からず、送信完了までは不定進捗のアニメーションを見せる。
+      // 完了したら100%表示にして「完了」ボタンで結果を確認してもらう)。
+      $("btnSend").disabled = true;
+      rEl.innerHTML = "";
+      $("sendProgressWrap").style.display = "block";
+      $("sendProgressBadge").textContent = "処理中";
+      $("sendProgressDoneRow").style.display = "none";
+      const bar = $("sendProgressBar");
+      bar.classList.remove("done"); bar.classList.add("indeterminate");
+
+      let sr = null, err = null;
+      try {
+        const payload = { subject, body, dry_run: dryRun };
+        sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
+      } catch (e) {
+        err = e;
+      }
+      bar.classList.remove("indeterminate"); bar.classList.add("done");
+      $("sendProgressBadge").textContent = "✓ 完了";
+      $("sendProgressDoneRow").style.display = "block";
+      $("btnSend").disabled = false;
+
+      $("btnSendProgressDone").onclick = async () => {
+        $("sendProgressWrap").style.display = "none";
+        if (err) {
+          rEl.innerHTML = `<div class="result err">${err.message}</div>`;
           return;
         }
         rEl.innerHTML = `<div class="result ok">${dryRun ? "[ドライラン] " : ""}` +
@@ -1523,9 +1705,8 @@ async function showDetail(id) {
           `${sr.stats.stopped ? ` Kill Switchで中止${sr.stats.stopped}` : ""}</div>`;
         const checkedFilter = document.querySelector('input[name="memberFilter"]:checked');
         await renderMemberTable(id, checkedFilter ? checkedFilter.value : "");
-      } catch (e) {
-        rEl.innerHTML = `<div class="result err">${e.message}</div>`;
-      }
+        document.getElementById("memberTableWrap").scrollIntoView({ behavior: "smooth", block: "start" });
+      };
     });
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;

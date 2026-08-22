@@ -139,8 +139,11 @@ SALES_ENGINE_API_KEY = os.environ.get("SALES_ENGINE_API_KEY")
 
 _SEND_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/send$")
 _OUTCOME_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/outcome$")
+_PREVIEW_MSG_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/preview-message$")
 _SCREENSHOT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/screenshot$")
 _AUTOFILL_QUEUE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/autofill-queue$")
+_SEND_LOG_NOTE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/note$")
+_SEND_LOG_MANUAL_SENT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/manual-sent$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
@@ -403,7 +406,8 @@ def h_tenant_send_log(con, tenant_id, qs):
         base_params.append(f"%{name_q}%")
 
     q = f"""SELECT l.id, l.company_id, c.name company_name, l.status, l.reason_code,
-            l.started_at, l.finished_at, l.retry_count, l.execution_seconds,
+            l.contact_url, l.target_url, l.started_at, l.finished_at, l.retry_count,
+            l.execution_seconds, l.note, l.manual_sent_at,
             (l.screenshot_before_path IS NOT NULL) has_screenshot_before,
             (l.screenshot_after_path IS NOT NULL) has_screenshot_after
         FROM form_send_log l LEFT JOIN companies c ON c.id = l.company_id
@@ -446,8 +450,9 @@ def h_tenant_send_log_autofill_queue(con, tenant_id, log_id):
     list_id経由でtarget_lists.campaign_idからtouchesを逆引きして復元する。
     保存済みリスト経由でない送信(list_id無し)は元の文章を復元できないため、
     その旨のエラーだけ返す(手動入力を促す)。"""
-    row = con.execute("""SELECT company_id, list_id, contact_url, target_url
-        FROM form_send_log WHERE id=? AND tenant_id=?""", (log_id, tenant_id)).fetchone()
+    row = con.execute("""SELECT l.company_id, l.list_id, l.contact_url, l.target_url, c.name company_name
+        FROM form_send_log l LEFT JOIN companies c ON c.id = l.company_id
+        WHERE l.id=? AND l.tenant_id=?""", (log_id, tenant_id)).fetchone()
     if not row:
         return 404, {"error": "対象の送信ログが見つかりません"}
     url = row["contact_url"] or row["target_url"]
@@ -470,7 +475,8 @@ def h_tenant_send_log_autofill_queue(con, tenant_id, log_id):
 
     tn = con.execute("""SELECT sender_name, sender_email, sender_address, optout_url,
         sender_last_name, sender_first_name, sender_last_name_kana, sender_first_name_kana,
-        sender_postal_code FROM tenants WHERE id=?""", (tenant_id,)).fetchone()
+        sender_postal_code, sender_prefecture, sender_city, sender_block, sender_building,
+        sender_phone FROM tenants WHERE id=?""", (tenant_id,)).fetchone()
     sender_name = (tn["sender_name"] if tn else None) or "AshiBase（足場ベース）"
     sender_email = (tn["sender_email"] if tn else None) or "info@ashibase.jp"
     sender_address = (tn["sender_address"] if tn else None) or ""
@@ -478,17 +484,32 @@ def h_tenant_send_log_autofill_queue(con, tenant_id, log_id):
     sender_last_name = (tn["sender_last_name"] if tn else None) or sender_name
     sender_first_name = (tn["sender_first_name"] if tn else None) or ""
     sender_postal_code = (tn["sender_postal_code"] if tn else None) or ""
+    sender_phone = (tn["sender_phone"] if tn else None) or ""
+    structured_address = "".join(filter(None, [
+        tn["sender_prefecture"] if tn else None, tn["sender_city"] if tn else None,
+        tn["sender_block"] if tn else None, tn["sender_building"] if tn else None]))
     # senders.FormSender._deliver()と同じ方針(未設定の場合、姓欄には会社名を入れておくが
     # 名欄・フリガナ欄は空のままにする。以前は名欄にも会社名を複製しフリガナは固定文字列
     # "アシベース"を入れていたが、カスタムの送信者名を設定したテナントでは不自然になるため)
     furigana = f"{(tn['sender_last_name_kana'] if tn else None) or ''}" \
                f"{(tn['sender_first_name_kana'] if tn else None) or ''}"
+    # senders.render_merge_tags()と同じマージタグ(##TO_COMPANY_NAME##/##FROM_FAMILY_NAME##)
+    company_name = row["company_name"] or ""
+    subject = (subject or "").replace("##TO_COMPANY_NAME##", company_name) \
+                              .replace("##FROM_FAMILY_NAME##", sender_last_name)
+    body = body.replace("##TO_COMPANY_NAME##", company_name) \
+               .replace("##FROM_FAMILY_NAME##", sender_last_name)
     # senders.FormSender.footer()と同じ形式(実際に送るときに付与される署名)
     full_message = f"{body}\n\n{sender_name} / {sender_email}\n今後のご連絡が不要な場合: {optout_url}"
     values = {"company": sender_name, "name": sender_name, "email": sender_email,
-              "phone": "", "address": sender_address, "postal_code": sender_postal_code,
+              "phone": sender_phone, "address": structured_address or sender_address,
+              "postal_code": sender_postal_code,
+              "prefecture": (tn["sender_prefecture"] if tn else None) or "",
+              "city": (tn["sender_city"] if tn else None) or "",
+              "block": (tn["sender_block"] if tn else None) or "",
+              "building": (tn["sender_building"] if tn else None) or "",
               "last_name": sender_last_name, "first_name": sender_first_name,
-              "subject": subject or "", "message": full_message, "furigana": furigana}
+              "subject": subject, "message": full_message, "furigana": furigana}
 
     con.execute("""INSERT INTO autofill_queue (tenant_id, url, values_json, created_at)
         VALUES (?,?,?,?)
@@ -514,6 +535,54 @@ def h_tenant_autofill_pending(con, tenant_id):
         return 404, {"error": "自動入力の準備が古すぎます(10分以内に使ってください)。"
                                "もう一度「自動入力」ボタンを押してください"}
     return 200, {"url": row["url"], "values": json.loads(row["values_json"])}
+
+
+def h_tenant_send_log_note(con, tenant_id, log_id, data):
+    """MIKOMERUの送信ログ「備考」欄相当。営業メモ(架電済み、等)を自由記述で残せる。"""
+    note = (data.get("note") or "").strip()
+    if not db.update_form_send_log_note(con, tenant_id, log_id, note or None):
+        return 404, {"error": "対象の送信ログが見つかりません"}
+    return 200, {"ok": True}
+
+
+def h_tenant_send_log_manual_sent(con, tenant_id, log_id, data):
+    """MIKOMERUの「手動送信済み」チェック相当。自動入力アシスト後、人が実際に
+    フォームを送信し終えたことを記録する(取り消しも可能)。"""
+    manual_sent = bool(data.get("manual_sent"))
+    if not db.set_form_send_log_manual_sent(con, tenant_id, log_id, manual_sent):
+        return 404, {"error": "対象の送信ログが見つかりません"}
+    return 200, {"ok": True}
+
+
+def h_tenant_send_log_csv(con, tenant_id, qs):
+    """自動送信ログのCSVダウンロード(MIKOMERU同等)。表示中の絞り込み(?q=/?status=)
+    をそのまま反映する。件数上限は付けない(ダウンロード目的のため一覧表示より緩くする)。"""
+    name_q = (qs.get("q", [""])[0] or "").strip()
+    statuses = [s for s in (qs.get("status", [""])[0] or "").split(",") if s]
+    where = "l.tenant_id=?"
+    params = [tenant_id]
+    if name_q:
+        where += " AND c.name LIKE ?"
+        params.append(f"%{name_q}%")
+    if statuses:
+        where += f" AND l.status IN ({','.join('?' * len(statuses))})"
+        params += statuses
+    rows = con.execute(f"""SELECT l.id, c.name company_name, l.contact_url, l.status,
+            l.reason_code, l.note, l.manual_sent_at, l.started_at, l.finished_at
+        FROM form_send_log l LEFT JOIN companies c ON c.id = l.company_id
+        WHERE {where} ORDER BY l.id DESC""", params).fetchall()
+
+    import csv, io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["ID", "会社名", "お問い合わせURL", "結果", "詳細", "備考",
+                "手動送信済み", "登録日時", "実行日時"])
+    for r in rows:
+        w.writerow([r["id"], r["company_name"] or "", r["contact_url"] or "", r["status"],
+                    r["reason_code"] or "", r["note"] or "",
+                    "済" if r["manual_sent_at"] else "", r["started_at"] or "",
+                    r["finished_at"] or ""])
+    return 200, {"csv": buf.getvalue()}
 
 
 def h_tenant_companies_search(con, tenant_id, qs):
@@ -593,7 +662,10 @@ def h_tenant_sender_templates_add(con, tenant_id, data):
                                   last_name=opt("last_name"), first_name=opt("first_name"),
                                   last_name_kana=opt("last_name_kana"),
                                   first_name_kana=opt("first_name_kana"),
-                                  postal_code=opt("postal_code"))
+                                  postal_code=opt("postal_code"),
+                                  prefecture=opt("prefecture"), city=opt("city"),
+                                  block=opt("block"), building=opt("building"),
+                                  phone=opt("phone"))
     return 200, {"ok": True, "template_id": tid}
 
 
@@ -726,6 +798,38 @@ def h_tenant_list_send(con, tenant_id, list_id, data):
     return 200, res
 
 
+def h_tenant_list_preview_message(con, tenant_id, list_id, data):
+    """MIKOMERUの「プレビュー」相当。実際に送るのと同じマージタグ置換
+    (senders.render_merge_tags())を使い、リスト内の企業1社をサンプルに
+    件名・本文がどう置き換わるかを事前確認できる(送信は行わない)。"""
+    subject = (data.get("subject") or "").strip()
+    body = (data.get("body") or "").strip()
+    if not subject and not body:
+        return 400, {"error": "件名または本文を入力してください"}
+    lst = con.execute("SELECT id FROM target_lists WHERE id=? AND tenant_id=?",
+                       (list_id, tenant_id)).fetchone()
+    if not lst:
+        return 404, {"error": "リストが見つかりません"}
+    sample = con.execute("""SELECT c.name FROM target_list_members m
+        JOIN companies c ON c.id = m.company_id
+        WHERE m.list_id=? ORDER BY (c.contact_url IS NULL), m.company_id LIMIT 1""",
+        (list_id,)).fetchone()
+    sample_name = sample["name"] if sample else "(サンプル企業名)"
+
+    tn = con.execute("""SELECT sender_name, sender_last_name FROM tenants WHERE id=?""",
+                      (tenant_id,)).fetchone()
+    sender_name = (tn["sender_name"] if tn else None) or "AshiBase（足場ベース）"
+    sender_last_name = (tn["sender_last_name"] if tn else None) or sender_name
+
+    import senders as S
+    to = S.Recipient(company_id=0, name=sample_name)
+    sender = S.Sender(name=sender_name, email="", address="", optout_url="",
+                       last_name=sender_last_name)
+    return 200, {"sample_company": sample_name,
+                 "subject": S.render_merge_tags(subject, to, sender),
+                 "body": S.render_merge_tags(body, to, sender)}
+
+
 def h_tenant_scheduled_sends_list(con, tenant_id, qs):
     list_id = qs.get("list_id", [None])[0]
     return 200, {"scheduled": db.list_scheduled_sends(
@@ -843,8 +947,12 @@ class Handler(BaseHTTPRequestHandler):
         send_match = _SEND_PATH_RE.match(path)
         outcome_match = _OUTCOME_PATH_RE.match(path)
         autofill_match = _AUTOFILL_QUEUE_PATH_RE.match(path)
+        note_match = _SEND_LOG_NOTE_PATH_RE.match(path)
+        manual_sent_match = _SEND_LOG_MANUAL_SENT_PATH_RE.match(path)
+        preview_msg_match = _PREVIEW_MSG_PATH_RE.match(path)
         if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv") \
-                or send_match or outcome_match or autofill_match:
+                or send_match or outcome_match or autofill_match or note_match \
+                or manual_sent_match or preview_msg_match:
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -861,6 +969,15 @@ class Handler(BaseHTTPRequestHandler):
                 elif outcome_match:
                     st, res = h_tenant_list_member_outcome(con, tenant["id"],
                                                             int(outcome_match.group(1)), data)
+                elif note_match:
+                    st, res = h_tenant_send_log_note(con, tenant["id"],
+                                                      int(note_match.group(1)), data)
+                elif manual_sent_match:
+                    st, res = h_tenant_send_log_manual_sent(con, tenant["id"],
+                                                             int(manual_sent_match.group(1)), data)
+                elif preview_msg_match:
+                    st, res = h_tenant_list_preview_message(con, tenant["id"],
+                                                             int(preview_msg_match.group(1)), data)
                 else:
                     st, res = h_tenant_send_log_autofill_queue(con, tenant["id"],
                                                                 int(autofill_match.group(1)))
@@ -1021,6 +1138,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if (u.path == "/api/tenant/lists" or u.path.startswith("/api/tenant/lists/")
                 or u.path == "/api/tenant/send-log"
+                or u.path == "/api/tenant/send-log/csv"
                 or u.path == "/api/tenant/autofill/pending"
                 or u.path == "/api/tenant/scheduled-sends"
                 or u.path == "/api/tenant/exclusions"
@@ -1039,6 +1157,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(401, {"error": "unauthorized"})
                 if u.path == "/api/tenant/send-log":
                     st, res = h_tenant_send_log(con, tenant["id"], qs)
+                elif u.path == "/api/tenant/send-log/csv":
+                    st, res = h_tenant_send_log_csv(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/autofill/pending":
                     st, res = h_tenant_autofill_pending(con, tenant["id"])
                 elif u.path == "/api/tenant/scheduled-sends":
@@ -1285,6 +1405,21 @@ def self_test(port=8899):
                       token=key_a)
     t("POST /api/tenant/lists: フィルタ型リスト作成", st == 200 and bool(r.get("list_id")))
     list_a_id = r.get("list_id")
+
+    print("\n── 送信文章プレビュー(MIKOMERU同等。マージタグ置換の事前確認) ──")
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/preview-message",
+                      {"subject": "##TO_COMPANY_NAME##様へ", "body": "いつも##FROM_FAMILY_NAME##が"},
+                      token=key_b)
+    t("他テナントのリストではプレビューできない(404)", st == 404)
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/preview-message",
+                      {"subject": "##TO_COMPANY_NAME##様へ", "body": "いつも##FROM_FAMILY_NAME##が"},
+                      token=key_a)
+    t("POST .../preview-message でマージタグが置換される",
+      st == 200 and r.get("sample_company") and r["sample_company"] in r.get("subject", "")
+      and "##TO_COMPANY_NAME##" not in r.get("subject", ""))
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/preview-message", {"subject": "", "body": ""},
+                      token=key_a)
+    t("件名・本文がどちらも空だと400", st == 400)
 
     csv_text = "会社名,都道府県\nテナントB専用企業,福岡県\n"
     st, r = post_auth("/api/tenant/lists/csv", {"name": "B持込リスト", "csv": csv_text}, token=key_b)
@@ -1575,6 +1710,42 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/send-log", token=key_b)
     t("他テナントのログは見えない", st == 200 and len(r.get("log", [])) == 0)
 
+    print("\n── 送信ログの備考・手動送信済み(MIKOMERU同等) ──")
+    st, r = post_auth(f"/api/tenant/send-log/{log_id}/note", {"note": "架電済み"}, token=key_b)
+    t("他テナントの送信ログの備考は更新できない(404)", st == 404)
+    st, r = post_auth(f"/api/tenant/send-log/{log_id}/note", {"note": "架電済み"}, token=key_a)
+    t("POST .../note で備考を更新できる", st == 200 and r.get("ok"))
+    st, r = get_auth("/api/tenant/send-log", token=key_a)
+    t("更新した備考がGETに反映される",
+      st == 200 and next(x for x in r["log"] if x["id"] == log_id)["note"] == "架電済み")
+    st, r = post_auth(f"/api/tenant/send-log/{log_id}/note", {"note": ""}, token=key_a)
+    t("空文字で備考をクリアできる", st == 200 and r.get("ok"))
+    st, r = get_auth("/api/tenant/send-log", token=key_a)
+    t("クリア後はnoteがNoneになる",
+      st == 200 and next(x for x in r["log"] if x["id"] == log_id)["note"] is None)
+
+    st, r = post_auth(f"/api/tenant/send-log/{log_id}/manual-sent", {"manual_sent": True},
+                      token=key_b)
+    t("他テナントの送信ログは手動送信済みにできない(404)", st == 404)
+    st, r = post_auth(f"/api/tenant/send-log/{log_id}/manual-sent", {"manual_sent": True},
+                      token=key_a)
+    t("POST .../manual-sent で手動送信済みにできる", st == 200 and r.get("ok"))
+    st, r = get_auth("/api/tenant/send-log", token=key_a)
+    t("手動送信済みがGETに反映される(manual_sent_atが立つ)",
+      st == 200 and next(x for x in r["log"] if x["id"] == log_id)["manual_sent_at"] is not None)
+    st, r = post_auth(f"/api/tenant/send-log/{log_id}/manual-sent", {"manual_sent": False},
+                      token=key_a)
+    t("manual_sent=falseで取り消せる", st == 200 and r.get("ok"))
+    st, r = get_auth("/api/tenant/send-log", token=key_a)
+    t("取り消し後はmanual_sent_atがNoneに戻る",
+      st == 200 and next(x for x in r["log"] if x["id"] == log_id)["manual_sent_at"] is None)
+
+    st, r = get_auth("/api/tenant/send-log/csv")
+    t("認証ヘッダなしのGET /api/tenant/send-log/csvは401", st == 401)
+    st, r = get_auth("/api/tenant/send-log/csv", token=key_a)
+    t("GET /api/tenant/send-log/csv でCSVが取れる",
+      st == 200 and "csv" in r and "ID,会社名" in r["csv"] and str(log_id) in r["csv"])
+
     print("\n── 自動送信ログの検索・結果フィルタ・集計 ──")
     other_cid = con.execute("SELECT id FROM companies WHERE id != 1 LIMIT 1").fetchone()[0]
     con.execute("""INSERT INTO form_send_log (company_id, tenant_id, target_url, started_at,
@@ -1785,6 +1956,32 @@ def self_test(port=8899):
     t("GET /api/tenant/sender-templates に保存内容が出る",
       st == 200 and any(x["id"] == stmpl_id and x["sender_email"] == "sales@test-a.example.co.jp"
                          for x in r.get("templates", [])))
+
+    st, r = post_auth("/api/tenant/sender-templates",
+                      {"name": "支社", "sender_name": "テスト株式会社 支社",
+                       "sender_email": "branch@test-a.example.co.jp",
+                       "prefecture": "大阪府", "city": "大阪市中央区",
+                       "block": "1-2-3", "building": "支社ビル4F", "phone": "06-1234-5678"},
+                      token=key_a)
+    t("POST /api/tenant/sender-templates で都道府県/市区町村/丁目番地/ビル名/電話番号も保存",
+      st == 200 and bool(r.get("template_id")))
+    stmpl_id2 = r.get("template_id")
+    st, r = get_auth("/api/tenant/sender-templates", token=key_a)
+    tmpl2 = next((x for x in r.get("templates", []) if x["id"] == stmpl_id2), None)
+    t("GET /api/tenant/sender-templates に住所構造化項目が出る",
+      tmpl2 is not None and tmpl2["sender_prefecture"] == "大阪府"
+      and tmpl2["sender_city"] == "大阪市中央区" and tmpl2["sender_block"] == "1-2-3"
+      and tmpl2["sender_building"] == "支社ビル4F" and tmpl2["sender_phone"] == "06-1234-5678")
+    st, r = post_auth("/api/tenant/sender-templates/activate", {"template_id": stmpl_id2}, token=key_a)
+    t("支社テンプレートも有効化できる", st == 200 and r.get("ok"))
+    tenant_row2 = con.execute("SELECT sender_prefecture, sender_city, sender_block, "
+                               "sender_building, sender_phone FROM tenants WHERE id=?",
+                               (tid_a,)).fetchone()
+    t("有効化すると住所構造化項目・電話番号もtenants.sender_*へ反映される",
+      tenant_row2["sender_prefecture"] == "大阪府" and tenant_row2["sender_city"] == "大阪市中央区"
+      and tenant_row2["sender_phone"] == "06-1234-5678")
+    st, r = post_auth("/api/tenant/sender-templates/delete", {"template_id": stmpl_id2}, token=key_a)
+    t("支社テンプレートの削除", st == 200 and r.get("ok"))
     st, r = get_auth("/api/tenant/sender-templates", token=key_b)
     t("他テナントの送信元テンプレートは見えない(テナント分離)",
       st == 200 and all(x["id"] != stmpl_id for x in r.get("templates", [])))

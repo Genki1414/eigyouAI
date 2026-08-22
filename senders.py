@@ -53,9 +53,10 @@ class Recipient:
 @dataclass
 class Sender:
     """テナントの送信者情報。特定電子メール法の表示義務を満たすために必須。
-    last_name〜postal_codeは任意(姓・名・フリガナ・郵便番号が別欄の問い合わせ
-    フォーム向け。MIKOMERU同等)。未設定ならFormSender側で妥当な既定値へ
-    フォールバックする(姓欄には会社名、名欄・フリガナ欄は空、というように)。"""
+    last_name〜phoneは任意(姓・名・フリガナ・郵便番号・住所(都道府県/市区町村/
+    丁目番地/建物名)・電話番号が別欄の問い合わせフォーム向け。MIKOMERU同等)。
+    未設定ならFormSender側で妥当な既定値へフォールバックする(姓欄には会社名、
+    名欄・フリガナ欄は空、住所系はaddressへ丸ごとフォールバック、というように)。"""
     name: str
     email: str
     address: str
@@ -65,6 +66,11 @@ class Sender:
     last_name_kana: str = ""
     first_name_kana: str = ""
     postal_code: str = ""
+    prefecture: str = ""
+    city: str = ""
+    block: str = ""
+    building: str = ""
+    phone: str = ""
 
 
 # ── 基底クラス ──────────────────────────────
@@ -377,8 +383,17 @@ class FormSender(BaseSender):
         # 入れていたが、カスタムの送信者名を設定したテナントでは明らかに不自然な
         # 内容になってしまうため、確実な値が無い項目は空欄のままにする方針にした)
         furigana = f"{sender.last_name_kana}{sender.first_name_kana}".strip()
+        # 住所は都道府県/市区町村/丁目番地/建物名が個別設定されていればそれを使い、
+        # 単一の住所欄しかないフォーム向けにはそれらを連結した文字列をaddressへも入れる
+        # (未設定ならsender.address(従来の単一自由記述欄)にフォールバックする)。
+        structured_address = "".join(filter(None, [
+            sender.prefecture, sender.city, sender.block, sender.building]))
         values = {"company": sender.name, "name": sender.name, "email": sender.email,
-                  "phone": "", "address": sender.address or "", "postal_code": sender.postal_code or "",
+                  "phone": sender.phone or "",
+                  "address": structured_address or (sender.address or ""),
+                  "postal_code": sender.postal_code or "",
+                  "prefecture": sender.prefecture or "", "city": sender.city or "",
+                  "block": sender.block or "", "building": sender.building or "",
                   "last_name": sender.last_name or sender.name, "first_name": sender.first_name or "",
                   "subject": subject or "", "message": body, "furigana": furigana}
         result = FN.navigate_and_submit(to.contact_url, values,
@@ -414,6 +429,19 @@ def get_sender(channel, con, dry_run=True, tenant_id=None, offer_id=None, list_i
     return cls(con, dry_run=dry_run)
 
 
+MERGE_TAG_HELP = "##TO_COMPANY_NAME##(送信先の会社名) / ##FROM_FAMILY_NAME##(送信元の姓)"
+
+
+def render_merge_tags(text, to, sender):
+    """MIKOMERU同等のマージタグを置換する(送信文章に埋め込むと会社ごとに自動で
+    差し込まれる)。未対応のタグはそのまま残す(誤字で本文が壊れて見えるほうが、
+    黙って消えるより気づきやすい)。"""
+    if not text:
+        return text
+    return (text.replace("##TO_COMPANY_NAME##", to.name or "")
+                .replace("##FROM_FAMILY_NAME##", sender.last_name or sender.name or ""))
+
+
 # ── 一括送信 ────────────────────────────────
 def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
     """キャンペーンの未送信分を実際に送る。
@@ -425,7 +453,8 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
                   o.id offer_id, tn.id tenant_id, tl.id list_id,
                   tn.sender_name sname, tn.sender_email, tn.sender_address, tn.optout_url,
                   tn.sender_last_name, tn.sender_first_name, tn.sender_last_name_kana,
-                  tn.sender_first_name_kana, tn.sender_postal_code
+                  tn.sender_first_name_kana, tn.sender_postal_code, tn.sender_prefecture,
+                  tn.sender_city, tn.sender_block, tn.sender_building, tn.sender_phone
            FROM touches t
            JOIN companies c ON c.id = t.company_id
            LEFT JOIN campaigns cp ON cp.id = t.campaign_id
@@ -476,7 +505,10 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
             last_name=r["sender_last_name"] or "", first_name=r["sender_first_name"] or "",
             last_name_kana=r["sender_last_name_kana"] or "",
             first_name_kana=r["sender_first_name_kana"] or "",
-            postal_code=r["sender_postal_code"] or "")
+            postal_code=r["sender_postal_code"] or "",
+            prefecture=r["sender_prefecture"] or "", city=r["sender_city"] or "",
+            block=r["sender_block"] or "", building=r["sender_building"] or "",
+            phone=r["sender_phone"] or "")
         to = Recipient(company_id=r["company_id"], name=r["name"], email=r["email"],
                        fax=r["fax"], phone=r["phone"], address=r["address"],
                        contact_url=r["contact_url"])
@@ -488,7 +520,9 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
         # として何もせず素通りしてしまう(実サイトに一度も送らないまま「完了」扱いになる)。
         key = R.Idempotency.key("send" if not dry_run else "send:dryrun",
                                  campaign_id, r["company_id"], step)
-        res = adapter.send(to, sender, r["subject"], r["body"], key)
+        subject = render_merge_tags(r["subject"], to, sender)
+        body = render_merge_tags(r["body"], to, sender)
+        res = adapter.send(to, sender, subject, body, key)
 
         if res.ok:
             con.execute("""UPDATE touches SET sent_at=?, delivered=1, note=?, unit_cost_yen=?
@@ -689,14 +723,14 @@ if __name__ == "__main__":
             VALUES (999997, 'テスト_送信元情報確認', 'https://example.co.jp/contact/')""")
         con.commit()
 
-        def _capture_values(tenant_id, offer_name):
+        def _capture_values(tenant_id, offer_name, subject="件名", body="本文"):
             offer_id = con.execute("SELECT id FROM offers WHERE tenant_id=?", (tenant_id,)).fetchone()[0]
             cur = con.execute("""INSERT INTO campaigns (name, started_at, target_rule, offer_id)
                 VALUES (?,?,?,?)""",
                 (offer_name, datetime.now().isoformat(timespec="seconds"), "ALL", offer_id))
             cid = cur.lastrowid
             con.execute("""INSERT INTO touches (campaign_id, company_id, channel, variant, step,
-                subject, body) VALUES (?,999997,'フォーム','A',1,'件名','本文')""", (cid,))
+                subject, body) VALUES (?,999997,'フォーム','A',1,?,?)""", (cid, subject, body))
             con.commit()
             captured = {}
             import form_navigator as FN
@@ -750,6 +784,48 @@ if __name__ == "__main__":
                 for row in con.execute("SELECT id FROM tenants WHERE name=?", (tname,)).fetchall():
                     con.execute("DELETE FROM offers WHERE tenant_id=?", (row["id"],))
                     con.execute("DELETE FROM tenants WHERE id=?", (row["id"],))
+            con.commit()
+
+        print("\n── マージタグ(##TO_COMPANY_NAME##/##FROM_FAMILY_NAME##)・住所の構造化 ──")
+        con.execute("""DELETE FROM companies WHERE id=999997""")
+        con.execute("""INSERT INTO companies (id, name, contact_url)
+            VALUES (999997, 'マージタグ確認先株式会社', 'https://example.co.jp/contact/')""")
+        con.commit()
+        orig_ks3, orig_ks3_reason = db.kill_switch_status(con)
+        db.set_global_kill_switch(con, False, updated_by="test")
+        try:
+            tid_mt, _ = OF.add_tenant(con, "test-merge-tags", "mt@example.co.jp",
+                                       sender_name="マージタグ送信元")
+            con.execute("""UPDATE tenants SET sender_last_name=?, sender_prefecture=?,
+                sender_city=?, sender_block=?, sender_building=?, sender_phone=?
+                WHERE id=?""", ("山田", "東京都", "千代田区丸の内", "1-1-1", "3F", "03-1234-5678",
+                                 tid_mt))
+            con.commit()
+            v_mt = _capture_values(tid_mt, "test-merge-tags-campaign",
+                                    subject="##TO_COMPANY_NAME##様へのご案内",
+                                    body="##TO_COMPANY_NAME##様\n\nいつも##FROM_FAMILY_NAME##がお世話になっております。")
+            ok_subject = v_mt.get("subject") == "マージタグ確認先株式会社様へのご案内"
+            ok_body = "マージタグ確認先株式会社様" in (v_mt.get("message") or "") \
+                and "いつも山田がお世話になっております" in (v_mt.get("message") or "")
+            print(f"  件名: {v_mt.get('subject')!r}")
+            print(f"  {'✓' if ok_subject else '✗'} ##TO_COMPANY_NAME##が件名で送信先の会社名に置換される")
+            print(f"  {'✓' if ok_body else '✗'} ##TO_COMPANY_NAME##/##FROM_FAMILY_NAME##が本文で置換される")
+            ok_addr = (v_mt.get("prefecture") == "東京都" and v_mt.get("city") == "千代田区丸の内"
+                       and v_mt.get("block") == "1-1-1" and v_mt.get("building") == "3F"
+                       and v_mt.get("phone") == "03-1234-5678"
+                       and v_mt.get("address") == "東京都千代田区丸の内1-1-13F")
+            print(f"  住所: prefecture={v_mt.get('prefecture')!r} city={v_mt.get('city')!r} "
+                  f"block={v_mt.get('block')!r} building={v_mt.get('building')!r} "
+                  f"address(連結)={v_mt.get('address')!r} phone={v_mt.get('phone')!r}")
+            print(f"  {'✓' if ok_addr else '✗'} 構造化住所の各項目が個別に入り、単一住所欄向けの"
+                  "連結文字列とphoneも入る")
+        finally:
+            db.set_global_kill_switch(con, orig_ks3, reason=orig_ks3_reason, updated_by="test-restore")
+            con.execute("DELETE FROM companies WHERE id=999997")
+            con.execute("DELETE FROM form_send_log WHERE company_id=999997")
+            for row in con.execute("SELECT id FROM tenants WHERE name='test-merge-tags'").fetchall():
+                con.execute("DELETE FROM offers WHERE tenant_id=?", (row["id"],))
+                con.execute("DELETE FROM tenants WHERE id=?", (row["id"],))
             con.commit()
 
         print("\n── フォーム送信ペーシング上限 ──")

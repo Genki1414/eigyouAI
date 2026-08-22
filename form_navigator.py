@@ -52,6 +52,10 @@ _FIELD_HINTS = {
     "email_confirm": ["メール確認", "メールアドレス（確認", "確認用メール", "email confirm", "re-enter"],
     "phone": ["電話番号", "電話", "tel", "phone", "fax番号"],
     "postal_code": ["郵便番号", "〒", "zip", "postal"],
+    "prefecture": ["都道府県", "都道府県名", "prefecture", "pref"],
+    "city": ["市区町村", "市町村", "city"],
+    "block": ["丁目番地", "丁目・番地", "町名・番地", "丁目", "番地"],
+    "building": ["ビル名", "建物名", "マンション名", "部屋番号", "building"],
     "address": ["住所", "所在地", "address"],
     "message": ["お問い合わせ内容", "ご質問内容", "ご相談内容", "ご要望", "メッセージ", "本文",
                 "お問い合わせ詳細", "詳細", "message", "inquiry", "comment"],
@@ -185,6 +189,16 @@ def _classify_field(page, el):
         return "phone"
     if any(h in text for h in _FIELD_HINTS["postal_code"]):
         return "postal_code"
+    # 都道府県/市区町村/丁目番地/建物名は「住所」より先に判定する(値がある場合のみ
+    # senders.py側で個別入力される。無い場合は"address"の連結済み文字列にフォールバック)
+    if any(h in text for h in _FIELD_HINTS["prefecture"]):
+        return "prefecture"
+    if any(h in text for h in _FIELD_HINTS["city"]):
+        return "city"
+    if any(h in text for h in _FIELD_HINTS["block"]):
+        return "block"
+    if any(h in text for h in _FIELD_HINTS["building"]):
+        return "building"
     if any(h in text for h in _FIELD_HINTS["address"]):
         return "address"
     if tag == "textarea" or any(h in text for h in _FIELD_HINTS["message"]):
@@ -694,6 +708,14 @@ if __name__ == "__main__":
                   <input name="mail_confirm" placeholder="メールアドレス（確認用）">
                   <textarea aria-label="ご質問内容"></textarea>
                 </form>""", {"last_name", "first_name", "email_confirm", "message"}),
+            ("住所分割(MIKOMERU同様の都道府県/市区町村/丁目番地/ビル名)", """
+                <form>
+                  <label for="zip">郵便番号</label><input id="zip" name="zip">
+                  <label for="pref">都道府県</label><input id="pref" name="pref">
+                  <label for="city">市区町村</label><input id="city" name="city">
+                  <label for="block">丁目番地</label><input id="block" name="block">
+                  <label for="bldg">ビル名・部屋番号</label><input id="bldg" name="bldg">
+                </form>""", {"postal_code", "prefecture", "city", "block", "building"}),
         ]
         try:
             pw_ctx = sync_playwright().start()

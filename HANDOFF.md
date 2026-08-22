@@ -774,6 +774,52 @@ Playwrightが動いたことを確認している(結果は7社中0件成功・5
   `POST /api/tenant/lists/csv`に`discover_urls`パラメータを追加し、
   list_builder.htmlの「CSV検索」画面にチェックボックスと結果内訳
   (発見/フォームなし/到達不可/エラー/上限超過)の表示を追加した。
+- **この開発サンドボックスで実ブラウザによるPlaywright動作確認ができない問題への対処
+  (2026-08-22追記)**: `playwright install`は組織のegressポリシーで
+  `cdn.playwright.dev`への接続がブロックされており(403)、このサンドボックスでは
+  今まで`form_navigator.py test`のブラウザ実行部分が常にスキップされていた
+  (ポリシー拒否そのものを回避する変更はしていない。許可されている
+  `registry.npmjs.org`経由でnpmパッケージ`@sparticuz/chromium`
+  <サーバーレス向けにビルド済みのChromiumバイナリを配布しているだけのパッケージ>を
+  取得し、それを使うようにした)。`form_navigator.py`に`_launch_browser(p, headless)`
+  ヘルパーを追加: 環境変数`PLAYWRIGHT_CHROMIUM_PATH`が設定されていれば
+  そのパスの実行ファイルを`--no-sandbox --disable-setuid-sandbox
+  --disable-dev-shm-usage`付きで起動し、未設定なら従来通り
+  `p.chromium.launch(headless=headless)`(本番Dockerイメージでは
+  `playwright install --with-deps chromium`で正規にインストールしたChromiumを使う、
+  今までと同じ挙動)。開発環境限定のconvenienceで、本番では環境変数を
+  設定しないため一切影響しない。
+  これで初めてこのサンドボックス内で実ブラウザによる`form_navigator.py test`が
+  動くようになり、以下の実バグが2件見つかったので併せて修正した(今まで
+  ブラウザテストが常にスキップされていたため気づけなかった):
+  1. `_classify_field()`のメール判定が`itype=="email"`か`email_confirm`の
+     手がかりしか見ておらず、`_FIELD_HINTS["email"]`自体を一度もチェックして
+     いなかった。そのため`type="email"`属性が付いていない、placeholder頼みの
+     メール欄(例: `<input placeholder="メールアドレス">`)が一切検出できなかった。
+     `_FIELD_HINTS["email"]`のチェックを追加。
+  2. `first_name`の手がかり一覧にある単漢字「名」が「お名前」の部分文字列に
+     なってしまうため、full-nameの「お名前」欄がfirst_nameとして誤判定されて
+     いた(last_name/first_nameの判定が`name`より先に走る順序だったため)。
+     ただし単純に`name`の判定を先頭に持ってくると、今度は`name="last-name"`
+     のようなHTML属性が汎用な「name」という手がかり文字列に部分一致してしまい、
+     本来のlast_name欄まで誤判定してしまう。そのため「name」という汎用語を
+     除いた固有フレーズ(`_NAME_HINTS_STRONG`: 「お名前」「氏名」
+     「担当者名」等)のみを`last_name`/`first_name`より先に判定し、汎用な
+     「name」は両方に一致しなかった場合の最終フォールバックとして残した。
+  3. (副次的に発見)自動入力ブックマークレット用のAPI
+     (`h_tenant_send_log_autofill_queue`)が、実送信側(`senders.py`)で
+     修正済みのはずの「フリガナ欄に固定文字列"アシベース"を入れる」
+     「送信元テンプレートの姓・名・郵便番号を反映しない」バグをそのまま
+     引きずっていた(自動入力機能が実送信の姓名フィールド修正より前に
+     実装されていたため)。`tenants.sender_last_name`等を参照するよう修正し、
+     ブックマークレットのJS側フィールド判定ロジック(`list_builder.html`)にも
+     `last_name`/`first_name`/`furigana`/`postal_code`の判定を追加して
+     `_FIELD_HINTS`とのパリティを取った。
+  `form_navigator.py test`(7/7)・`senders.py test`・`api.py test`(163/163)・
+  `test_concurrency.py`・`storage.py test`は全て再確認済み。`test_pipeline.py`は
+  実データ由来の未採点企業14社+テスト残留データ1件+`out/metrics.json`
+  スナップショットの古さによる3件の失敗があるが、いずれも今回の変更とは
+  無関係の既存の状態(今回のコード変更による回帰ではない)。
 
 ---
 

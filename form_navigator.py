@@ -19,6 +19,7 @@ senders.FormSenderから呼ばれる。ここは「ブラウザ操作」だけ�
   result = navigate_and_submit(url, values)
   result.status  # "SUCCESS" / "SKIP_CAPTCHA" / ...
 """
+import os
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -27,6 +28,21 @@ from typing import Optional
 MAX_CRAWL_PAGES = 5          # 問い合わせページ探索で開くページ数の上限
 NAV_TIMEOUT_MS = 45000
 ACTION_TIMEOUT_MS = 10000
+
+
+def _launch_browser(p, headless):
+    """本番(Dockerイメージ)は`playwright install --with-deps chromium`で正規に
+    インストールされたChromiumをそのまま使う(既定の挙動。この関数は何も変えない)。
+    開発環境でPlaywright標準のブラウザダウンロードができない場合だけ、
+    環境変数PLAYWRIGHT_CHROMIUM_PATHで代替のchromium実行ファイルを指定できる
+    (例: サンドボックス環境でcdn.playwright.devへ到達できない場合の開発用途。
+    本番では未設定のままにしておくこと)。"""
+    exe = os.environ.get("PLAYWRIGHT_CHROMIUM_PATH")
+    if exe:
+        return p.chromium.launch(
+            executable_path=exe, headless=headless,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
+    return p.chromium.launch(headless=headless)
 
 # ── フィールド判定の同義語辞書 ────────────────
 # 表記ゆれ・同義語を広めに持つ。name/id/placeholder/aria-label/label文言/
@@ -48,6 +64,10 @@ _FIELD_HINTS = {
     "name": ["お名前", "氏名", "担当者名", "ご担当者", "ご担当者名", "your name", "name"],
     "furigana": ["フリガナ", "ふりがな", "カナ", "かな", "kana"],
 }
+
+# "name"という汎用語を除いた、氏名(フルネーム)固有のフレーズ手がかりのみ。
+# 汎用"name"はname="last-name"のようなHTML属性にも紛れ込むため_classify_fieldで別扱いする。
+_NAME_HINTS_STRONG = [h for h in _FIELD_HINTS["name"] if h != "name"]
 
 _CONSENT_HINTS = ["プライバシー", "個人情報", "利用規約", "同意します", "同意する", "agree", "privacy"]
 
@@ -156,7 +176,8 @@ def _classify_field(page, el):
     except Exception:  # noqa: BLE001
         itype, tag = "", ""
 
-    if itype == "email" or any(h in text for h in _FIELD_HINTS["email_confirm"]):
+    if (itype == "email" or any(h in text for h in _FIELD_HINTS["email"])
+            or any(h in text for h in _FIELD_HINTS["email_confirm"])):
         if any(h in text for h in _FIELD_HINTS["email_confirm"]):
             return "email_confirm"
         return "email"
@@ -174,11 +195,17 @@ def _classify_field(page, el):
         return "subject"
     if any(h in text for h in _FIELD_HINTS["furigana"]):
         return "furigana"
+    # 「名」は先頭一致でfirst_nameの短い手がかりだが、「お名前」等の氏名フルネーム表記に
+    # 部分文字列として含まれてしまうため、先にnameの固有フレーズ(汎用な"name"は除く)を
+    # 優先判定する。汎用"name"はname="last-name"のようなHTML属性にも紛れ込むため、
+    # last_name/first_nameの判定より後の最終フォールバックとして残す。
+    if any(h in text for h in _NAME_HINTS_STRONG):
+        return "name"
     if any(h in text for h in _FIELD_HINTS["last_name"]):
         return "last_name"
     if any(h in text for h in _FIELD_HINTS["first_name"]):
         return "first_name"
-    if any(h in text for h in _FIELD_HINTS["name"]):
+    if "name" in text:
         return "name"
     return None
 
@@ -405,7 +432,7 @@ def discover_contact_url(start_url, *, headless=True):
     result = {"status": "ERROR", "contact_url": None, "error": None}
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=headless)
+            browser = _launch_browser(p, headless)
             try:
                 page = browser.new_page()
                 try:
@@ -444,7 +471,7 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
     result = NavigationResult(status="FAILED_UNSUPPORTED")
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=headless)
+            browser = _launch_browser(p, headless)
             try:
                 page = browser.new_page()
                 try:
@@ -670,7 +697,7 @@ if __name__ == "__main__":
         ]
         try:
             pw_ctx = sync_playwright().start()
-            browser = pw_ctx.chromium.launch()
+            browser = _launch_browser(pw_ctx, True)
         except Exception as e:  # noqa: BLE001
             print(f"⚠ Playwrightのブラウザ起動に失敗したためスキップ ({type(e).__name__}: {e})")
             sys.exit(0)

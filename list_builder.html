@@ -824,12 +824,18 @@ function autofillBookmarkletSource(apiBase, apiKey) {
   var HINTS = {
     email: ["メールアドレス","メール","eメール","e-mail","email","mail"],
     phone: ["電話番号","電話番号(必須)","tel","phone"],
+    postal_code: ["郵便番号","〒","zip","postal"],
     address: ["住所","所在地","address"],
     message: ["お問い合わせ内容","ご相談内容","内容","メッセージ","message","ご要望","本文","comment"],
     company: ["会社名","法人名","貴社名","御社名","団体名","company","organization"],
     subject: ["件名","タイトル","subject"],
-    name: ["お名前","氏名","担当者名","ご担当者","ご担当者名","your name","name"],
+    furigana: ["フリガナ","ふりがな","カナ","かな","kana"],
+    name: ["お名前","氏名","担当者名","ご担当者","ご担当者名","your name"],
+    last_name: ["姓","苗字","last name","family name"],
+    first_name: ["名","first name","given name"],
   };
+  // HINTSの走査順=判定の優先順(email→…→name→last_name→first_name)。
+  // "名"は「お名前」等にも部分文字列として含まれるため、first_nameは最後に回す。
   function textFor(el) {
     var label = "";
     try {
@@ -841,9 +847,11 @@ function autofillBookmarkletSource(apiBase, apiKey) {
   function classify(el) {
     var t = textFor(el), tag = el.tagName.toLowerCase();
     if (tag === "textarea") return "message";
-    for (var kind in HINTS) {
-      for (var i = 0; i < HINTS[kind].length; i++) {
-        if (t.indexOf(HINTS[kind][i].toLowerCase()) >= 0) return kind;
+    var order = ["email","phone","postal_code","address","company","subject","furigana","name","last_name","first_name"];
+    for (var i = 0; i < order.length; i++) {
+      var kind = order[i];
+      for (var j = 0; j < HINTS[kind].length; j++) {
+        if (t.indexOf(HINTS[kind][j].toLowerCase()) >= 0) return kind;
       }
     }
     return null;

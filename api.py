@@ -468,17 +468,27 @@ def h_tenant_send_log_autofill_queue(con, tenant_id, log_id):
         return 400, {"error": "元の送信文章を復元できませんでした。件名・本文は手動で"
                                "入力してください", "url": url}
 
-    tn = con.execute("""SELECT sender_name, sender_email, sender_address, optout_url
-        FROM tenants WHERE id=?""", (tenant_id,)).fetchone()
+    tn = con.execute("""SELECT sender_name, sender_email, sender_address, optout_url,
+        sender_last_name, sender_first_name, sender_last_name_kana, sender_first_name_kana,
+        sender_postal_code FROM tenants WHERE id=?""", (tenant_id,)).fetchone()
     sender_name = (tn["sender_name"] if tn else None) or "AshiBase（足場ベース）"
     sender_email = (tn["sender_email"] if tn else None) or "info@ashibase.jp"
     sender_address = (tn["sender_address"] if tn else None) or ""
     optout_url = (tn["optout_url"] if tn else None) or "https://ashibase.jp/optout"
+    sender_last_name = (tn["sender_last_name"] if tn else None) or sender_name
+    sender_first_name = (tn["sender_first_name"] if tn else None) or ""
+    sender_postal_code = (tn["sender_postal_code"] if tn else None) or ""
+    # senders.FormSender._deliver()と同じ方針(未設定の場合、姓欄には会社名を入れておくが
+    # 名欄・フリガナ欄は空のままにする。以前は名欄にも会社名を複製しフリガナは固定文字列
+    # "アシベース"を入れていたが、カスタムの送信者名を設定したテナントでは不自然になるため)
+    furigana = f"{(tn['sender_last_name_kana'] if tn else None) or ''}" \
+               f"{(tn['sender_first_name_kana'] if tn else None) or ''}"
     # senders.FormSender.footer()と同じ形式(実際に送るときに付与される署名)
     full_message = f"{body}\n\n{sender_name} / {sender_email}\n今後のご連絡が不要な場合: {optout_url}"
     values = {"company": sender_name, "name": sender_name, "email": sender_email,
-              "phone": "", "address": sender_address, "subject": subject or "",
-              "message": full_message, "furigana": "アシベース"}
+              "phone": "", "address": sender_address, "postal_code": sender_postal_code,
+              "last_name": sender_last_name, "first_name": sender_first_name,
+              "subject": subject or "", "message": full_message, "furigana": furigana}
 
     con.execute("""INSERT INTO autofill_queue (tenant_id, url, values_json, created_at)
         VALUES (?,?,?,?)

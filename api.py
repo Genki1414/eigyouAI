@@ -1784,6 +1784,23 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/lists", token=staff_key)
     t("担当者専用のapi_keyでも同じテナントのデータにアクセスできる", st == 200)
 
+    print("\n── 送信完了通知(MIKOMERU同等。宛先解決のみ検証。実送信はT2実装後) ──")
+    import senders as _senders_mod
+    notify_calls = []
+
+    def _fake_deliver(self, to, sender, subject, body):
+        notify_calls.append(to.email)
+        raise NotImplementedError("test-stub: メール送信基盤は未実装")
+
+    orig_deliver = _senders_mod.MailSender._deliver
+    _senders_mod.MailSender._deliver = _fake_deliver
+    try:
+        TL._notify_completion(con, tid_a, "テストリスト", 3, {"sent": 3, "failed": 0})
+        t("担当者が登録されていれば、その全員のメールアドレス宛に通知を試みる",
+          notify_calls == ["taro@test-a.example.co.jp"])
+    finally:
+        _senders_mod.MailSender._deliver = orig_deliver
+
     st, r = post_auth("/api/tenant/staff/revoke", {"staff_id": staff_id}, token=key_b)
     t("他テナントは担当者を失効できない(404)", st == 404)
     st, r = post_auth("/api/tenant/staff/revoke", {"staff_id": staff_id}, token=key_a)
@@ -1797,6 +1814,17 @@ def self_test(port=8899):
 
     con.execute("DELETE FROM staff WHERE tenant_id IN (?,?)", (tid_a, tid_b))
     con.commit()
+
+    notify_calls.clear()
+    _senders_mod.MailSender._deliver = _fake_deliver
+    try:
+        TL._notify_completion(con, tid_a, "テストリスト", 3, {"sent": 3, "failed": 0})
+        tenant_a_sender_email = con.execute("SELECT sender_email FROM tenants WHERE id=?",
+                                             (tid_a,)).fetchone()["sender_email"]
+        t("担当者がいなければテナントの送信元メールアドレスへフォールバックする",
+          notify_calls == [tenant_a_sender_email])
+    finally:
+        _senders_mod.MailSender._deliver = orig_deliver
 
     print("\n── お知らせ ──")
     ann_pub_id = db.add_announcement(con, "テスト告知(公開)", "本文", published=True)

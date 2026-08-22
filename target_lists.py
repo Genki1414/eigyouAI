@@ -345,8 +345,52 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True):
     stats = senders.send_campaign(con, campaign_id, step=1, dry_run=dry_run)
     if not dry_run:
         db.sync_target_list_member_status(con, list_id, campaign_id, step=1)
+        _notify_completion(con, tenant_id, lst["name"], len(members), stats)
     return {"campaign_id": campaign_id, "target_count": len(members),
             "dry_run": dry_run, "stats": stats}
+
+
+def _notify_completion(con, tenant_id, list_name, target_count, stats):
+    """送信完了を担当者へメール通知する(MIKOMERU同等の完了通知)。
+    実際のメール送信基盤(SendGrid等)はまだ未実装(HANDOFF.md T2)のため、
+    今はsenders.MailSenderがNotImplementedErrorを投げるだけの状態——それでも
+    ここで先に呼び出しておき、T2が実装された瞬間から追加のコード変更なしで
+    通知が届き始めるようにする。あくまで補助機能なので、失敗しても
+    (未実装であっても)呼び出し元の送信処理自体は絶対に止めない。"""
+    import senders
+
+    recipients = [r["email"] for r in con.execute(
+        "SELECT email FROM staff WHERE tenant_id=? AND email IS NOT NULL AND email!=''",
+        (tenant_id,)).fetchall()]
+    if not recipients:
+        tn = con.execute("SELECT sender_email FROM tenants WHERE id=?", (tenant_id,)).fetchone()
+        if tn and tn["sender_email"]:
+            recipients = [tn["sender_email"]]
+    if not recipients:
+        return
+
+    subject = f"【AshiBase】送信完了: {list_name}"
+    body = (f"リスト「{list_name}」への送信が完了しました。\n\n"
+            f"対象企業数: {target_count}\n"
+            f"送信成功: {stats.get('sent', 0)}\n"
+            f"失敗: {stats.get('failed', 0)}\n"
+            f"ガードで中止: {stats.get('blocked', 0)}\n"
+            f"配信停止: {stats.get('suppressed', 0)}\n"
+            f"Kill Switchで中止: {stats.get('stopped', 0)}\n")
+    default_sender = senders.Sender(name="AshiBase（足場ベース）", email="info@ashibase.jp",
+                                     address="", optout_url="https://ashibase.jp/optout")
+    mailer = senders.MailSender(con, dry_run=False)
+    for email in recipients:
+        try:
+            mailer._deliver(senders.Recipient(company_id=0, name="", email=email),
+                            default_sender, subject, body)
+        except NotImplementedError:
+            # T2(メール送信実装)が完了するまでは想定内。cron.log等で気づけるよう
+            # ログにだけ残し、呼び出し元(send_list())には一切伝播させない
+            print(f"  [完了通知] メール送信基盤が未実装のため送信できません "
+                  f"(宛先: {email}。HANDOFF.md T2参照)")
+        except Exception as e:  # noqa: BLE001
+            print(f"  [完了通知] 送信に失敗しました(宛先: {email}): {e}")
 
 
 def activity_log(con, tenant_id, limit=100):

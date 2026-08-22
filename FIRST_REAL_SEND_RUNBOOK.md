@@ -11,9 +11,8 @@
 
 - Kill Switchは**既定で「全体停止中」**です(`kill_switch_cli.py`で確認・操作)。
   本番送信するには、送信の直前に人間が明示的に解除する必要があります。
-- HTTPS化(P0-1)がまだの場合、`list_builder.html`は暫定的にHTTPの
-  `http://<サーバーIP>:8787/`でアクセスします。証明書警告は出ません
-  (平文アクセスのため)。HTTPS化の手順はHANDOFF.md T13を参照してください。
+- HTTPS化は完了済みです。`https://app.ashibase.jp/`で`list_builder.html`に
+  アクセスします(サーバー上のnginxがTLS終端。詳細はHANDOFF.md T13参照)。
 - 以下はすべてサーバー上(SSH接続後)、または`list_builder.html`の画面上で行います。
 
 ---

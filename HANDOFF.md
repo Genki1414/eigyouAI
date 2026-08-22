@@ -467,37 +467,36 @@ mikomeruの「リスト取得」機能で業種(とび・土工工事/解体工�
     - バックエンドの変更なし(静的なガイド文とCSSのみ)
 - 未対応(次フェーズ): 顧客の新規登録・課金・自分でのAPIキー発行UI
 
-**✅ HTTPS化(2026-08-21夜、β版リリース準備の一環で対応)**:
-`deploy/docker-compose.yml`のapiサービスを`127.0.0.1:8787`限定公開へ戻し、
-代わりに`caddy`サービス(Caddy 2、`deploy/Caddyfile`)を追加して80/443を
-公開する構成にした。**8787を直接インターネットへ公開する構成には戻さないこと。**
-Caddyは初回アクセス時にLet's Encryptで自動的に証明書を取得・更新する
-(Caddy標準機能。certbotの手動運用は不要)。list_builder.htmlはapi.py自身が
-同一オリジンで配信し続けるので、Caddy導入によるフロント側のコード変更は無い
-(`location.origin`がそのまま`https://<ドメイン>`になるだけ)。
+**✅ HTTPS化 完了(2026-08-22朝、人間による実施)**:
+ドメインは`app.ashibase.jp`(既存の`ashibase.jp`にAレコードを追加)。
+`https://app.ashibase.jp/`でアクセスできる。
 
-**⚠ 人間側で必要な作業(この先へ進むために必須)**:
-1. **ドメイン/サブドメインを1つ用意する**(例: `app.ashibase.jp`)。
-   Claude Code側では推測・決定しない
-2. そのドメインのDNS Aレコードを、Hetznerサーバーのグローバル**IPv4**アドレスへ
-   向ける(`curl -s -4 ifconfig.me`で確認できる値)。反映まで数分〜数時間かかる
-   ことがある
-3. `.env`に`EIGYOUAI_DOMAIN=app.ashibase.jp`のように設定する(`.env.example`に
-   項目を追加済み)
-4. サーバーのファイアウォール(ufw等を使っていれば)で80/443番ポートを開放する。
-   8787番は外部に開放したままにしない(内部通信のみで足りる)
+**当初`deploy/Caddyfile`でCaddyを使う設計にしていたが、実際にデプロイした
+Hetznerサーバーは同じ80/443番ポートを既存のnginx(Stock Factory側の
+`stockfactory-hq`/`stockfactory-runtime`と共用)が既に使っていたため、
+Caddyはポート競合で起動できなかった。そのため最終的には以下の構成に
+切り替えた:**
 
-**⚠ 設定後にClaude Code側(またはサーバー上)で実行すること**:
-```
-cd /app/deploy   # サーバー上のリポジトリのdeploy/ディレクトリ
-docker compose down          # 一旦停止(ポート設定変更を反映させるため)
-docker compose up -d --build
-docker compose logs -f caddy # 証明書取得ログを確認。エラーが出なければOK
-curl -I https://<設定したドメイン>/health   # 200が返れば成功
-```
-DNSが未反映のまま起動すると、Caddyは証明書取得に失敗してリトライを続ける
-(サービス自体は落ちない)。DNS反映後に`docker compose restart caddy`すれば
-すぐ再試行される。
+- Caddyコンテナは`docker compose stop caddy`で停止したまま(未使用)。
+  `deploy/Caddyfile`・`docker-compose.yml`のcaddyサービス定義はコードとしては
+  残しているが、**単独ホストで動かす場合の代替手段**という位置づけに変わった
+- 実際にTLS終端をしているのは、サーバーに元々あった**nginx**。
+  `/etc/nginx/sites-available/app-ashibase`に新規サーバーブロックを追加し、
+  `proxy_pass http://127.0.0.1:8787`でapiコンテナへ転送している
+  (`stockfactory-hq`と全く同じパターン)
+- 証明書は`certbot --nginx -d app.ashibase.jp`で取得(Let's Encrypt。
+  自動更新のcronはcertbotが標準で設定済み)
+- apiコンテナは引き続き`127.0.0.1:8787`限定公開のまま
+  (`deploy/docker-compose.yml`)。**8787を直接インターネットへ公開する
+  構成には戻さないこと**
+- list_builder.htmlはapi.py自身が同一オリジンで配信するので、
+  フロント側のコード変更は無し(`location.origin`が
+  `https://app.ashibase.jp`になるだけ)
+
+**今後、別のサーバー(80/443が空いている単独ホスト)にデプロイする場合**は、
+`deploy/Caddyfile`のCaddy構成がそのまま使える想定で残してある
+(`.env`の`EIGYOUAI_DOMAIN`を設定し`docker compose up -d`するだけ)。
+共用ホストに追加する場合は、今回と同様に既存nginxへの追加を先に検討すること。
 
 ### T13. β版リリース準備(2026-08-21夜)
 

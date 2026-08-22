@@ -411,19 +411,20 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
            LEFT JOIN offers o ON o.id = COALESCE(cp.offer_id, 1)
            LEFT JOIN tenants tn ON tn.id = o.tenant_id
            LEFT JOIN target_lists tl ON tl.campaign_id = t.campaign_id
-           WHERE t.campaign_id=? AND t.step=? AND t.sent_at IS NULL
+           WHERE t.campaign_id=? AND t.step=?
+             AND (t.sent_at IS NULL OR instr(t.note, 'provider_id=mock_') > 0)
              AND t.body IS NOT NULL AND t.body != ''"""
     p = [campaign_id, step]
     if limit:
         q += " LIMIT ?"; p.append(limit)
     rows = con.execute(q, p).fetchall()
 
+    stats = {"sent": 0, "failed": 0, "blocked": 0, "suppressed": 0, "stopped": 0}
     if not rows:
         print("送信対象がありません（文面未生成、または全て送信済み）")
-        return
+        return stats
 
     print(f"送信対象 {len(rows)}件 / {'DRY RUN（実送信しません）' if dry_run else '★本番送信★'}")
-    stats = {"sent": 0, "failed": 0, "blocked": 0, "suppressed": 0, "stopped": 0}
     cost = 0
 
     for r in rows:
@@ -457,7 +458,11 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
 
         adapter = get_sender(r["channel"], con, dry_run=dry_run,
                               tenant_id=r["tenant_id"], offer_id=r["offer_id"], list_id=r["list_id"])
-        key = R.Idempotency.key("send", campaign_id, r["company_id"], step)
+        # ドライランと本番送信は別の冪等キー空間を使う。同じキーだとドライランが
+        # 冪等キーを占有してしまい、その後の本番送信が「送信済み(冪等キー一致)」
+        # として何もせず素通りしてしまう(実サイトに一度も送らないまま「完了」扱いになる)。
+        key = R.Idempotency.key("send" if not dry_run else "send:dryrun",
+                                 campaign_id, r["company_id"], step)
         res = adapter.send(to, sender, r["subject"], r["body"], key)
 
         if res.ok:
@@ -593,6 +598,55 @@ if __name__ == "__main__":
         fres = fm.send(frcp, s, "件名", "本文", "test:form:1")
         print(f"  {'✓' if fres.ok else '✗'} dry runで成功応答 (provider_id={fres.provider_id})")
         print("  (フィールド検出ヒューリスティックの検証は python3 form_navigator.py test を参照)")
+
+        print("\n── ドライラン後の本番送信(冪等キー分離) ──")
+        # 過去のバグ: ドライランと本番送信が同じsent_at判定・同じ冪等キーを
+        # 共有していたため、ドライランで一度「成功」させたリストを後で本番送信すると
+        # 「送信対象がありません」で黙って何も送らなかった(実サイトへ一度も
+        # 送っていないのに完了扱いになる、という一番怖いパターン)。
+        con.execute("DELETE FROM companies WHERE id=999998")
+        con.execute("""INSERT INTO companies (id, name, contact_url)
+            VALUES (999998, 'テスト_ドライラン後本番', 'https://example.co.jp/contact/')""")
+        cur = con.execute("INSERT INTO campaigns (name, started_at, target_rule) VALUES (?,?,?)",
+                          ("test-dryrun-then-real", datetime.now().isoformat(timespec="seconds"), "ALL"))
+        dr_cid = cur.lastrowid
+        con.execute("""INSERT INTO touches (campaign_id, company_id, channel, variant, step,
+            subject, body) VALUES (?,999998,'フォーム','A',1,'件名','本文')""", (dr_cid,))
+        con.execute("DELETE FROM idempotency WHERE key LIKE '%:999998:1'")
+        con.commit()
+
+        orig_ks, orig_ks_reason = db.kill_switch_status(con)
+        db.set_global_kill_switch(con, False, updated_by="test")
+        try:
+            stats1 = send_campaign(con, dr_cid, step=1, dry_run=True)
+            row1 = con.execute("SELECT sent_at, note FROM touches WHERE campaign_id=? AND company_id=999998",
+                               (dr_cid,)).fetchone()
+            ok_dr1 = (stats1 is not None and stats1["sent"] == 1
+                      and row1["sent_at"] is not None and "mock" in (row1["note"] or ""))
+            print(f"  1回目(ドライラン): sent={stats1['sent'] if stats1 else None} note={row1['note']}")
+            print(f"  {'✓' if ok_dr1 else '✗'} ドライランはmock成功としてsent_at/noteが立つ")
+
+            import form_navigator as FN
+            orig_navigate = FN.navigate_and_submit
+            FN.navigate_and_submit = lambda *a, **k: FN.NavigationResult(
+                status="SUCCESS", reason_code="success_text_matched", submit_attempted=True)
+            try:
+                stats2 = send_campaign(con, dr_cid, step=1, dry_run=False)
+            finally:
+                FN.navigate_and_submit = orig_navigate
+            row2 = con.execute("SELECT sent_at, note FROM touches WHERE campaign_id=? AND company_id=999998",
+                               (dr_cid,)).fetchone()
+            ok_dr2 = (stats2 is not None and stats2["sent"] == 1
+                      and "mock" not in (row2["note"] or "") and "provider_id=form_" in (row2["note"] or ""))
+            print(f"  2回目(本番): sent={stats2['sent'] if stats2 else None} note={row2['note']}")
+            print(f"  {'✓' if ok_dr2 else '✗'} ドライラン後でも本番送信が実際に実行される(黙ってスキップされない)")
+        finally:
+            db.set_global_kill_switch(con, orig_ks, reason=orig_ks_reason, updated_by="test-restore")
+            con.execute("DELETE FROM touches WHERE campaign_id=?", (dr_cid,))
+            con.execute("DELETE FROM campaigns WHERE id=?", (dr_cid,))
+            con.execute("DELETE FROM companies WHERE id=999998")
+            con.execute("DELETE FROM idempotency WHERE key LIKE '%:999998:1'")
+            con.commit()
 
         print("\n── フォーム送信ペーシング上限 ──")
         import config as C

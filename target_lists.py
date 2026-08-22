@@ -316,9 +316,16 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True):
 
     now2 = datetime.now().isoformat(timespec="seconds")
     for m in members:
-        con.execute("""INSERT OR IGNORE INTO touches
+        # INSERT OR IGNOREだけだと、ドライランで一度作られた行の件名・本文が
+        # 以後上書きされず古いまま残ってしまう(まだ本番送信していない行に限り、
+        # 直前に画面で入力した最新の件名・本文へ更新する)。
+        con.execute("""INSERT INTO touches
             (campaign_id, company_id, channel, variant, step, subject, body)
-            VALUES (?,?,'フォーム','A',1,?,?)""", (campaign_id, m["id"], subject, body))
+            VALUES (?,?,'フォーム','A',1,?,?)
+            ON CONFLICT(campaign_id, company_id, step) DO UPDATE SET
+                subject=excluded.subject, body=excluded.body
+            WHERE touches.sent_at IS NULL OR instr(touches.note, 'provider_id=mock_') > 0""",
+            (campaign_id, m["id"], subject, body))
     if not dry_run:
         # 実送信の直前に「処理中」を記録しておく。サーバー再起動等で送信が
         # 途中で止まった場合でも、PROCESSINGのまま残った行=結果不明な行として

@@ -427,12 +427,19 @@ def can_contact(con, company_id, tenant_id=None, allow_warm=False):
         if warm:
             return False, "反応済み(商談対象)" if not warm[1] else "既存顧客"
 
-    n = con.execute("SELECT COUNT(*) FROM touches WHERE company_id=? AND sent_at IS NOT NULL",
+    # ドライラン(dry_run)は実サイトへ何も送っていないため、生涯接触上限・最短間隔の
+    # どちらにもカウントしない(sent_atはドライランでも本番と同じ形で立つため、
+    # provider_id=mock_で始まるnoteをドライラン分として除外する。他の判定
+    # <sync_target_list_member_status()等>と同じ判別方法)。
+    n = con.execute("""SELECT COUNT(*) FROM touches WHERE company_id=? AND sent_at IS NOT NULL
+                       AND instr(COALESCE(note,''), 'provider_id=mock_') = 0""",
                     (company_id,)).fetchone()[0]
     if n >= C.MAX_LIFETIME_TOUCHES:
         return False, f"生涯接触上限({C.MAX_LIFETIME_TOUCHES}回)到達"
     last = con.execute("""SELECT MAX(sent_at) FROM touches
-                          WHERE company_id=? AND sent_at IS NOT NULL""", (company_id,)).fetchone()[0]
+                          WHERE company_id=? AND sent_at IS NOT NULL
+                          AND instr(COALESCE(note,''), 'provider_id=mock_') = 0""",
+                       (company_id,)).fetchone()[0]
     if last:
         try:
             gap = (datetime.now() - datetime.fromisoformat(last)).days

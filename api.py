@@ -132,6 +132,7 @@ SALES_ENGINE_API_KEY = os.environ.get("SALES_ENGINE_API_KEY")
 _SEND_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/send$")
 _OUTCOME_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/outcome$")
 _SCREENSHOT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/screenshot$")
+_AUTOFILL_QUEUE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/autofill-queue$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
@@ -425,6 +426,77 @@ def h_tenant_send_log_screenshot_path(con, tenant_id, log_id, kind):
     return row["p"] if row else None
 
 
+_AUTOFILL_QUEUE_TTL_SECONDS = 600   # 古いタブへ誤って入力しないよう10分で失効させる
+
+
+def h_tenant_send_log_autofill_queue(con, tenant_id, log_id):
+    """MIKOMERUの「自動入力(手動送信サポート)」相当。自動送信に失敗した企業について、
+    元の送信文章・送信者情報をautofill_queueへ1件だけ置く(テナントにつき常に最新の
+    1件のみ。ブックマークレット側がGET /api/tenant/autofill/pendingで取りに来る)。
+    件名・本文はform_send_logには残していない(個人情報配慮の方針)ため、
+    list_id経由でtarget_lists.campaign_idからtouchesを逆引きして復元する。
+    保存済みリスト経由でない送信(list_id無し)は元の文章を復元できないため、
+    その旨のエラーだけ返す(手動入力を促す)。"""
+    row = con.execute("""SELECT company_id, list_id, contact_url, target_url
+        FROM form_send_log WHERE id=? AND tenant_id=?""", (log_id, tenant_id)).fetchone()
+    if not row:
+        return 404, {"error": "対象の送信ログが見つかりません"}
+    url = row["contact_url"] or row["target_url"]
+    if not url:
+        return 400, {"error": "送信先URLが不明なため自動入力を準備できません"}
+
+    subject, body = None, None
+    if row["list_id"]:
+        camp = con.execute("SELECT campaign_id FROM target_lists WHERE id=?",
+                            (row["list_id"],)).fetchone()
+        if camp and camp["campaign_id"]:
+            t = con.execute("""SELECT subject, body FROM touches
+                WHERE campaign_id=? AND company_id=? ORDER BY id DESC LIMIT 1""",
+                (camp["campaign_id"], row["company_id"])).fetchone()
+            if t:
+                subject, body = t["subject"], t["body"]
+    if body is None:
+        return 400, {"error": "元の送信文章を復元できませんでした。件名・本文は手動で"
+                               "入力してください", "url": url}
+
+    tn = con.execute("""SELECT sender_name, sender_email, sender_address, optout_url
+        FROM tenants WHERE id=?""", (tenant_id,)).fetchone()
+    sender_name = (tn["sender_name"] if tn else None) or "AshiBase（足場ベース）"
+    sender_email = (tn["sender_email"] if tn else None) or "info@ashibase.jp"
+    sender_address = (tn["sender_address"] if tn else None) or ""
+    optout_url = (tn["optout_url"] if tn else None) or "https://ashibase.jp/optout"
+    # senders.FormSender.footer()と同じ形式(実際に送るときに付与される署名)
+    full_message = f"{body}\n\n{sender_name} / {sender_email}\n今後のご連絡が不要な場合: {optout_url}"
+    values = {"company": sender_name, "name": sender_name, "email": sender_email,
+              "phone": "", "address": sender_address, "subject": subject or "",
+              "message": full_message, "furigana": "アシベース"}
+
+    con.execute("""INSERT INTO autofill_queue (tenant_id, url, values_json, created_at)
+        VALUES (?,?,?,?)
+        ON CONFLICT(tenant_id) DO UPDATE SET url=excluded.url,
+            values_json=excluded.values_json, created_at=excluded.created_at""",
+        (tenant_id, url, json.dumps(values, ensure_ascii=False),
+         datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    return 200, {"url": url}
+
+
+def h_tenant_autofill_pending(con, tenant_id):
+    """ブックマークレットが呼ぶ。直前に「自動入力」ボタンで置いた1件を返す。
+    古すぎる(10分超)場合は誤爆防止のため404にする(押し忘れて別の日に別のタブで
+    使う、といった事故を防ぐ)。"""
+    row = con.execute("SELECT url, values_json, created_at FROM autofill_queue WHERE tenant_id=?",
+                       (tenant_id,)).fetchone()
+    if not row:
+        return 404, {"error": "自動入力の準備がありません。自動送信ログ画面の「自動入力」"
+                               "ボタンを先に押してください"}
+    age = (datetime.now() - datetime.fromisoformat(row["created_at"])).total_seconds()
+    if age > _AUTOFILL_QUEUE_TTL_SECONDS:
+        return 404, {"error": "自動入力の準備が古すぎます(10分以内に使ってください)。"
+                               "もう一度「自動入力」ボタンを押してください"}
+    return 200, {"url": row["url"], "values": json.loads(row["values_json"])}
+
+
 def h_tenant_companies_search(con, tenant_id, qs):
     """送信除外設定で対象企業を探すための簡易検索。共有マスタ+自テナントの
     非公開データのみ(他テナントの非公開企業は検索にも出さない)。"""
@@ -664,7 +736,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Signature")
+        # Authorizationは、自動入力ブックマークレット(送信先企業のドメイン=別オリジン
+        # から本APIを叩く)のプリフライトに必要。Content-Type/X-Signatureは既存経路用
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Signature, Authorization")
         self.end_headers()
 
     def do_POST(self):
@@ -703,8 +777,9 @@ class Handler(BaseHTTPRequestHandler):
 
         send_match = _SEND_PATH_RE.match(path)
         outcome_match = _OUTCOME_PATH_RE.match(path)
+        autofill_match = _AUTOFILL_QUEUE_PATH_RE.match(path)
         if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv") \
-                or send_match or outcome_match:
+                or send_match or outcome_match or autofill_match:
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -718,9 +793,12 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_lists_csv(con, tenant["id"], data)
                 elif send_match:
                     st, res = h_tenant_list_send(con, tenant["id"], int(send_match.group(1)), data)
-                else:
+                elif outcome_match:
                     st, res = h_tenant_list_member_outcome(con, tenant["id"],
                                                             int(outcome_match.group(1)), data)
+                else:
+                    st, res = h_tenant_send_log_autofill_queue(con, tenant["id"],
+                                                                int(autofill_match.group(1)))
                 return self._json(st, res)
             except Exception as e:  # noqa: BLE001
                 return self._json(500, {"error": str(e)[:200]})
@@ -865,6 +943,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if (u.path == "/api/tenant/lists" or u.path.startswith("/api/tenant/lists/")
                 or u.path == "/api/tenant/send-log"
+                or u.path == "/api/tenant/autofill/pending"
                 or u.path == "/api/tenant/exclusions"
                 or u.path == "/api/tenant/companies/search"
                 or u.path == "/api/tenant/templates"
@@ -881,6 +960,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(401, {"error": "unauthorized"})
                 if u.path == "/api/tenant/send-log":
                     st, res = h_tenant_send_log(con, tenant["id"], qs)
+                elif u.path == "/api/tenant/autofill/pending":
+                    st, res = h_tenant_autofill_pending(con, tenant["id"])
                 elif u.path == "/api/tenant/exclusions":
                     st, res = h_tenant_exclusions_list(con, tenant["id"])
                 elif u.path == "/api/tenant/companies/search":
@@ -1371,6 +1452,59 @@ def self_test(port=8899):
     t("他テナントは自分の送信前画像として取得できない(テナント分離)", st == 404)
     st, body, ctype = get_raw("/api/tenant/send-log/999999999/screenshot?kind=before", token=key_a)
     t("存在しないログIDは404", st == 404)
+
+    print("\n── 自動入力(手動送信サポート機能) ──")
+    # list_a_idは既にdry_run送信済み(subject=テスト件名/body=テスト本文がtouchesに
+    # 入っている)。その中の1社について、自動送信が失敗した想定のログを1件作る
+    af_company = con.execute("""SELECT c.id FROM target_list_members m
+        JOIN companies c ON c.id=m.company_id WHERE m.list_id=? LIMIT 1""", (list_a_id,)).fetchone()
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url,
+        started_at, status, reason_code)
+        VALUES (?, ?, ?, 'https://example.co.jp/autofill-test', ?, 'FAILED_UNSUPPORTED',
+        'success_not_confirmed')""",
+        (af_company["id"], tid_a, list_a_id, datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    af_log_id = con.execute("""SELECT id FROM form_send_log WHERE tenant_id=? AND company_id=?
+        ORDER BY id DESC LIMIT 1""", (tid_a, af_company["id"])).fetchone()[0]
+
+    st, r = post_auth(f"/api/tenant/send-log/{af_log_id}/autofill-queue", {})
+    t("認証ヘッダなしのPOST .../autofill-queueは401", st == 401)
+    st, r = post_auth(f"/api/tenant/send-log/{af_log_id}/autofill-queue", {}, token=key_a)
+    t("自動入力の準備ができる(元の文章を復元できたリスト送信のため)",
+      st == 200 and r.get("url") == "https://example.co.jp/autofill-test", f"r={r}")
+
+    st, r = get_auth("/api/tenant/autofill/pending")
+    t("認証ヘッダなしのGET /api/tenant/autofill/pendingは401", st == 401)
+    expected_subject, expected_body = con.execute("""SELECT t.subject, t.body FROM touches t
+        JOIN target_lists tl ON tl.campaign_id=t.campaign_id
+        WHERE tl.id=? AND t.company_id=? ORDER BY t.id DESC LIMIT 1""",
+        (list_a_id, af_company["id"])).fetchone()
+    st, r = get_auth("/api/tenant/autofill/pending", token=key_a)
+    t("準備した内容が件名・本文込みで取得できる(直近の送信文章が復元される)",
+      st == 200 and r["values"]["subject"] == expected_subject
+      and expected_body in r["values"]["message"], f"st={st} r={r}")
+    st, r = get_auth("/api/tenant/autofill/pending", token=key_b)
+    t("他テナントには自分宛の自動入力しか見えない(テナント分離)", st == 404)
+
+    # list_id無し(元の文章を逆引きできない)ケース
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, target_url, started_at,
+        status, reason_code) VALUES (999999998, ?, 'https://example.co.jp', ?,
+        'FAILED_UNSUPPORTED', 'success_not_confirmed')""",
+        (tid_a, datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    no_list_log_id = con.execute("""SELECT id FROM form_send_log WHERE tenant_id=? AND company_id=999999998
+        ORDER BY id DESC LIMIT 1""", (tid_a,)).fetchone()[0]
+    st, r = post_auth(f"/api/tenant/send-log/{no_list_log_id}/autofill-queue", {}, token=key_a)
+    t("元の文章を復元できない場合は400でその旨を返す(手動入力を促す)",
+      st == 400 and "url" in r)
+
+    # TTL切れの検証(created_atを古い時刻に書き換える)
+    post_auth(f"/api/tenant/send-log/{af_log_id}/autofill-queue", {}, token=key_a)
+    old_at = (datetime.now() - timedelta(seconds=700)).isoformat(timespec="seconds")
+    con.execute("UPDATE autofill_queue SET created_at=? WHERE tenant_id=?", (old_at, tid_a))
+    con.commit()
+    st, r = get_auth("/api/tenant/autofill/pending", token=key_a)
+    t("10分以上前の準備は失効扱いになる", st == 404)
 
     print("\n── β版ダッシュボード ──")
     st, r = get_auth("/api/tenant/dashboard")

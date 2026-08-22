@@ -221,6 +221,20 @@ tr.clickable:hover{background:var(--blue-soft)}
       <section class="page" data-page="sendlog">
         <h2>自動送信ログ <span>SEND LOG</span></h2>
         <div class="card">
+          <p class="hint">自動送信に失敗した企業(「一時的な失敗」「失敗(未対応)」)は、下の
+            <b>自動入力ツール</b>を使うと、最初にブラウザのブックマークバーへ1回だけ登録するだけで、
+            以後は各行の「自動入力」ボタン→対象企業のフォームが新しいタブで開く→
+            ブックマークレットをクリック、で入力欄が自動で埋まります(送信ボタンは人が確認して
+            押してください。取り消せない操作を自動化はしません)。</p>
+          <div class="btnrow" style="margin-top:8px">
+            <a id="autofillBookmarklet" href="javascript:void(0)" class="ghost"
+               style="display:inline-block;text-decoration:none;text-align:center;line-height:1.2"
+               onclick="return false" title="このリンクをブックマークバーへドラッグしてください">
+              🖱️ 自動入力(ここをブックマークバーへドラッグ)</a>
+          </div>
+          <p class="hint" id="autofillHint">接続すると準備できます。</p>
+        </div>
+        <div class="card" style="margin-top:12px">
           <div class="row" style="margin-bottom:0">
             <div>
               <label>会社名で検索</label>
@@ -701,6 +715,7 @@ $("btnConnect").addEventListener("click", async () => {
     refreshHomeStats();
     refreshDashboard();
     refreshKillSwitch();
+    setupAutofillBookmarklet();
   } catch (e) {
     connected = false;
     setConnStatus("接続失敗: " + e.message, "off");
@@ -765,6 +780,77 @@ async function refreshDashboard() {
 
 $("btnGoLists").addEventListener("click", () => goPage("lists"));
 
+// ブックマークレット本体。送信先企業のフォームページ(=別オリジン)で動くため、
+// このページの他の関数は一切参照できない自己完結スクリプトにする必要がある。
+// フィールド判定のロジックはform_navigator.py の _FIELD_HINTS/_classify_field を
+// JS向けに簡略移植したもの(完全一致である必要はなく、人が最後に目視確認する前提の
+// 「補助」機能のため)。
+function autofillBookmarkletSource(apiBase, apiKey) {
+  const base = apiBase.replace(/\/$/, "");
+  return `(function(){
+  var HINTS = {
+    email: ["メールアドレス","メール","eメール","e-mail","email","mail"],
+    phone: ["電話番号","電話番号(必須)","tel","phone"],
+    address: ["住所","所在地","address"],
+    message: ["お問い合わせ内容","ご相談内容","内容","メッセージ","message","ご要望","本文","comment"],
+    company: ["会社名","法人名","貴社名","御社名","団体名","company","organization"],
+    subject: ["件名","タイトル","subject"],
+    name: ["お名前","氏名","担当者名","ご担当者","ご担当者名","your name","name"],
+  };
+  function textFor(el) {
+    var label = "";
+    try {
+      if (el.id) { var l = document.querySelector('label[for="' + el.id + '"]'); if (l) label = l.textContent || ""; }
+      if (!label && el.closest) { var lp = el.closest("label"); if (lp) label = lp.textContent || ""; }
+    } catch (e) {}
+    return [el.name, el.id, el.placeholder, el.getAttribute("aria-label"), label].join(" ").toLowerCase();
+  }
+  function classify(el) {
+    var t = textFor(el), tag = el.tagName.toLowerCase();
+    if (tag === "textarea") return "message";
+    for (var kind in HINTS) {
+      for (var i = 0; i < HINTS[kind].length; i++) {
+        if (t.indexOf(HINTS[kind][i].toLowerCase()) >= 0) return kind;
+      }
+    }
+    return null;
+  }
+  fetch("${base}/api/tenant/autofill/pending", { headers: { "Authorization": "Bearer ${apiKey}" } })
+    .then(function(r){ if (!r.ok) throw new Error("no-pending"); return r.json(); })
+    .then(function(data){
+      var values = data.values || {};
+      var filled = 0;
+      var els = document.querySelectorAll("input, textarea");
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        var type = (el.getAttribute("type") || "text").toLowerCase();
+        if (["hidden","checkbox","radio","submit","button","file","image"].indexOf(type) >= 0) continue;
+        if (el.offsetParent === null) continue;
+        var kind = classify(el);
+        if (!kind || !values[kind]) continue;
+        el.value = values[kind];
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        filled++;
+      }
+      alert(filled > 0
+        ? "入力しました(" + filled + "項目)。内容を確認のうえ、送信ボタンはご自身で押してください。"
+        : "入力できそうな項目が見つかりませんでした。お手数ですが手動で入力してください。");
+    })
+    .catch(function(){
+      alert("自動入力の準備が見つかりません。自動送信ログ画面の「自動入力」ボタンを先に押してから、10分以内にこのブックマークレットを使ってください。");
+    });
+})();`;
+}
+
+function setupAutofillBookmarklet() {
+  const a = $("autofillBookmarklet");
+  if (!API || !KEY) { $("autofillHint").textContent = "接続すると準備できます。"; return; }
+  a.href = "javascript:" + encodeURIComponent(autofillBookmarkletSource(API, KEY));
+  $("autofillHint").textContent = "上のボタンをブックマークバーへドラッグすると使えるようになります"
+    + "(APIキーが埋め込まれるため、他の人と共有しないでください)。";
+}
+
 async function showScreenshot(logId, kind, companyName) {
   const modal = $("imgModal"), img = $("imgModalImg");
   $("imgModalTitle").textContent = `${companyName || "—"}(${kind === "before" ? "送信前" : "送信後"})`;
@@ -812,15 +898,17 @@ async function refreshSendLog() {
 
     if (!r.log.length) { el.innerHTML = `<div class="empty">該当する送信履歴がありません</div>`; return; }
     el.innerHTML = `<table><tr><th>会社名</th><th>結果</th><th>詳細</th>
-        <th>送信前</th><th>送信後</th><th>日時</th></tr>` +
+        <th>送信前</th><th>送信後</th><th>自動入力</th><th>日時</th></tr>` +
       r.log.map(x => {
         const cls = LOG_STATUS_CLASS[x.status] || "";
         const label = LOG_STATUS_LABELS[x.status] || x.status;
+        const canAssist = AUTOFILL_ELIGIBLE_STATUSES.has(x.status);
         return `<tr><td>${x.company_name || "—"}</td>
         <td><span class="pill${cls ? " " + cls : ""}">${label}</span></td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.reason_code || "—"}</td>
         <td>${x.has_screenshot_before ? `<button class="ghost shotbtn" data-id="${x.id}" data-kind="before">確認</button>` : "—"}</td>
         <td>${x.has_screenshot_after ? `<button class="ghost shotbtn" data-id="${x.id}" data-kind="after">確認</button>` : "—"}</td>
+        <td>${canAssist ? `<button class="ghost autofillbtn" data-id="${x.id}">自動入力</button>` : "—"}</td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at}</td></tr>`;
       }).join("") +
       `</table>`;
@@ -830,8 +918,30 @@ async function refreshSendLog() {
         showScreenshot(Number(btn.dataset.id), btn.dataset.kind, tr.querySelector("td").textContent);
       });
     });
+    el.querySelectorAll(".autofillbtn").forEach(btn => {
+      btn.addEventListener("click", () => queueAutofill(Number(btn.dataset.id), btn));
+    });
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+// 「営業拒否」「対象外(CAPTCHA等)」はそもそも送信自体をしていない意図的な
+// スキップなので自動入力アシストの対象外(MIKOMERUの「営業拒否」「フォームなし」除外と同じ考え方)。
+// 送信を試みたが確認できなかった/一時的に失敗した場合だけ対象にする。
+const AUTOFILL_ELIGIBLE_STATUSES = new Set(["FAILED_UNSUPPORTED", "FAILED_RETRYABLE"]);
+
+async function queueAutofill(logId, btn) {
+  btn.disabled = true;
+  btn.textContent = "準備中...";
+  try {
+    const r = await call(`/api/tenant/send-log/${logId}/autofill-queue`, { method: "POST" });
+    window.open(r.url, "_blank");
+  } catch (e) {
+    alert("自動入力の準備に失敗しました: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "自動入力";
   }
 }
 $("btnSendLogSearch").addEventListener("click", refreshSendLog);

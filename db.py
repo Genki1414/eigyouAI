@@ -170,6 +170,18 @@ CREATE TABLE IF NOT EXISTS email_tracking_tokens (
   FOREIGN KEY(touch_id) REFERENCES touches(id)
 );
 
+-- 自動送信で失敗した企業への「自動入力(手動送信サポート)」機能(MIKOMERU同等)。
+-- list_builder.htmlの「自動入力」ボタン押下時、送信予定の値を1件だけここに置き、
+-- ブックマークレット(送信先企業のドメイン上で動く別オリジンのJS)が
+-- GET /api/tenant/autofill/pendingで取りに来て、目の前のフォームへ入力する。
+-- テナントごとに常に最新の1件だけを保持すれば足りる(一度に1社ずつ手作業する運用のため)。
+CREATE TABLE IF NOT EXISTS autofill_queue (
+  tenant_id INTEGER PRIMARY KEY,
+  url TEXT NOT NULL,
+  values_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 -- 監査ログ: 誰がいつ何を実行したか。デューデリで運用実態を示す材料になる。
 CREATE TABLE IF NOT EXISTS run_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

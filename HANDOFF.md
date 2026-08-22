@@ -823,6 +823,72 @@ Playwrightが動いたことを確認している(結果は7社中0件成功・5
 
 ---
 
+### T15. 実利用フィードバックで発覚したバグ2件の修正(2026-08-22)
+
+ユーザーが実際にlist_builder.htmlを操作して発見した2件の不具合を、それぞれ実ブラウザ
+(Playwright、`PLAYWRIGHT_CHROMIUM_PATH`経由)での再現・修正・再確認まで行った。
+
+- **「テンプレートを使うが選択出来ない」**: `list_builder.html`の接続処理(`btnConnect`)が
+  `await refreshLists(); await refreshTemplates(); ... connected = true;`の順で書かれていたが、
+  `refreshTemplates()`は先頭に`if (!connected) return;`というガードを持つ。つまり接続直後の
+  呼び出し時点では`connected`がまだ`false`のため、`refreshTemplates()`は何もせず抜け、
+  `lastTemplates`が永遠に空のままになり、送信画面の「テンプレートを使う」プルダウンに
+  何も表示されない不具合だった(他のページ用`refresh*()`関数は`goPage()`経由で
+  `connected=true`になった後にしか呼ばれないため、この問題は`refreshTemplates()`だけが
+  接続処理の中で特別扱いされていたことに起因する)。`connected = true;`を
+  `refreshLists()`の直後・`refreshTemplates()`の直前に移動して修正。ローカルにAPIサーバ・
+  静的サーバを実際に立て、Playwrightで接続→テンプレート登録→リスト作成→リスト詳細画面で
+  プルダウンの選択肢・件名/本文の自動入力を実際に確認した。
+
+- **「自動入力から該当ページへ遷移後、フォームへの入力が手入力になる」(ブックマークレット
+  →Chrome拡張機能への置き換え)**: 従来の自動入力アシストは、対象企業のフォームページ上で
+  `javascript:`リンク(ブックマークレット)を実行してAPIへの`fetch()`とDOM書き込みを両方
+  そのページのコンテキストで行っていた。ローカルの緩い(CSPなし)テストページでは正常に
+  動作することをこのセッション内で確認済みだったが、実際のユーザーが実企業サイトで試した
+  ところ「フォームが手入力のまま」になった。実サイトはCSPやmixed content制限を持つことが
+  珍しくなく、`javascript:`リンクからの`fetch()`やスクリプト実行自体がブロックされうる
+  ため、というのが最も妥当な原因(MIKOMERU自体もこの理由でブックマークレットではなく
+  Chrome拡張機能を使っていると推測される)。そこで自動入力アシストを
+  **Manifest V3のChrome拡張機能(`chrome_extension/`)** に置き換えた:
+  - `background.js`のservice workerが、APIへの`fetch()`(対象ページのCSPの影響を受けない
+    拡張機能側の特権コンテキストで実行される)と、`chrome.scripting.executeScript()`による
+    対象ページへのDOM書き込み専用関数`fillFieldsInPage()`の注入を分離して担当する
+    (フィールド判定ロジック自体は旧ブックマークレット・`form_navigator.py`の
+    `_FIELD_HINTS`/`_classify_field`と同じ内容を維持)。
+  - `manifest.json`の`"key"`フィールドに固定の公開鍵を埋め込むことで拡張機能IDを
+    `flfihmmppmplhnedajkbkiieffmmigle`に固定し(秘密鍵はリポジトリに含めていない。
+    セッションのスクラッチパッドにのみ保存)、`list_builder.html`側から
+    `chrome.runtime.sendMessage(拡張機能ID, {...})`で直接メッセージを送れるようにした
+    (`externally_connectable`で許可)。これにより、list_builder.htmlの「拡張機能と
+    連携する」ボタン1回で、APIサーバURL・APIキーが拡張機能の`chrome.storage.local`へ
+    渡される(手動でのコピペ設定も`options.html`から可能。フォールバック用)。
+  - 対象企業のフォームページでChromeツールバーの拡張機能アイコンを押すと、
+    `chrome.action.onClicked`がAPIへ問い合わせて`fillFieldsInPage()`を注入・実行する
+    (送信ボタンは押さない。以前のブックマークレットと挙動は同じ)。
+  - **このサンドボックスでの検証範囲の限界(重要)**: 拡張機能のフィールド埋め込みロジック
+    (`fillFieldsInPage()`)はjsdomで、`list_builder.html`側の連携ハンドシェイク
+    (`chrome.runtime.sendMessage`呼び出しと3パターンの応答分岐)もjsdomで、それぞれ
+    単体レベルでは実際に動かして確認した。`manifest.json`はJSONとして妥当で、
+    `background.js`/`options.js`は構文チェック済み。しかし、**拡張機能を実際に
+    Chromeへ読み込んで「ツールバーアイコンを押す→フィールドが埋まる」までを
+    通しで動かす検証はこのサンドボックスではできなかった**: 今回`PLAYWRIGHT_CHROMIUM_PATH`
+    として使っている`@sparticuz/chromium`(サーバーレス最適化ビルド)は拡張機能サブシステム
+    自体が同梱されておらず、権限を何も要求しない最小限の「Hello World」拡張機能ですら
+    読み込まれない(service workerが一切起動しない)ことをXvfb経由の非headless起動でも
+    確認した。これはコードの不具合ではなく、代替Chromiumバイナイの構成上の制約
+    (`cdn.playwright.dev`がブロックされているためこのバイナリを使っている、という
+    このセッション独自の事情)。**本番配布前に、通常のChrome(このサンドボックス外)で
+    実際に拡張機能を読み込み、「自動入力」ボタン→新規タブ→拡張機能アイコンをクリック、
+    までの通しの動作確認を必ず行うこと。**
+  - 配布方法は現状「未パッケージの拡張機能を`chrome://extensions`から手動で読み込む」
+    (デベロッパーモード)のみ。Chrome ウェブストアへの公開や、社内配布用の`.crx`署名パッケージ
+    化は未実装(将来必要になれば別途対応)。
+  - `list_builder.html`の「マニュアルDL」ページに拡張機能インストール手順のステップを
+    追加、「自動送信ログ」ページの説明文・UIもブックマークレット前提の文言から
+    拡張機能前提の文言に差し替えた。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

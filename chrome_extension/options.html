@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>AshiBase 自動入力アシスト — 設定</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 420px; margin: 24px; }
+  label { display: block; font-size: 12px; color: #555; margin-top: 12px; }
+  input { width: 100%; box-sizing: border-box; padding: 8px; margin-top: 4px; font-size: 14px; }
+  button { margin-top: 16px; padding: 8px 16px; font-size: 14px; cursor: pointer; }
+  .hint { font-size: 12px; color: #777; line-height: 1.6; }
+  .ok { color: #2a7; font-size: 13px; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h3>AshiBase 自動入力アシスト — 設定</h3>
+  <p class="hint">通常はlist_builder.htmlの「自動送信ログ」画面にある「拡張機能と連携する」ボタンから
+    自動で設定されます。うまく連携できない場合のみ、ここで手動設定してください
+    (list_builder.htmlの「接続設定」画面と同じ値を入力します)。</p>
+  <label>APIサーバのURL</label>
+  <input type="text" id="apiBase" placeholder="https://例: your-server:8787">
+  <label>APIキー</label>
+  <input type="text" id="apiKey" placeholder="tk_...">
+  <button id="btnSave">保存</button>
+  <div id="result" class="ok"></div>
+  <script src="options.js"></script>
+</body>
+</html>

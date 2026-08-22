@@ -27,7 +27,10 @@ CACもチャネル別成績も出せない = 売り物にならない。
   ── 送信先リスト(SaaSとして他社に販売する側。テナントごとのapi_keyで認証) ──
   POST /api/tenant/lists/preview  {"filters"} → 該当件数のプレビュー(保存しない)
   POST /api/tenant/lists          {"name","filters"} → フィルタ型リストを保存
-  POST /api/tenant/lists/csv      {"name","csv"} → 顧客持込CSVを取り込む
+  POST /api/tenant/lists/csv      {"name","csv","discover_urls"} → 顧客持込CSVを
+                           取り込む。discover_urls:trueで、CSVのURL列から実際に
+                           問い合わせページを探す(MIKOMERUの「CSV検索(URLで検索)」
+                           相当。1件ずつ実ブラウザで開くため上限あり)
   GET  /api/tenant/lists          自テナントのリスト一覧
   GET  /api/tenant/lists/<id>     リスト詳細(自テナントのものだけ。他社分は404)。
                            ?status=success|failed|skip|pending|replied|deal|wonで
@@ -337,7 +340,8 @@ def h_tenant_lists_csv(con, tenant_id, data):
         return 400, {"error": "nameとcsvは必須です"}
     if len(csv_text) > 10_000_000:  # 10MB上限(暴走・誤操作の被害抑制)
         return 400, {"error": "CSVが大きすぎます(上限10MB)"}
-    res = TL.create_from_csv(con, tenant_id, name, csv_text)
+    discover_urls = bool(data.get("discover_urls"))
+    res = TL.create_from_csv(con, tenant_id, name, csv_text, discover_urls=discover_urls)
     if "error" in res:
         return 400, res
     return 200, res
@@ -1276,6 +1280,41 @@ def self_test(port=8899):
     st, r = post_auth("/api/tenant/lists/csv", {"name": "B持込リスト", "csv": csv_text}, token=key_b)
     t("POST /api/tenant/lists/csv: CSV取込", st == 200 and r.get("new_companies", 0) >= 1)
     list_b_id = r.get("list_id")
+
+    print("\n── CSV検索(URLで検索。MIKOMERU同等) ──")
+    import form_navigator as _fn_mod
+    orig_discover = _fn_mod.discover_contact_url
+    _fn_mod.discover_contact_url = lambda url, **kw: (
+        {"status": "FOUND", "contact_url": url + "/contact", "error": None} if "good" in url
+        else {"status": "NO_FORM", "contact_url": None, "error": "form_not_found"})
+    try:
+        url_csv = ("会社名,都道府県,url\n"
+                   "URL検索良い会社,東京都,https://good-url-test.example.co.jp\n"
+                   "URL検索悪い会社,東京都,https://bad-url-test.example.co.jp\n")
+        st, r = post_auth("/api/tenant/lists/csv",
+                          {"name": "URL検索テスト", "csv": url_csv, "discover_urls": True}, token=key_a)
+        t("discover_urls:trueでurl_discoveryの内訳が返る",
+          st == 200 and r.get("url_discovery", {}).get("found") == 1
+          and r["url_discovery"]["no_form"] == 1)
+        url_list_id = r.get("list_id")
+        good_contact = con.execute("""SELECT contact_url FROM companies c
+            JOIN target_list_members m ON m.company_id=c.id
+            WHERE m.list_id=? AND c.name='URL検索良い会社'""", (url_list_id,)).fetchone()["contact_url"]
+        t("見つかった問い合わせページがcontact_urlに反映される",
+          good_contact == "https://good-url-test.example.co.jp/contact")
+
+        st, r = post_auth("/api/tenant/lists/csv", {"name": "URL検索未指定", "csv": url_csv}, token=key_a)
+        t("discover_urls未指定(既定false)ならurl_discoveryは返らない",
+          st == 200 and "url_discovery" not in r)
+
+        con.execute("DELETE FROM target_list_members WHERE list_id IN (?,?)",
+                    (url_list_id, r.get("list_id")))
+        con.execute("DELETE FROM target_lists WHERE id IN (?,?)", (url_list_id, r.get("list_id")))
+        con.execute("""DELETE FROM companies WHERE owner_tenant_id=? AND
+            name IN ('URL検索良い会社','URL検索悪い会社')""", (tid_a,))
+        con.commit()
+    finally:
+        _fn_mod.discover_contact_url = orig_discover
 
     st, r = get_auth("/api/tenant/lists", token=key_a)
     t("GET /api/tenant/lists は自テナント分のみ返す",

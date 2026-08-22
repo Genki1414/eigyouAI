@@ -761,6 +761,19 @@ Playwrightが動いたことを確認している(結果は7社中0件成功・5
   には一切影響しない(通知の失敗で本体の送信結果が変わることはない)。
   `api.py test`に宛先解決ロジックの検証を追加(担当者がいる場合/いない場合の
   フォールバックの両方)。
+- **CSV検索・URLで検索(MIKOMERUの「CSV検索(URLで検索)」相当)**:
+  `form_navigator.py`に`discover_contact_url()`を新設(`navigate_and_submit()`
+  からフォーム入力・送信部分を除いた、問い合わせページ発見のみを行う軽量版。
+  探索ロジック<`_resolve_contact_page()`>自体は完全に共有するため、実送信で
+  既に検証済みの発見精度がそのまま使える)。
+  `target_lists.create_from_csv()`に`discover_urls=True`オプションを追加し、
+  CSVのURL列を使って(まだ`contact_url`が未確定の企業のみ)実際にそのURLへ
+  アクセスして問い合わせページを探す。1件ずつ実ブラウザを起動する重い処理の
+  ため`MAX_URL_DISCOVERY_ROWS=30`件の保守的な上限を設け、超過分は
+  `skipped_over_limit`として結果に残す(黙って切り捨てない)。
+  `POST /api/tenant/lists/csv`に`discover_urls`パラメータを追加し、
+  list_builder.htmlの「CSV検索」画面にチェックボックスと結果内訳
+  (発見/フォームなし/到達不可/エラー/上限超過)の表示を追加した。
 
 ---
 

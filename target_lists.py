@@ -160,11 +160,24 @@ def _pick(row, cols):
     return None
 
 
-def create_from_csv(con, tenant_id, name, csv_text):
+# URLで実際にサイトを開いて問い合わせページを探す(discover_urls=True)のは
+# 1件ずつPlaywrightでブラウザを起動する重い処理のため、暴走・誤操作の被害を
+# 抑える保守的な上限を設ける(MAX_CSV_ROWSとは別枠)。
+MAX_URL_DISCOVERY_ROWS = 30
+
+
+def create_from_csv(con, tenant_id, name, csv_text, discover_urls=False):
     """顧客が持ち込む企業リストを取り込む。既存の共有マスタ or 自テナントの
     既存データと商号(正規化)+都道府県が一致すればそこに寄せ、無ければ
     owner_tenant_id=自分のtenant_idの新規companyとして追加する
-    (=他テナントには一切見えない非公開データになる)。"""
+    (=他テナントには一切見えない非公開データになる)。
+
+    discover_urls=True(MIKOMERUの「CSV検索(URLで検索)」相当)にすると、
+    CSVにURL列があり、かつcontact_url未確定の企業について、実際にそのURLへ
+    アクセスして問い合わせページを探す(form_navigator.discover_contact_url()。
+    フォームへの入力・送信は一切行わない、閲覧のみの探索)。1件ずつ実ブラウザを
+    起動する重い処理のためMAX_URL_DISCOVERY_ROWS件までしか行わない
+    (超過分はurl_discoveryのskipped_over_limitに件数を残す。黙って切り捨てない)。"""
     import db
 
     reader = csv.DictReader(io.StringIO(csv_text))
@@ -179,6 +192,7 @@ def create_from_csv(con, tenant_id, name, csv_text):
     list_id = cur.lastrowid
 
     matched = created = skipped = 0
+    url_candidates = []  # discover_urls=True時に後段でクロールする(company_id, url)
     for row in rows:
         raw_name = _pick(row, _NAME_COLS)
         if not raw_name:
@@ -186,6 +200,7 @@ def create_from_csv(con, tenant_id, name, csv_text):
             continue
         pref = _pick(row, _PREF_COLS)
         name_norm = db.normalize_name(raw_name)
+        row_url = _pick(row, _URL_COLS)
 
         # pref未入力の行は商号一致だけで照合する(prefがNULLなら`pref=? OR ? IS NULL`がTRUEになる)
         existing = con.execute("""SELECT id FROM companies
@@ -200,18 +215,56 @@ def create_from_csv(con, tenant_id, name, csv_text):
                 (name, name_norm, pref, phone, email, website_url, data_source, owner_tenant_id)
                 VALUES (?,?,?,?,?,?,?,?)""",
                 (raw_name, name_norm, pref, _pick(row, _PHONE_COLS), _pick(row, _EMAIL_COLS),
-                 _pick(row, _URL_COLS), "customer_upload", tenant_id))
+                 row_url, "customer_upload", tenant_id))
             cid = cur2.lastrowid
             created += 1
         con.execute("""INSERT OR IGNORE INTO target_list_members
             (list_id, company_id, send_status, created_at, updated_at)
             VALUES (?,?,'PENDING',?,?)""", (list_id, cid, now, now))
+        if row_url:
+            url_candidates.append((cid, row_url))
 
     total = matched + created
     con.execute("UPDATE target_lists SET company_count=? WHERE id=?", (total, list_id))
     con.commit()
-    return {"list_id": list_id, "count": total, "matched_existing": matched,
-            "new_companies": created, "skipped_rows": skipped}
+
+    result = {"list_id": list_id, "count": total, "matched_existing": matched,
+              "new_companies": created, "skipped_rows": skipped}
+    if discover_urls and url_candidates:
+        result["url_discovery"] = _discover_contact_urls(con, url_candidates)
+    return result
+
+
+def _discover_contact_urls(con, candidates):
+    """discover_urls=True時にcreate_from_csv()から呼ばれる。既にcontact_urlが
+    確定済みの企業は実クロールせずスキップする(無駄なアクセスをしない)。"""
+    import form_navigator as FN
+
+    to_crawl = []
+    for cid, url in candidates:
+        row = con.execute("SELECT contact_url FROM companies WHERE id=?", (cid,)).fetchone()
+        if row and not row["contact_url"]:
+            to_crawl.append((cid, url))
+
+    skipped_over_limit = max(0, len(to_crawl) - MAX_URL_DISCOVERY_ROWS)
+    to_crawl = to_crawl[:MAX_URL_DISCOVERY_ROWS]
+
+    found = no_form = unreachable = error = 0
+    for cid, url in to_crawl:
+        res = FN.discover_contact_url(url)
+        if res["status"] == "FOUND":
+            con.execute("UPDATE companies SET contact_url=?, has_contact_form=1 WHERE id=?",
+                        (res["contact_url"], cid))
+            found += 1
+        elif res["status"] == "NO_FORM":
+            no_form += 1
+        elif res["status"] == "UNREACHABLE":
+            unreachable += 1
+        else:
+            error += 1
+    con.commit()
+    return {"found": found, "no_form": no_form, "unreachable": unreachable,
+            "error": error, "skipped_over_limit": skipped_over_limit}
 
 
 def list_lists(con, tenant_id):

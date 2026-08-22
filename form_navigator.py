@@ -387,6 +387,50 @@ def _save_screenshot(page, screenshot_dir, run_id, suffix):
         return None
 
 
+def discover_contact_url(start_url, *, headless=True):
+    """指定URLから問い合わせページを探すだけの軽量版(入力・送信は一切行わない、
+    閲覧専用の探索)。MIKOMERUの「CSV検索(URLで検索)」相当の機能で使う——
+    顧客が持ち込んだ会社名+サイトURLのCSVから、問い合わせページURLを見つけて
+    companies.contact_urlを埋める用途(target_lists.create_from_csvから呼ばれる)。
+    navigate_and_submit()と探索ロジック(_resolve_contact_page)は完全に共有する。
+
+    戻り値: {"status": "FOUND"|"NO_FORM"|"UNREACHABLE"|"ERROR",
+             "contact_url": str|None, "error": str|None}
+      FOUND      : 問い合わせフォームが見つかった(contact_urlに実際のページURL)
+      NO_FORM    : ページには辿り着けたが、フォームらしきものが見つからなかった
+      UNREACHABLE: 開始URL自体に到達できなかった(ドメイン間違い・閉鎖等)
+      ERROR      : その他の予期しない失敗(Playwright起動失敗等)"""
+    from playwright.sync_api import sync_playwright
+
+    result = {"status": "ERROR", "contact_url": None, "error": None}
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless)
+            try:
+                page = browser.new_page()
+                try:
+                    page.goto(start_url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                except Exception as e:  # noqa: BLE001
+                    result["status"] = "UNREACHABLE"
+                    result["error"] = f"{type(e).__name__}: {e}"
+                    return result
+
+                contact_url, discover_err = _resolve_contact_page(page, start_url)
+                if _has_fillable_form(page):
+                    result["status"] = "FOUND"
+                    result["contact_url"] = contact_url
+                else:
+                    result["status"] = "NO_FORM"
+                    result["contact_url"] = contact_url
+                    result["error"] = discover_err
+                return result
+            finally:
+                browser.close()
+    except Exception as e:  # noqa: BLE001
+        result["error"] = f"{type(e).__name__}: {e}"
+        return result
+
+
 def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None):
     """フォームへの一連の操作を行い、NavigationResultを返す。
     values: {"company","name","email","phone","message","subject", ...} の埋める値の辞書。

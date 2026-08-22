@@ -542,6 +542,11 @@ tr.clickable:hover{background:var(--blue-soft)}
               <input type="file" id="cFile" accept=".csv,text/csv">
             </div>
           </div>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
+            <input type="checkbox" id="cDiscoverUrls" style="width:auto">
+            <span>URL列から問い合わせページを自動検出する(CSVに「URL」列が必要。実際にサイトへ
+              アクセスするため時間がかかります。最大30件まで)</span>
+          </label>
           <div class="btnrow">
             <button id="btnUploadCsv" disabled>アップロード</button>
           </div>
@@ -1292,13 +1297,23 @@ $("btnSaveFilter").addEventListener("click", async () => {
 $("btnUploadCsv").addEventListener("click", async () => {
   const name = $("cName").value.trim();
   const file = $("cFile").files[0];
+  const discoverUrls = $("cDiscoverUrls").checked;
   const el = $("csvResult");
   if (!name || !file) { el.innerHTML = `<div class="result err">リスト名とCSVファイルの両方を指定してください</div>`; return; }
+  el.innerHTML = `<div class="result">${discoverUrls ? "取込・問い合わせページ探索中…(時間がかかる場合があります)" : "取込中…"}</div>`;
   try {
     const text = await file.text();
-    const r = await call("/api/tenant/lists/csv", { method: "POST", body: JSON.stringify({ name, csv: text }) });
-    el.innerHTML = `<div class="result ok">取込完了: 合計${r.count}社(既存と一致${r.matched_existing} / 新規${r.new_companies} / スキップ${r.skipped_rows})</div>`;
-    $("cName").value = ""; $("cFile").value = "";
+    const r = await call("/api/tenant/lists/csv",
+      { method: "POST", body: JSON.stringify({ name, csv: text, discover_urls: discoverUrls }) });
+    let msg = `取込完了: 合計${r.count}社(既存と一致${r.matched_existing} / 新規${r.new_companies} / スキップ${r.skipped_rows})`;
+    if (r.url_discovery) {
+      const d = r.url_discovery;
+      msg += `<br>問い合わせページ探索: 発見${d.found} / フォームなし${d.no_form} / `
+        + `到達不可${d.unreachable} / エラー${d.error}`
+        + `${d.skipped_over_limit ? ` / 上限超過で未実施${d.skipped_over_limit}` : ""}`;
+    }
+    el.innerHTML = `<div class="result ok">${msg}</div>`;
+    $("cName").value = ""; $("cFile").value = ""; $("cDiscoverUrls").checked = false;
     await refreshLists();
     refreshHomeStats();
   } catch (e) {

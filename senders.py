@@ -671,6 +671,10 @@ if __name__ == "__main__":
             con.execute("DELETE FROM campaigns WHERE id=?", (dr_cid,))
             con.execute("DELETE FROM companies WHERE id=999998")
             con.execute("DELETE FROM idempotency WHERE key LIKE '%:999998:1'")
+            # form_send_logも消しておく(直後の「フォーム送信ペーシング上限」テストは
+            # 直近1時間・24時間の件数を実際にDBから数えるため、消さずに残すと
+            # 繰り返しテスト実行した時に上限へ引っかかって誤って失敗する)
+            con.execute("DELETE FROM form_send_log WHERE company_id=999998")
             con.commit()
 
         print("\n── 送信元の姓・名・フリガナ・郵便番号(未設定/設定済みの両方) ──")
@@ -741,6 +745,7 @@ if __name__ == "__main__":
         finally:
             db.set_global_kill_switch(con, orig_ks2, reason=orig_ks2_reason, updated_by="test-restore")
             con.execute("DELETE FROM companies WHERE id=999997")
+            con.execute("DELETE FROM form_send_log WHERE company_id=999997")
             for tname in ("test-sender-default", "test-sender-custom"):
                 for row in con.execute("SELECT id FROM tenants WHERE name=?", (tname,)).fetchall():
                     con.execute("DELETE FROM offers WHERE tenant_id=?", (row["id"],))

@@ -727,6 +727,27 @@ Playwrightが動いたことを確認している(結果は7社中0件成功・5
     一因だった可能性がある)。
   - `senders.py test`に検証を追加(未設定/設定済みの両パターンで
     `FN.navigate_and_submit`へ渡る`values`の中身を直接確認)。
+- **予約送信(MIKOMERUの「送信開始日時を指定する」相当)**: `scheduled_sends`
+  テーブルを新設。`POST /api/tenant/lists/<id>/send`に`scheduled_at`
+  (未来のISO日時)を追加すると、即時実行せず予約として登録するだけになる。
+  実行自体は新しい送信経路を作らず、既存の`target_lists.send_list()`へ
+  そのまま委譲する(`scheduled_send_cli.py run-due`をcronから5分おきに実行し、
+  期限到来分をまとめて処理する。`deploy/crontab`に追加、専用のflockで多重
+  起動を防止)。can_contact()・Kill Switch・冪等性は変更なしでそのまま効く。
+  `GET /api/tenant/scheduled-sends`(一覧)・`POST /api/tenant/scheduled-sends/cancel`
+  (PENDINGのみキャンセル可)も追加。list_builder.htmlのリスト詳細画面に
+  トグル+日時入力欄と、予約一覧(状態・キャンセルボタン)を追加した。
+- **テストスイート自体の再実行耐性を修正(api.py self_test())**: `api.py test`
+  を連続実行すると2回目以降失敗する既存の不具合を2件発見・修正した(今回の
+  作業で何度も繰り返し実行して初めて顕在化したもので、機能側のバグではない)。
+  (1) 冒頭で使う接触(`touches`の1件)を`paid=1`にしたまま後片付けしていな
+  かったため、2回目の実行で「テスト対象の接触がありません」と落ちていた
+  →終了時に`paid=0`等へ戻すよう追加。
+  (2) `_once(con, f"activate:{tid}")`・`_once(con, f"click:{touch_id}")`が
+  使う冪等キーが既存の後片付け(`idempotency WHERE key LIKE '%test-api%'`)の
+  対象に入っておらず、同じ`tid`を掴んだ2回目の実行で「activatedが立つ」が
+  失敗していた→該当キーも明示的に削除するよう追加。`python3 api.py test`を
+  3回連続実行して158/158が安定することを確認済み。
 
 ---
 

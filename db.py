@@ -4,6 +4,7 @@ db.py — スキーマ / マイグレーション / 接触ガード
 特に重要なのが can_contact(): 配信停止・接触上限・間隔を一箇所で判定する関門。
 どのスクリプトからも必ずここを通す設計にして、「うっかり送ってしまった」を構造的に防ぐ。
 """
+import json
 import re
 import sqlite3
 import time
@@ -31,6 +32,7 @@ CREATE INDEX IF NOT EXISTS idx_staff_tenant ON staff(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tlm_status ON target_list_members(send_status);
 CREATE INDEX IF NOT EXISTS idx_formlog_list ON form_send_log(list_id);
 CREATE INDEX IF NOT EXISTS idx_emailtok_touch ON email_tracking_tokens(touch_id);
+CREATE INDEX IF NOT EXISTS idx_scheduled_sends_due ON scheduled_sends(status, scheduled_at);
 """
 
 SCHEMA = """
@@ -180,6 +182,25 @@ CREATE TABLE IF NOT EXISTS autofill_queue (
   url TEXT NOT NULL,
   values_json TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+
+-- 予約送信(MIKOMERU同等の「送信開始日時を指定する」機能)。指定日時になるまでは
+-- 何も送らない。実行自体は既存のtarget_lists.send_list()にそのまま委譲するため、
+-- can_contact()・Kill Switch・冪等性等のガードは変更なしでそのまま効く
+-- (scheduled_send_cli.pyがcronから定期的にPENDINGかつ期限到来分を拾って
+-- send_list()を呼ぶだけで、新しい送信経路を作らない)。
+CREATE TABLE IF NOT EXISTS scheduled_sends (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  list_id INTEGER NOT NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  dry_run INTEGER NOT NULL DEFAULT 0,
+  scheduled_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING / DONE / FAILED / CANCELLED
+  result_json TEXT,
+  created_at TEXT NOT NULL,
+  executed_at TEXT
 );
 
 -- 監査ログ: 誰がいつ何を実行したか。デューデリで運用実態を示す材料になる。
@@ -589,6 +610,54 @@ def activate_sender_template(con, tenant_id, template_id):
          row["sender_first_name_kana"], row["sender_postal_code"], tenant_id))
     con.commit()
     return True
+
+
+# ── 予約送信(MIKOMERU同等の「送信開始日時を指定する」機能) ──
+def create_scheduled_send(con, tenant_id, list_id, subject, body, dry_run, scheduled_at):
+    cur = con.execute("""INSERT INTO scheduled_sends
+        (tenant_id, list_id, subject, body, dry_run, scheduled_at, status, created_at)
+        VALUES (?,?,?,?,?,?,'PENDING',?)""",
+        (tenant_id, list_id, subject, body, 1 if dry_run else 0, scheduled_at,
+         datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    return cur.lastrowid
+
+
+def list_scheduled_sends(con, tenant_id, list_id=None):
+    q = """SELECT s.id, s.list_id, tl.name list_name, s.subject, s.dry_run, s.scheduled_at,
+            s.status, s.created_at, s.executed_at
+        FROM scheduled_sends s LEFT JOIN target_lists tl ON tl.id = s.list_id
+        WHERE s.tenant_id=?"""
+    params = [tenant_id]
+    if list_id is not None:
+        q += " AND s.list_id=?"
+        params.append(list_id)
+    q += " ORDER BY s.scheduled_at"
+    return [dict(r) for r in con.execute(q, params).fetchall()]
+
+
+def cancel_scheduled_send(con, tenant_id, scheduled_id):
+    """PENDINGのものだけキャンセルできる(既に実行済み・失敗済みは今さら止められない)。"""
+    cur = con.execute("""UPDATE scheduled_sends SET status='CANCELLED'
+        WHERE id=? AND tenant_id=? AND status='PENDING'""", (scheduled_id, tenant_id))
+    con.commit()
+    return cur.rowcount > 0
+
+
+def due_scheduled_sends(con, now_iso):
+    """期限が来たPENDINGを取得する。scheduled_send_cli.pyがcronから呼ぶ。"""
+    rows = con.execute("""SELECT id, tenant_id, list_id, subject, body, dry_run
+        FROM scheduled_sends WHERE status='PENDING' AND scheduled_at<=?
+        ORDER BY scheduled_at""", (now_iso,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def finish_scheduled_send(con, scheduled_id, status, result=None):
+    con.execute("""UPDATE scheduled_sends SET status=?, result_json=?, executed_at=?
+        WHERE id=?""",
+        (status, json.dumps(result, ensure_ascii=False) if result is not None else None,
+         datetime.now().isoformat(timespec="seconds"), scheduled_id))
+    con.commit()
 
 
 # ── お知らせ(全テナント共通。投稿はannouncements_cli.py) ──

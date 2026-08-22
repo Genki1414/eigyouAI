@@ -36,10 +36,15 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/tenant/lists/<id>/outcome  {"company_id","field":"replied"|"deal"|"won",
                            "value","memo"} → 返信・商談化・受注を手動記録(β版。
                            メール自動取得等はしない)
-  POST /api/tenant/lists/<id>/send  {"subject","body","dry_run"} → リストへフォーム
-                           自動送信。dry_run既定true(=実サイトへは送らない)。
-                           can_contact()・冪等性・ペーシング上限はsend_campaign()
-                           経由でそのまま適用される(HANDOFF.mdの原則を厳守)
+  POST /api/tenant/lists/<id>/send  {"subject","body","dry_run","scheduled_at"} →
+                           リストへフォーム自動送信。dry_run既定true(=実サイトへは
+                           送らない)。can_contact()・冪等性・ペーシング上限は
+                           send_campaign()経由でそのまま適用される(HANDOFF.mdの
+                           原則を厳守)。scheduled_at(未来のISO日時)を指定すると
+                           即時実行せずscheduled_sendsへ予約登録するだけになる
+  GET  /api/tenant/scheduled-sends?list_id=  予約送信の一覧(自テナント分のみ)
+  POST /api/tenant/scheduled-sends/cancel  {"scheduled_id"} → PENDINGの予約を
+                           キャンセル(実行済み・キャンセル済みは404)
   GET  /api/tenant/send-log       自テナントのフォーム自動送信履歴(form_send_log)。
                            ?company_id=で1社分の履歴だけに絞り込める
   GET  /api/tenant/send-log/{id}/screenshot?kind=before|after
@@ -668,7 +673,11 @@ def h_tenant_dashboard(con, tenant_id):
 def h_tenant_list_send(con, tenant_id, list_id, data):
     """保存済みリストから実際にフォーム自動送信キャンペーンを走らせる。
     dry_runは既定でTrue(=実サイトへは何も送らない)。実送信するには
-    明示的に dry_run:false を指定する必要がある(取り消せない操作のため)。"""
+    明示的に dry_run:false を指定する必要がある(取り消せない操作のため)。
+    scheduled_at(ISO日時。未来のみ)を指定すると、即時実行せずscheduled_sendsへ
+    予約として登録するだけになる(MIKOMERUの「送信開始日時を指定する」相当。
+    実際の実行はscheduled_send_cli.pyがcronから拾ってTL.send_list()をそのまま
+    呼ぶため、can_contact()・Kill Switch・冪等性等の既存ガードはそのまま効く)。"""
     subject = (data.get("subject") or "").strip()
     body = (data.get("body") or "").strip()
     if not subject or not body:
@@ -676,12 +685,46 @@ def h_tenant_list_send(con, tenant_id, list_id, data):
     dry_run = data.get("dry_run", True)
     if not isinstance(dry_run, bool):
         dry_run = True
+
+    scheduled_at = (data.get("scheduled_at") or "").strip()
+    if scheduled_at:
+        try:
+            when = datetime.fromisoformat(scheduled_at)
+        except ValueError:
+            return 400, {"error": "scheduled_atはISO日時形式で指定してください"
+                                   "(例: 2026-08-23T09:00:00)"}
+        if when <= datetime.now():
+            return 400, {"error": "scheduled_atは未来の日時を指定してください"}
+        lst = con.execute("SELECT id FROM target_lists WHERE id=? AND tenant_id=?",
+                           (list_id, tenant_id)).fetchone()
+        if not lst:
+            return 404, {"error": "リストが見つかりません"}
+        sid = db.create_scheduled_send(con, tenant_id, list_id, subject, body, dry_run,
+                                        when.isoformat(timespec="seconds"))
+        return 200, {"scheduled": True, "scheduled_id": sid,
+                     "scheduled_at": when.isoformat(timespec="seconds")}
+
     res = TL.send_list(con, tenant_id, list_id, subject, body, dry_run=dry_run)
     if res is None:
         return 404, {"error": "リストが見つかりません"}
     if "error" in res:
         return 400, res
     return 200, res
+
+
+def h_tenant_scheduled_sends_list(con, tenant_id, qs):
+    list_id = qs.get("list_id", [None])[0]
+    return 200, {"scheduled": db.list_scheduled_sends(
+        con, tenant_id, list_id=int(list_id) if list_id and list_id.isdigit() else None)}
+
+
+def h_tenant_scheduled_send_cancel(con, tenant_id, data):
+    sid = data.get("scheduled_id")
+    if not isinstance(sid, int):
+        return 400, {"error": "scheduled_idは必須です"}
+    if not db.cancel_scheduled_send(con, tenant_id, sid):
+        return 404, {"error": "予約が見つからないか、既に実行済み/キャンセル済みです"}
+    return 200, {"ok": True}
 
 
 def verify_ops_bearer(auth_header: str) -> bool:
@@ -829,6 +872,19 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
+        if path == "/api/tenant/scheduled-sends/cancel":
+            con = self._con()
+            try:
+                tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
+                if not tenant:
+                    return self._json(401, {"error": "unauthorized"})
+                st, res = h_tenant_scheduled_send_cancel(con, tenant["id"], data)
+                return self._json(st, res)
+            except Exception as e:  # noqa: BLE001
+                return self._json(500, {"error": str(e)[:200]})
+            finally:
+                con.close()
+
         if path in ("/api/tenant/templates", "/api/tenant/templates/delete"):
             con = self._con()
             try:
@@ -952,6 +1008,7 @@ class Handler(BaseHTTPRequestHandler):
         if (u.path == "/api/tenant/lists" or u.path.startswith("/api/tenant/lists/")
                 or u.path == "/api/tenant/send-log"
                 or u.path == "/api/tenant/autofill/pending"
+                or u.path == "/api/tenant/scheduled-sends"
                 or u.path == "/api/tenant/exclusions"
                 or u.path == "/api/tenant/companies/search"
                 or u.path == "/api/tenant/templates"
@@ -970,6 +1027,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_send_log(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/autofill/pending":
                     st, res = h_tenant_autofill_pending(con, tenant["id"])
+                elif u.path == "/api/tenant/scheduled-sends":
+                    st, res = h_tenant_scheduled_sends_list(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/exclusions":
                     st, res = h_tenant_exclusions_list(con, tenant["id"])
                 elif u.path == "/api/tenant/companies/search":
@@ -1326,6 +1385,58 @@ def self_test(port=8899):
     st, r = post_auth(f"/api/tenant/lists/{list_b_id}/send",
                       {"subject": "x", "body": "y"}, token=key_a)
     t("他テナントのリストへは送信できない(404)", st == 404)
+
+    print("\n── 予約送信(MIKOMERUの「送信開始日時を指定する」相当) ──")
+    past_at = (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds")
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "予約テスト", "body": "本文", "scheduled_at": past_at}, token=key_a)
+    t("過去の日時は400", st == 400)
+    r_bad_fmt = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                          {"subject": "x", "body": "y", "scheduled_at": "not-a-date"}, token=key_a)
+    t("不正な日時形式は400", r_bad_fmt[0] == 400)
+
+    future_at = (datetime.now() + timedelta(hours=2)).isoformat(timespec="seconds")
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "予約テスト", "body": "本文", "scheduled_at": future_at}, token=key_a)
+    t("未来の日時なら予約登録され、即時送信はされない",
+      st == 200 and r.get("scheduled") is True and isinstance(r.get("scheduled_id"), int))
+    scheduled_id = r.get("scheduled_id")
+
+    st, r = post_auth(f"/api/tenant/lists/{list_b_id}/send",
+                      {"subject": "x", "body": "y", "scheduled_at": future_at}, token=key_a)
+    t("他テナントのリストへは予約もできない(404)", st == 404)
+
+    st, r = get_auth("/api/tenant/scheduled-sends")
+    t("認証ヘッダなしのGET /api/tenant/scheduled-sendsは401", st == 401)
+    st, r = get_auth("/api/tenant/scheduled-sends", token=key_a)
+    t("予約一覧に登録した予約が出る",
+      st == 200 and any(s["id"] == scheduled_id and s["status"] == "PENDING"
+                         for s in r.get("scheduled", [])))
+    st, r = get_auth("/api/tenant/scheduled-sends", token=key_b)
+    t("他テナントの予約は見えない(テナント分離)",
+      st == 200 and all(s["id"] != scheduled_id for s in r.get("scheduled", [])))
+
+    st, r = post_auth("/api/tenant/scheduled-sends/cancel", {"scheduled_id": scheduled_id}, token=key_b)
+    t("他テナントは自分の予約としてキャンセルできない(404)", st == 404)
+    st, r = post_auth("/api/tenant/scheduled-sends/cancel", {"scheduled_id": scheduled_id}, token=key_a)
+    t("キャンセルできる", st == 200 and r.get("ok"))
+    st, r = post_auth("/api/tenant/scheduled-sends/cancel", {"scheduled_id": scheduled_id}, token=key_a)
+    t("既にキャンセル済みの予約を再キャンセルしようとすると404", st == 404)
+
+    # due_scheduled_sends()の期限判定を直接確認(cron側の抽出ロジック)
+    due_at = (datetime.now() + timedelta(seconds=1)).isoformat(timespec="seconds")
+    sid2 = db.create_scheduled_send(con, tid_a, list_a_id, "件名", "本文", True, due_at)
+    t("scheduled_atがまだ先ならdue_scheduled_sends()には出てこない",
+      all(s["id"] != sid2 for s in db.due_scheduled_sends(con, datetime.now().isoformat(timespec="seconds"))))
+    t("scheduled_atを過ぎるとdue_scheduled_sends()に出てくる",
+      any(s["id"] == sid2 for s in db.due_scheduled_sends(
+          con, (datetime.now() + timedelta(seconds=2)).isoformat(timespec="seconds"))))
+    db.finish_scheduled_send(con, sid2, "DONE", {"sent": 1})
+    t("finish_scheduled_send()後はdue_scheduled_sends()に出てこない(PENDINGでなくなるため)",
+      all(s["id"] != sid2 for s in db.due_scheduled_sends(
+          con, (datetime.now() + timedelta(seconds=2)).isoformat(timespec="seconds"))))
+    con.execute("DELETE FROM scheduled_sends WHERE tenant_id IN (?,?)", (tid_a, tid_b))
+    con.commit()
 
     print("\n── リスト送信の同時リクエストでの競合(campaign_idの二重生成防止) ──")
     # 同じリストへ2つの同時送信リクエスト(ボタン連打・2人の担当者)が来ても、
@@ -1819,6 +1930,15 @@ def self_test(port=8899):
     # 後片付け
     con.execute("DELETE FROM suppression WHERE company_id=?", (cid,))
     con.execute("DELETE FROM idempotency WHERE key LIKE '%test-api%'")
+    # activate:{tid}・click:{tid}は"test-api"を含まないため上のLIKEでは消えない。
+    # 消し忘れると、次回このテストを再実行した時に同じtidを掴んだ場合
+    # _once()が「既に実行済み」と判定してactivated等が立たなくなる
+    con.execute("DELETE FROM idempotency WHERE key IN (?, ?)", (f"activate:{tid}", f"click:{tid}"))
+    # このテストが冒頭で使った接触をpaid=0に戻す(課金webhookのテストでpaid=1に
+    # してしまうため、戻さないと次回このテストを走らせた時に「テスト対象の接触が
+    # ありません」で再度run.py all --demoが必要になってしまう)
+    con.execute("""UPDATE touches SET responded=0, signed_up=0, activated=0, paid=0,
+                   mrr_yen=0 WHERE id=?""", (tid,))
     con.commit()
     print(f"\n  成功 {sum(ok)} / {len(ok)}")
     return all(ok)

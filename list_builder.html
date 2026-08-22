@@ -1438,9 +1438,18 @@ async function showDetail(id) {
           <input type="checkbox" id="sendDryRun" checked style="width:auto">
           <span id="sendDryRunLabel">ドライラン(実際には送信しません)</span>
         </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
+          <input type="checkbox" id="sendScheduleToggle" style="width:auto">
+          <span>送信開始日時を指定する(OFFの場合は送信後すぐに処理が開始します)</span>
+        </label>
+        <div id="sendScheduleWrap" style="display:none;margin-top:8px;max-width:280px">
+          <input type="datetime-local" id="sendScheduleAt">
+        </div>
         <div class="btnrow"><button id="btnSend">送信する</button></div>
         <div id="sendResult"></div>
       </div>
+      <h2>予約済みの送信 <span>SCHEDULED</span></h2>
+      <div id="scheduledSendsWrap"><div class="empty">読み込み中...</div></div>
       <h2>リスト詳細 <span>#${id}</span></h2>
       <div class="chips" id="memberFilter" style="margin-bottom:10px">
         ${Object.entries(MEMBER_FILTERS).map(([key, label]) =>
@@ -1451,6 +1460,11 @@ async function showDetail(id) {
       <div id="memberHistoryWrap"></div>`;
     await renderMemberTable(id, "");
     bindMemberFilter(id);
+    await refreshScheduledSends(id);
+
+    $("sendScheduleToggle").addEventListener("change", () => {
+      $("sendScheduleWrap").style.display = $("sendScheduleToggle").checked ? "block" : "none";
+    });
 
     $("sendTemplate").addEventListener("change", () => {
       const tmpl = lastTemplates.find(x => String(x.id) === $("sendTemplate").value);
@@ -1477,11 +1491,31 @@ async function showDetail(id) {
       const dryRun = dryRunBox.checked;
       const rEl = $("sendResult");
       if (!subject || !body) { rEl.innerHTML = `<div class="result err">件名と本文を入力してください</div>`; return; }
-      if (!dryRun && !confirm("本番送信します。実際の企業サイトへ送信され、取り消せません。よろしいですか?")) return;
-      rEl.innerHTML = `<div class="result">送信中…</div>`;
+
+      const scheduling = $("sendScheduleToggle").checked;
+      let scheduledAt = null;
+      if (scheduling) {
+        const raw = $("sendScheduleAt").value;
+        if (!raw) { rEl.innerHTML = `<div class="result err">送信開始日時を指定してください</div>`; return; }
+        if (new Date(raw) <= new Date()) {
+          rEl.innerHTML = `<div class="result err">送信開始日時は未来の日時を指定してください</div>`;
+          return;
+        }
+        scheduledAt = raw;   // datetime-localはローカルタイムゾーンのISO風文字列(秒無し)
+      }
+      if (!scheduling && !dryRun
+          && !confirm("本番送信します。実際の企業サイトへ送信され、取り消せません。よろしいですか?")) return;
+
+      rEl.innerHTML = `<div class="result">${scheduling ? "予約中…" : "送信中…"}</div>`;
       try {
-        const sr = await call(`/api/tenant/lists/${id}/send`,
-          { method: "POST", body: JSON.stringify({ subject, body, dry_run: dryRun }) });
+        const payload = { subject, body, dry_run: dryRun };
+        if (scheduledAt) payload.scheduled_at = scheduledAt;
+        const sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
+        if (sr.scheduled) {
+          rEl.innerHTML = `<div class="result ok">予約しました(${sr.scheduled_at}に開始)</div>`;
+          await refreshScheduledSends(id);
+          return;
+        }
         rEl.innerHTML = `<div class="result ok">${dryRun ? "[ドライラン] " : ""}` +
           `対象${sr.target_count.toLocaleString()}社 / ` +
           `送信${sr.stats.sent} 失敗${sr.stats.failed} ガードで中止${sr.stats.blocked} 配信停止${sr.stats.suppressed}` +
@@ -1491,6 +1525,37 @@ async function showDetail(id) {
       } catch (e) {
         rEl.innerHTML = `<div class="result err">${e.message}</div>`;
       }
+    });
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+const SCHEDULED_STATUS_LABELS = { PENDING: "予約中", DONE: "完了", FAILED: "失敗", CANCELLED: "キャンセル済み" };
+
+async function refreshScheduledSends(listId) {
+  const el = $("scheduledSendsWrap");
+  if (!el) return;
+  el.innerHTML = `<div class="empty">読み込み中...</div>`;
+  try {
+    const r = await call(`/api/tenant/scheduled-sends?list_id=${listId}`);
+    if (!r.scheduled.length) { el.innerHTML = `<div class="empty">予約はありません</div>`; return; }
+    el.innerHTML = `<table><tr><th>開始予定</th><th>件名</th><th>モード</th><th>状態</th><th></th></tr>` +
+      r.scheduled.map(s => `<tr><td style="font-family:var(--mono);font-size:11px">${s.scheduled_at}</td>
+        <td>${s.subject}</td><td>${s.dry_run ? "ドライラン" : "本番送信"}</td>
+        <td><span class="pill${s.status === "DONE" ? " ok" : (s.status === "FAILED" ? " err" : "")}">${SCHEDULED_STATUS_LABELS[s.status] || s.status}</span></td>
+        <td>${s.status === "PENDING" ? `<button class="ghost cancelScheduledBtn" data-id="${s.id}">キャンセル</button>` : "—"}</td></tr>`).join("") +
+      `</table>`;
+    el.querySelectorAll(".cancelScheduledBtn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        try {
+          await call("/api/tenant/scheduled-sends/cancel",
+            { method: "POST", body: JSON.stringify({ scheduled_id: Number(btn.dataset.id) }) });
+          await refreshScheduledSends(listId);
+        } catch (e) {
+          alert("キャンセルに失敗しました: " + e.message);
+        }
+      });
     });
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;

@@ -63,6 +63,7 @@ IM.md・console.html に出ている数字を、そのまま買い手や顧客�
 | `announcements_cli.py` | お知らせ(全テナント共通告知)の投稿・管理 | 運用で使う |
 | `kill_switch_cli.py` | 異常検知時に実送信を即時停止/解除(全体・テナント別) | 運用で使う |
 | `cost_report_cli.py` | 1送信あたりの原価・テナント別粗利の集計(管理者専用) | 運用で使う |
+| `scheduled_send_cli.py` | 予約送信(MIKOMERU同等)の実行係。5分おきにcronから起動 | 運用で使う |
 | `run.py` | オーケストレーター（実行順序を強制） | 触らない |
 | `generate_sample.py` | デモ用サンプル3000社生成 | 本番では不要 |
 

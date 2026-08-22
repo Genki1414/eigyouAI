@@ -21,6 +21,14 @@ TZ=Asia/Tokyo
 # フォローアップ: 平日10時。D+14/D+35の対象を生成して送る
 0 10 * * 1-5 cd /app && python3 followup.py --campaign 1 --step 2 >> /app/out/cron.log 2>&1
 
+# 予約送信: list_builder.htmlで「送信開始日時を指定する」を使った分を5分おきに
+# 拾って実行する(MIKOMERU同等)。can_contact()・Kill Switch・冪等性等の既存ガードは
+# target_lists.send_list()経由でそのまま効く。flock-nで多重起動を防ぐ
+# (通常の送信cron<senders.py>とは別ロックにしてある。予約送信はテナントが
+# 明示的に指定した日時に確実に動く必要があり、他ジョブの遅延に引きずられる
+# べきではないため)
+*/5 * * * * cd /app && flock -n /tmp/eigyouai_scheduled_send.lock python3 scheduled_send_cli.py run-due >> /app/out/cron.log 2>&1
+
 # 学習: 週次。昇格ゲートを通ればV2に切り替わる
 0 3 * * 1 cd /app && python3 learn.py >> /app/out/cron.log 2>&1
 

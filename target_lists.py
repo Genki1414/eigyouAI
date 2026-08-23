@@ -308,7 +308,7 @@ def get_list(con, tenant_id, list_id, limit=200, offset=0, status_filter=None):
     return {"list": dict(lst), "members": [dict(r) for r in members]}
 
 
-def send_list(con, tenant_id, list_id, subject, body, dry_run=True):
+def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks=False):
     """保存済みリストからフォーム自動送信キャンペーンを作り、既存のsenders.send_campaign()
     にそのまま委譲する。can_contact()・冪等性・FormSenderのペーシング上限はすべて
     send_campaign()側の仕組みがそのまま効く(ここで独自の送信経路は作らない)。
@@ -395,7 +395,8 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True):
             [(now2, now2, list_id, m["id"]) for m in members if m["id"] in pending_ids])
     con.commit()
 
-    stats = senders.send_campaign(con, campaign_id, step=1, dry_run=dry_run)
+    stats = senders.send_campaign(con, campaign_id, step=1, dry_run=dry_run,
+                                   track_clicks=track_clicks)
     if not dry_run:
         db.sync_target_list_member_status(con, list_id, campaign_id, step=1)
         _notify_completion(con, tenant_id, lst["name"], len(members), stats)

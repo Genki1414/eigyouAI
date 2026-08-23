@@ -10,6 +10,9 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/optout    配信停止             → suppression に登録 + 未送信分を取消
   GET  /api/optout    配信停止（ワンクリック）→ メール footer のリンクから
   GET  /t/<touch_id>  開封・クリック計測    → responded=1 してLPへリダイレクト
+  GET  /track/click/<token>  MIKOMERUの「URLアクセスの記録」相当。テナントの送信文章
+                           中のURLがクリックされたことを記録し、本来のURLへ302
+                           リダイレクトする(senders.rewrite_tracked_links()参照)
   GET  /health        死活監視
 
   ── Stock Factory連携(社長のRuntimeから叩く運用API。Authorization: Bearer必須) ──
@@ -293,6 +296,15 @@ def h_click(con, touch_id):
         con.commit()
         cancel_pending_followups(con, r["company_id"])
     return f"{LP_URL}?t={touch_id}"
+
+
+def h_track_click(con, token):
+    """MIKOMERUの「URLアクセスの記録」相当。senders.rewrite_tracked_links()が
+    本文に埋め込んだトラッキングリンクのクリックを記録し、本来のURLを返す
+    (呼び出し側で302リダイレクトする)。h_click()/LP_URLとは別物(こちらは
+    AshiBase自身の成長エンジンではなく、各テナントが送る文章中の任意のURLを
+    対象にする)。トークンが見つからなければNoneを返す。"""
+    return db.resolve_click_token(con, token)
 
 
 def verify_signature(raw: bytes, signature: str) -> bool:
@@ -771,6 +783,7 @@ def h_tenant_list_send(con, tenant_id, list_id, data):
     dry_run = data.get("dry_run", True)
     if not isinstance(dry_run, bool):
         dry_run = True
+    track_clicks = bool(data.get("track_clicks"))
 
     scheduled_at = (data.get("scheduled_at") or "").strip()
     if scheduled_at:
@@ -786,11 +799,13 @@ def h_tenant_list_send(con, tenant_id, list_id, data):
         if not lst:
             return 404, {"error": "リストが見つかりません"}
         sid = db.create_scheduled_send(con, tenant_id, list_id, subject, body, dry_run,
-                                        when.isoformat(timespec="seconds"))
+                                        when.isoformat(timespec="seconds"),
+                                        track_clicks=track_clicks)
         return 200, {"scheduled": True, "scheduled_id": sid,
                      "scheduled_at": when.isoformat(timespec="seconds")}
 
-    res = TL.send_list(con, tenant_id, list_id, subject, body, dry_run=dry_run)
+    res = TL.send_list(con, tenant_id, list_id, subject, body, dry_run=dry_run,
+                        track_clicks=track_clicks)
     if res is None:
         return 404, {"error": "リストが見つかりません"}
     if "error" in res:
@@ -1208,6 +1223,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Location", url)
                 self.end_headers()
                 return
+            if u.path.startswith("/track/click/"):
+                token = u.path.split("/track/click/")[1]
+                url = h_track_click(con, token)
+                if not url:
+                    return self._json(404, {"error": "このリンクは無効です"})
+                self.send_response(302)
+                self.send_header("Location", url)
+                self.end_headers()
+                return
             if u.path == "/api/optout":
                 st, res = h_optout(con, {k: v[0] for k, v in qs.items()})
                 return self._json(st, res)
@@ -1335,6 +1359,22 @@ def self_test(port=8899):
       f"status={st} location={loc[:60]}")
     t("クリックが反応として記録される",
       con.execute("SELECT opened FROM touches WHERE id=?", (tid,)).fetchone()[0] == 1)
+
+    print("\n── URLアクセスの記録(MIKOMERUの「URLアクセスの記録」相当) ──")
+    st, loc = get("/track/click/nonexistent-token-xyz", follow=False)
+    t("存在しないトークンは404", st == 404)
+    track_token = db.create_click_token(con, tid, "https://example.co.jp/tracked-page")
+    st, loc = get(f"/track/click/{track_token}", follow=False)
+    t("有効なトークンは本来のURLへ302リダイレクト",
+      st == 302 and loc == b"https://example.co.jp/tracked-page")
+    t("クリックがtouches.email_click_countに記録される",
+      con.execute("SELECT email_click_count FROM touches WHERE id=?", (tid,)).fetchone()[0] == 1)
+    st, loc = get(f"/track/click/{track_token}", follow=False)
+    t("同じトークンを2回踏むとカウントが2になる(重複クリックも記録)",
+      con.execute("SELECT email_click_count FROM touches WHERE id=?", (tid,)).fetchone()[0] == 2)
+    con.execute("DELETE FROM email_tracking_tokens WHERE token=?", (track_token,))
+    con.execute("UPDATE touches SET email_click_count=0, email_clicked_at=NULL WHERE id=?", (tid,))
+    con.commit()
 
     print("\n── 配信停止 ──")
     before = con.execute("SELECT COUNT(*) FROM touches WHERE company_id=? AND sent_at IS NULL",
@@ -1581,10 +1621,15 @@ def self_test(port=8899):
 
     future_at = (datetime.now() + timedelta(hours=2)).isoformat(timespec="seconds")
     st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
-                      {"subject": "予約テスト", "body": "本文", "scheduled_at": future_at}, token=key_a)
+                      {"subject": "予約テスト", "body": "本文", "scheduled_at": future_at,
+                       "track_clicks": True}, token=key_a)
     t("未来の日時なら予約登録され、即時送信はされない",
       st == 200 and r.get("scheduled") is True and isinstance(r.get("scheduled_id"), int))
     scheduled_id = r.get("scheduled_id")
+    st, r = get_auth("/api/tenant/scheduled-sends", token=key_a)
+    t("track_clicks:trueで予約すると一覧にも反映される",
+      st == 200 and any(s["id"] == scheduled_id and s["track_clicks"] == 1
+                         for s in r.get("scheduled", [])))
 
     st, r = post_auth(f"/api/tenant/lists/{list_b_id}/send",
                       {"subject": "x", "body": "y", "scheduled_at": future_at}, token=key_a)

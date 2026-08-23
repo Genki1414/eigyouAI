@@ -6,6 +6,7 @@ db.py — スキーマ / マイグレーション / 接触ガード
 """
 import json
 import re
+import secrets
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -156,13 +157,13 @@ CREATE TABLE IF NOT EXISTS tenant_kill_switch (
   updated_by TEXT
 );
 
--- メール開封・クリック計測用のトラッキングトークン(P2: データ構造のみ)。
+-- URLクリック計測用のトラッキングトークン(MIKOMERUの「URLアクセスの記録」相当。
+-- T16でkind='click'側を実装。kind='open'<メール開封計測>は依然データ構造のみで、
+-- メール送信機能自体(T2)が無いため未実装)。
 -- token単体からtenant/campaign/company/recipientを推測できないよう、
--- 十分に推測困難なランダム値にする(生成はsecrets.token_urlsafe()想定)。
--- 将来 GET /track/open/{token} → touches.email_opened_at等を更新して1x1透明
--- 画像を返す、GET /track/click/{token} → touches.email_clicked_at等を更新して
--- 本来のURLへ302リダイレクト、という2エンドポイントをapi.pyに追加する想定。
--- 今夜はメール送信機能自体が無いため、テーブルの器だけ用意する。
+-- 十分に推測困難なランダム値にする(secrets.token_urlsafe()で生成)。
+-- GET /track/click/{token} → touches.email_clicked_at等を更新して本来のURLへ
+-- 302リダイレクトする(api.py h_track_click()参照)。
 CREATE TABLE IF NOT EXISTS email_tracking_tokens (
   token TEXT PRIMARY KEY,
   touch_id INTEGER NOT NULL,
@@ -406,6 +407,12 @@ def migrate(con):
         # 人が手動でフォームを完了させたことを示すフラグ(MIKOMERUの「手動送信済み」相当)。
         ("form_send_log", "note", "TEXT"),
         ("form_send_log", "manual_sent_at", "TEXT"),
+        # 「URLアクセスの記録」(MIKOMERU同等)。予約送信は実行時点(cron)まで
+        # このフラグを保持しておく必要があるためscheduled_sendsにも持たせる
+        # (即時送信はAPIリクエストの引数としてsend_campaign()まで直接受け渡すのみで、
+        # DBへは保存しない=campaigns/touchesは再送で使い回されるため、そこに保存すると
+        # 別の送信操作の設定が漏れて残ってしまう)。
+        ("scheduled_sends", "track_clicks", "INTEGER DEFAULT 0"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
@@ -655,19 +662,48 @@ def set_form_send_log_manual_sent(con, tenant_id, log_id, manual_sent):
 
 
 # ── 予約送信(MIKOMERU同等の「送信開始日時を指定する」機能) ──
-def create_scheduled_send(con, tenant_id, list_id, subject, body, dry_run, scheduled_at):
+def create_scheduled_send(con, tenant_id, list_id, subject, body, dry_run, scheduled_at,
+                           track_clicks=False):
     cur = con.execute("""INSERT INTO scheduled_sends
-        (tenant_id, list_id, subject, body, dry_run, scheduled_at, status, created_at)
-        VALUES (?,?,?,?,?,?,'PENDING',?)""",
+        (tenant_id, list_id, subject, body, dry_run, scheduled_at, track_clicks, status, created_at)
+        VALUES (?,?,?,?,?,?,?,'PENDING',?)""",
         (tenant_id, list_id, subject, body, 1 if dry_run else 0, scheduled_at,
-         datetime.now().isoformat(timespec="seconds")))
+         1 if track_clicks else 0, datetime.now().isoformat(timespec="seconds")))
     con.commit()
     return cur.lastrowid
 
 
+# ── URLクリック計測(MIKOMERUの「URLアクセスの記録」相当) ──
+def create_click_token(con, touch_id, target_url):
+    """送信文章中の1つのURLにつき1個のトークンを発行する。token単体からは
+    tenant/campaign/company/recipientを推測できない(推測困難なランダム値)。"""
+    token = secrets.token_urlsafe(16)
+    con.execute("""INSERT INTO email_tracking_tokens (token, touch_id, kind, target_url, created_at)
+        VALUES (?,?,'click',?,?)""",
+        (token, touch_id, target_url, datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    return token
+
+
+def resolve_click_token(con, token):
+    """クリック計測トークンを解決し、初回クリック日時(email_clicked_at)と
+    クリック回数(email_click_count)をtouchesへ記録する。存在しないトークン
+    (typo・改ざん・期限切れ等)ならNoneを返す(呼び出し側は404にする)。"""
+    row = con.execute("""SELECT touch_id, target_url FROM email_tracking_tokens
+        WHERE token=? AND kind='click'""", (token,)).fetchone()
+    if not row:
+        return None
+    con.execute("""UPDATE touches SET
+        email_clicked_at = COALESCE(email_clicked_at, ?),
+        email_click_count = email_click_count + 1
+        WHERE id=?""", (datetime.now().isoformat(timespec="seconds"), row["touch_id"]))
+    con.commit()
+    return row["target_url"]
+
+
 def list_scheduled_sends(con, tenant_id, list_id=None):
     q = """SELECT s.id, s.list_id, tl.name list_name, s.subject, s.dry_run, s.scheduled_at,
-            s.status, s.created_at, s.executed_at
+            s.track_clicks, s.status, s.created_at, s.executed_at
         FROM scheduled_sends s LEFT JOIN target_lists tl ON tl.id = s.list_id
         WHERE s.tenant_id=?"""
     params = [tenant_id]
@@ -688,7 +724,7 @@ def cancel_scheduled_send(con, tenant_id, scheduled_id):
 
 def due_scheduled_sends(con, now_iso):
     """期限が来たPENDINGを取得する。scheduled_send_cli.pyがcronから呼ぶ。"""
-    rows = con.execute("""SELECT id, tenant_id, list_id, subject, body, dry_run
+    rows = con.execute("""SELECT id, tenant_id, list_id, subject, body, dry_run, track_clicks
         FROM scheduled_sends WHERE status='PENDING' AND scheduled_at<=?
         ORDER BY scheduled_at""", (now_iso,)).fetchall()
     return [dict(r) for r in rows]

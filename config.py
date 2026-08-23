@@ -3,11 +3,17 @@ config.py — 全設定の単一情報源
 各スクリプトに散っていた閾値・単価・文言をここに集約する。
 本番で調整するのはこのファイルだけ、という状態を保つこと。
 """
+import os
 from pathlib import Path
 
 BASE = Path(__file__).parent
 DB_PATH = BASE / "out" / "companies.db"
 OUT_DIR = BASE / "out"
+
+# クリック計測(MIKOMERUの「URLアクセスの記録」相当)のリダイレクトリンクに使う
+# 公開URL。本番では実際の公開ドメインを環境変数で上書きすること
+# (api.py LP_URLと同じ考え方)。
+TRACK_BASE_URL = os.environ.get("TRACK_BASE_URL", "https://ashibase.jp")
 
 # ── 対象業種 ──────────────────────────────
 TARGET_TRADES = {"とび": "tobi", "土工": "tobi", "塗装": "tosou", "解体": "kaitai"}

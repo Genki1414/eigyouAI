@@ -476,6 +476,9 @@ tr.clickable:hover{background:var(--blue-soft)}
               確認ダイアログが表示されます。</li>
             <li>同じリストへ再送信しても、既に送信済みの企業には二重送信されません
               (未送信分だけが対象になります)。</li>
+            <li><b>URLアクセスの記録</b>をオンにすると、本文中のURLが記録用URLへ置き換わり、
+              相手がそのURLをクリックしたかどうかを記録できます(クリックすると本来のURLへ
+              自動的に転送されます)。</li>
           </ul>
         </div>
 
@@ -1559,6 +1562,11 @@ async function showDetail(id) {
           <span id="sendDryRunLabel">ドライラン(実際には送信しません)</span>
         </label>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
+          <input type="checkbox" id="sendTrackClicks" style="width:auto">
+          <span>URLアクセスの記録(本文中のURLがクリックされたかを記録する。
+            URLは記録用URLへ置き換えられます)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
           <input type="checkbox" id="sendScheduleToggle" style="width:auto">
           <span>送信開始日時を指定する(OFFの場合は送信後すぐに処理が開始します)</span>
         </label>
@@ -1640,6 +1648,7 @@ async function showDetail(id) {
       const subject = $("sendSubject").value.trim();
       const body = $("sendBody").value.trim();
       const dryRun = dryRunBox.checked;
+      const trackClicks = $("sendTrackClicks").checked;
       const rEl = $("sendResult");
       if (!subject || !body) { rEl.innerHTML = `<div class="result err">件名と本文を入力してください</div>`; return; }
 
@@ -1660,7 +1669,7 @@ async function showDetail(id) {
       if (scheduling) {
         rEl.innerHTML = `<div class="result">予約中…</div>`;
         try {
-          const payload = { subject, body, dry_run: dryRun, scheduled_at: scheduledAt };
+          const payload = { subject, body, dry_run: dryRun, scheduled_at: scheduledAt, track_clicks: trackClicks };
           const sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
           rEl.innerHTML = `<div class="result ok">予約しました(${sr.scheduled_at}に開始)</div>`;
           await refreshScheduledSends(id);
@@ -1683,7 +1692,7 @@ async function showDetail(id) {
 
       let sr = null, err = null;
       try {
-        const payload = { subject, body, dry_run: dryRun };
+        const payload = { subject, body, dry_run: dryRun, track_clicks: trackClicks };
         sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
       } catch (e) {
         err = e;
@@ -1724,7 +1733,7 @@ async function refreshScheduledSends(listId) {
     if (!r.scheduled.length) { el.innerHTML = `<div class="empty">予約はありません</div>`; return; }
     el.innerHTML = `<table><tr><th>開始予定</th><th>件名</th><th>モード</th><th>状態</th><th></th></tr>` +
       r.scheduled.map(s => `<tr><td style="font-family:var(--mono);font-size:11px">${s.scheduled_at}</td>
-        <td>${s.subject}</td><td>${s.dry_run ? "ドライラン" : "本番送信"}</td>
+        <td>${s.subject}</td><td>${s.dry_run ? "ドライラン" : "本番送信"}${s.track_clicks ? " · URL記録" : ""}</td>
         <td><span class="pill${s.status === "DONE" ? " ok" : (s.status === "FAILED" ? " err" : "")}">${SCHEDULED_STATUS_LABELS[s.status] || s.status}</span></td>
         <td>${s.status === "PENDING" ? `<button class="ghost cancelScheduledBtn" data-id="${s.id}">キャンセル</button>` : "—"}</td></tr>`).join("") +
       `</table>`;

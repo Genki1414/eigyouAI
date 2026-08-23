@@ -946,6 +946,50 @@ Chrome ウェブストア公開等は行っていない。
 
 ---
 
+### T17. URLアクセスの記録(MIKOMERUの「URLアクセスの記録」相当)を実装(2026-08-23)
+
+T16で未着手のまま残していた「URLアクセスの記録」に着手。データ構造自体は`db.py`に
+`email_tracking_tokens`テーブルとして既に用意されており(P2「メール開封・クリック計測の
+データ構造設計のみ」タスクの成果物)、`kind='click'`側を今回初めて実装した。
+
+- **`db.py`**: `create_click_token(con, touch_id, target_url)`(トークン発行。
+  `secrets.token_urlsafe(16)`で推測困難な値にする)、`resolve_click_token(con, token)`
+  (トークンを解決し、`touches.email_clicked_at`<初回のみ>・`email_click_count`
+  <毎回加算>を更新して本来のURLを返す。見つからなければNone)を新設。
+  `scheduled_sends`に`track_clicks`列を追加(予約送信はcron実行時点までこのフラグを
+  保持しておく必要があるため)。
+- **`config.py`**: `TRACK_BASE_URL`(既定`https://ashibase.jp`。`api.py`の`LP_URL`と
+  同じ、環境変数で上書きする設計)を追加。
+- **`senders.py`**: `rewrite_tracked_links(con, touch_id, body, base_url)`を新設
+  (本文中のURLを正規表現で検出し、同じURLは1トークンだけ発行して全出現箇所を置換。
+  日本語文章はURL直後にスペースを挟まず句読点が続くことが多いため、句読点・閉じ括弧類は
+  URLの一部として拾わないようにしている)。`send_campaign()`に`track_clicks=False`引数を
+  追加し、`track_clicks and not dry_run`の時だけ本文へ適用する。**この設定はcampaigns/
+  touchesへは保存しない**(呼び出しごとに都度指定する設計。両テーブルは同じリストへの
+  再送信で使い回されるため、そこに保存すると別の送信操作の設定が漏れて残ってしまうため)。
+- **`target_lists.py`**: `send_list()`に`track_clicks`引数を追加し、`send_campaign()`へ
+  そのまま渡すだけ(新しい送信経路は作らない、という既存方針を維持)。
+- **`api.py`**: `h_tenant_list_send()`が`track_clicks`をリクエストから読み取り、即時送信・
+  予約送信の両方に渡す。新規`GET /track/click/{token}`(`h_track_click()`)は
+  `resolve_click_token()`を呼んで本来のURLへ302リダイレクトする(既存の`/t/<touch_id>`
+  <AshiBase自身の成長エンジン用。常にLP_URLへリダイレクトする別物>とは無関係)。
+  トークンが無効なら404。
+- **`list_builder.html`**: 送信フォームに「URLアクセスの記録」チェックボックス
+  (ドライラン・送信開始日時指定の間に配置。MIKOMERUの並び順と同じ)を追加し、即時送信・
+  予約送信のPOSTペイロード双方に反映。予約済み送信の一覧にも「· URL記録」の表示を追加。
+  マニュアルDLページにも説明を追記。
+
+`senders.py test`(本文置換・トークン解決・クリック回数記録・track_clicks=False時は
+置換しないことを確認)・`api.py test`(188/188。無効トークンの404・有効トークンの302
+リダイレクト・重複クリックの加算・予約送信への`track_clicks`伝播を確認)は実際に動かして
+確認済み。さらに実ブラウザ(Playwright)でローカルの実フォームページに対して
+`track_clicks:true`で本番送信し、`email_tracking_tokens`に実際にトークンが作られ、
+`curl`で`/track/click/{token}`を実際に叩いて302リダイレクトとクリック回数の記録
+(`email_click_count`が0→1)まで一気通貫で確認した。`test_concurrency.py`・
+`storage.py test`・`form_navigator.py test`も回帰確認済み。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

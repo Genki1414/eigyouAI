@@ -442,10 +442,36 @@ def render_merge_tags(text, to, sender):
                 .replace("##FROM_FAMILY_NAME##", sender.last_name or sender.name or ""))
 
 
+# 本文中のURLを検出する。日本語文章はURLの直後にスペースを挟まず句読点や
+# 閉じ括弧が続くことが多いため、それらは掴まないようにストップ文字へ含める
+# (完全ではないが、実運用上のほとんどのケースをカバーする)。
+_URL_RE = re.compile(r'https?://[^\s<>"　。、）】』」]+')
+
+
+def rewrite_tracked_links(con, touch_id, body, base_url):
+    """MIKOMERUの「URLアクセスの記録」相当。本文中のURLをクリック計測用の
+    リダイレクトリンクに置き換える(同じURLが複数回出てきてもトークンは1個だけ
+    発行し、全出現箇所を置き換える)。呼び出し側でdry_run時は呼ばないこと
+    (実際に届かない文面のためにトークンを発行し続けるとDBが無駄に増える)。"""
+    import db
+    if not body:
+        return body
+    for url in set(_URL_RE.findall(body)):
+        token = db.create_click_token(con, touch_id, url)
+        tracked = f"{base_url.rstrip('/')}/track/click/{token}"
+        body = body.replace(url, tracked)
+    return body
+
+
 # ── 一括送信 ────────────────────────────────
-def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
+def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clicks=False):
     """キャンペーンの未送信分を実際に送る。
-    campaign.py simulate の本番版がこれ。接触ガードはここでも最終確認する。"""
+    campaign.py simulate の本番版がこれ。接触ガードはここでも最終確認する。
+    track_clicks=Trueなら、本文中のURLをクリック計測リンクへ置き換える
+    (MIKOMERUの「URLアクセスの記録」相当。dry_run時は置き換えない=トークンを
+    無駄に発行しない)。この設定はcampaigns/touchesへは保存しない——両者は
+    同じリストへの再送で使い回されるため、そこに保存すると別の送信操作の
+    設定が漏れて残ってしまう(呼び出しごとに都度指定する設計)。"""
     import db
 
     q = """SELECT t.id tid, t.channel, t.subject, t.body, t.company_id, t.step,
@@ -522,6 +548,9 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None):
                                  campaign_id, r["company_id"], step)
         subject = render_merge_tags(r["subject"], to, sender)
         body = render_merge_tags(r["body"], to, sender)
+        if track_clicks and not dry_run:
+            import config as C
+            body = rewrite_tracked_links(con, r["tid"], body, C.TRACK_BASE_URL)
         res = adapter.send(to, sender, subject, body, key)
 
         if res.ok:
@@ -723,7 +752,7 @@ if __name__ == "__main__":
             VALUES (999997, 'テスト_送信元情報確認', 'https://example.co.jp/contact/')""")
         con.commit()
 
-        def _capture_values(tenant_id, offer_name, subject="件名", body="本文"):
+        def _capture_values(tenant_id, offer_name, subject="件名", body="本文", track_clicks=False):
             offer_id = con.execute("SELECT id FROM offers WHERE tenant_id=?", (tenant_id,)).fetchone()[0]
             cur = con.execute("""INSERT INTO campaigns (name, started_at, target_rule, offer_id)
                 VALUES (?,?,?,?)""",
@@ -740,9 +769,23 @@ if __name__ == "__main__":
                 FN.NavigationResult(status="SUCCESS", reason_code="success_text_matched",
                                     submit_attempted=True))[-1]
             try:
-                send_campaign(con, cid, step=1, dry_run=False)
+                send_campaign(con, cid, step=1, dry_run=False, track_clicks=track_clicks)
+                if track_clicks:
+                    # trackingリンクをクリックした体で解決し、その結果もcapturedへ
+                    # 詰めて返す(呼び出し側がtouch_idを知らなくても確認できるように)。
+                    m = re.search(r"/track/click/([A-Za-z0-9_-]+)", captured.get("message") or "")
+                    if m:
+                        captured["_click_target"] = db.resolve_click_token(con, m.group(1))
+                        row = con.execute("""SELECT email_click_count, email_clicked_at
+                            FROM touches WHERE campaign_id=?""", (cid,)).fetchone()
+                        captured["_click_count"] = row["email_click_count"] if row else None
+                        captured["_clicked_at"] = row["email_clicked_at"] if row else None
             finally:
                 FN.navigate_and_submit = orig_navigate
+                # touchesを消す前にemail_tracking_tokens(FK制約)を先に消す
+                # (track_clicks=Trueのテストがトークンを発行した場合に備える)
+                con.execute("""DELETE FROM email_tracking_tokens WHERE touch_id IN
+                    (SELECT id FROM touches WHERE campaign_id=?)""", (cid,))
                 con.execute("DELETE FROM touches WHERE campaign_id=?", (cid,))
                 con.execute("DELETE FROM campaigns WHERE id=?", (cid,))
                 con.commit()
@@ -824,6 +867,45 @@ if __name__ == "__main__":
             con.execute("DELETE FROM companies WHERE id=999997")
             con.execute("DELETE FROM form_send_log WHERE company_id=999997")
             for row in con.execute("SELECT id FROM tenants WHERE name='test-merge-tags'").fetchall():
+                con.execute("DELETE FROM offers WHERE tenant_id=?", (row["id"],))
+                con.execute("DELETE FROM tenants WHERE id=?", (row["id"],))
+            con.commit()
+
+        print("\n── URLアクセスの記録(MIKOMERUの「URLアクセスの記録」相当) ──")
+        con.execute("DELETE FROM companies WHERE id=999997")
+        con.execute("""INSERT INTO companies (id, name, contact_url)
+            VALUES (999997, 'クリック計測確認先株式会社', 'https://example.co.jp/contact/')""")
+        con.commit()
+        orig_ks4, orig_ks4_reason = db.kill_switch_status(con)
+        db.set_global_kill_switch(con, False, updated_by="test")
+        try:
+            tid_tc, _ = OF.add_tenant(con, "test-track-clicks", "tc@example.co.jp",
+                                       sender_name="計測送信元")
+            v_tc = _capture_values(tid_tc, "test-track-clicks-campaign",
+                                    body="詳しくはこちらをご覧ください https://example.co.jp/service です",
+                                    track_clicks=True)
+            msg = v_tc.get("message") or ""
+            ok_rewritten = ("/track/click/" in msg) and ("https://example.co.jp/service" not in msg)
+            print(f"  本文(置換後): {msg!r}")
+            print(f"  {'✓' if ok_rewritten else '✗'} track_clicks=Trueだと本文中のURLがトラッキングリンクへ置換される")
+            ok_resolve = v_tc.get("_click_target") == "https://example.co.jp/service"
+            print(f"  {'✓' if ok_resolve else '✗'} トラッキングリンクを解決すると元のURLに戻る")
+            ok_count = v_tc.get("_click_count") == 1 and v_tc.get("_clicked_at") is not None
+            print(f"  {'✓' if ok_count else '✗'} クリック解決でtouches.email_click_count/"
+                  "email_clicked_atが記録される(count={} clicked_at={})".format(
+                      v_tc.get("_click_count"), v_tc.get("_clicked_at")))
+
+            v_notrack = _capture_values(tid_tc, "test-track-clicks-off-campaign",
+                                         body="こちら https://example.co.jp/service2 です",
+                                         track_clicks=False)
+            ok_notrack = "https://example.co.jp/service2" in (v_notrack.get("message") or "") \
+                and "/track/click/" not in (v_notrack.get("message") or "")
+            print(f"  {'✓' if ok_notrack else '✗'} track_clicks=False(既定)なら本文のURLはそのまま")
+        finally:
+            db.set_global_kill_switch(con, orig_ks4, reason=orig_ks4_reason, updated_by="test-restore")
+            con.execute("DELETE FROM companies WHERE id=999997")
+            con.execute("DELETE FROM form_send_log WHERE company_id=999997")
+            for row in con.execute("SELECT id FROM tenants WHERE name='test-track-clicks'").fetchall():
                 con.execute("DELETE FROM offers WHERE tenant_id=?", (row["id"],))
                 con.execute("DELETE FROM tenants WHERE id=?", (row["id"],))
             con.commit()

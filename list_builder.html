@@ -1134,14 +1134,25 @@ async function refreshDashboard() {
       <div class="statcard"><b>${d.outcomes.won.toLocaleString()}</b><span>受注(累計)</span></div>`;
 
     const logEl = $("dashRecentWrap");
-    const lr = await call("/api/tenant/send-log?limit=10");
-    if (!lr.log.length) { logEl.innerHTML = `<div class="empty">まだ営業履歴がありません</div>`; return; }
-    logEl.innerHTML = `<table><tr><th>会社名</th><th>結果</th><th>詳細</th><th>日時</th></tr>` +
-      lr.log.map(x => `<tr><td>${x.company_name || "—"}</td>
-        <td><span class="pill${x.status === "SUCCESS" ? " ok" : (x.status.startsWith("FAILED") ? " err" : "")}">${x.status}</span></td>
-        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.reason_code || "—"}</td>
-        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at}</td></tr>`).join("") +
-      `</table>`;
+    const lr = await call("/api/tenant/send-log/executions?limit=5");
+    const execs = lr.executions || [];
+    if (!execs.length) { logEl.innerHTML = `<div class="empty">まだ営業履歴がありません</div>`; return; }
+    logEl.innerHTML = `<table><tr><th>リスト名</th><th>送信文章</th><th>送信成功/総数</th><th>実行日時</th></tr>` +
+      execs.map(x => `<tr>
+        <td><a href="#" class="dashExecLink" data-id="${x.list_id}" data-name="${(x.list_name || "").replace(/"/g, "&quot;")}">${x.list_name || "—"}</a></td>
+        <td style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+          title="${(x.subject || "").replace(/"/g, "&quot;")}">${x.subject || "—"}</td>
+        <td>${x.success.toLocaleString()}/${x.total.toLocaleString()}</td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at || "—"}</td></tr>`).join("") +
+      `</table>
+      <p style="margin-top:8px"><a href="#" id="dashExecSeeAll">自動送信ログをすべて見る →</a></p>`;
+    logEl.querySelectorAll(".dashExecLink").forEach(a => {
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        goSendLogDetail(Number(a.dataset.id), a.dataset.name);
+      });
+    });
+    $("dashExecSeeAll").addEventListener("click", (e) => { e.preventDefault(); goPage("sendlog"); });
   } catch (e) {
     $("dashRecentWrap").innerHTML = `<div class="result err">${e.message}</div>`;
   }

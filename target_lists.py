@@ -778,7 +778,7 @@ _EXEC_FAILED_SQL = ("SUM(CASE WHEN l.status!='SUCCESS' AND NOT "
                      "THEN 1 ELSE 0 END)")
 
 
-def list_send_executions(con, tenant_id, list_id=None, date_from=None, date_to=None):
+def list_send_executions(con, tenant_id, list_id=None, date_from=None, date_to=None, limit=None):
     """MIKOMERUの「自動送信ログ」一覧相当(送信結果の会社別明細ではなく、
     「いつ・誰が・どのリストへ送ったか」という実行単位の集計)。既存設計
     (1リスト=1campaignを使い回す。send_list()参照)にそのまま乗せ、target_listsの
@@ -807,7 +807,8 @@ def list_send_executions(con, tenant_id, list_id=None, date_from=None, date_to=N
         LEFT JOIN staff st ON st.id = tl.sent_by_staff_id
         LEFT JOIN sender_templates sn ON sn.id = tl.sent_sender_template_id
         WHERE {where}
-        ORDER BY tl.last_send_started_at DESC""", params).fetchall()
+        ORDER BY tl.last_send_started_at DESC
+        {"LIMIT ?" if limit else ""}""", params + ([limit] if limit else [])).fetchall()
 
     out = []
     for r in rows:

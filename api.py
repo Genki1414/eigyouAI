@@ -95,7 +95,8 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            会社別の明細ではなく、「いつ・誰が・どのリストへ送ったか」を
                            1リスト=1実行として集計して返す(target_lists.pyの
                            list_send_executions()参照)。?list_id=/?date_from=/?date_to=
-                           (YYYY-MM-DD)で絞り込める
+                           (YYYY-MM-DD)で絞り込める。?limit=で件数上限(ホームの
+                           「最近の営業履歴」で使用)
   POST /api/tenant/send-log/executions/{list_id}/note  {"note"} → 実行(リスト)単位の
                            備考を更新(会社ごとのsend-log/{id}/noteとは別物)
   GET  /api/tenant/send-log/{id}/screenshot?kind=before|after
@@ -622,13 +623,16 @@ def h_tenant_send_log_executions(con, tenant_id, qs):
     """MIKOMERUの「自動送信ログ」一覧(T22)。会社別の明細ではなく、
     「いつ・誰が・どのリストへ送ったか」という実行単位の集計を返す。
     ?list_id=で対象リストを1件に絞れる(自動送信ページの送信対象リスト
-    プルダウンと同じ選択肢から選ぶ想定)。?date_from=/?date_to=はYYYY-MM-DD。"""
+    プルダウンと同じ選択肢から選ぶ想定)。?date_from=/?date_to=はYYYY-MM-DD。
+    ?limit=でホームダッシュボードの「最近の営業履歴」のような直近N件表示に使う。"""
     list_id = qs.get("list_id", [None])[0]
     date_from = (qs.get("date_from", [""])[0] or "").strip() or None
     date_to = (qs.get("date_to", [""])[0] or "").strip() or None
+    limit = qs.get("limit", [None])[0]
     execs = TL.list_send_executions(con, tenant_id,
                                      list_id=int(list_id) if list_id and list_id.isdigit() else None,
-                                     date_from=date_from, date_to=date_to)
+                                     date_from=date_from, date_to=date_to,
+                                     limit=int(limit) if limit and limit.isdigit() else None)
     totals = {"success": 0, "failed": 0, "no_form": 0, "total": 0}
     for e in execs:
         for k in totals:
@@ -2581,6 +2585,13 @@ def self_test(port=8899):
     t("GET .../executions?list_id=で1件の実行に絞り込める",
       st == 200 and len(r.get("executions", [])) == 1)
     ex = r["executions"][0]
+
+    st, r = get_auth("/api/tenant/send-log/executions?limit=0", token=key_a)
+    t("GET .../executions?limit=0はlimit指定なし扱いで全件返す(ホームの直近表示用パラメータ)",
+      st == 200 and len(r.get("executions", [])) >= 1)
+    st, r = get_auth("/api/tenant/send-log/executions?limit=1", token=key_a)
+    t("GET .../executions?limit=1で直近1件のみ返す(T24: ホームの最近の営業履歴と同じ絞り込み)",
+      st == 200 and len(r.get("executions", [])) == 1)
     t("担当者名が反映される", ex["staff_name"] == "T22担当者")
     t("会社名(テナント名)が反映される", ex["company_name"] == "test-tenant-A")
     t("送信元テンプレート未指定時はテナントのsender_nameから姓を補う",

@@ -56,6 +56,7 @@ input[type=text],input[type=number],input[type=password],select,textarea{
 button{font-family:'IBM Plex Sans JP',sans-serif;font-size:13px;font-weight:700;border:none;
   border-radius:6px;padding:9px 18px;cursor:pointer;background:var(--ink);color:#fff}
 button.ghost{background:var(--surface);color:var(--ink);border:1px solid var(--line)}
+button.danger{background:var(--warn);color:#fff}
 button:disabled{opacity:.4;cursor:not-allowed}
 .btnrow{display:flex;gap:8px;margin-top:12px}
 .result{margin-top:12px;padding:10px 12px;border-radius:6px;font-size:13px;font-family:var(--mono)}
@@ -382,17 +383,39 @@ tr.clickable:hover{background:var(--blue-soft)}
           <p class="hint">競合他社など、御社だけが送信を避けたい企業を個別に除外できます
             (他のお客様の送信には影響しません)。配信停止の申し出があった企業は
             この設定に関わらず常に自動で除外されます。</p>
-          <div class="row" style="margin-top:10px">
-            <div>
-              <label>企業名で検索(2文字以上)</label>
-              <input type="text" id="exQuery" placeholder="例: 山口建設">
-            </div>
-            <div>
-              <label>除外理由(任意)</label>
-              <input type="text" id="exReason" placeholder="例: 競合他社">
-            </div>
+          <div class="chips" id="exTabs" style="margin-top:10px">
+            <label class="chip on"><input type="radio" name="exTab" value="single" checked>個別に登録</label>
+            <label class="chip"><input type="radio" name="exTab" value="csv">CSVで登録</label>
           </div>
-          <div id="exSearchResult"></div>
+          <div id="exTabSingle" style="margin-top:10px">
+            <div class="row">
+              <div>
+                <label>企業名で検索(2文字以上)</label>
+                <input type="text" id="exQuery" placeholder="例: 山口建設">
+              </div>
+              <div>
+                <label>除外理由(任意)</label>
+                <input type="text" id="exReason" placeholder="例: 競合他社">
+              </div>
+            </div>
+            <div id="exSearchResult"></div>
+          </div>
+          <div id="exTabCsv" style="margin-top:10px;display:none">
+            <p class="hint">「会社名」の列を含むCSVを取り込み、商号が一致した企業をまとめて
+              除外登録します(一致しなかった行は除外できません)。</p>
+            <div class="row" style="margin-top:6px">
+              <div>
+                <label>CSVファイル</label>
+                <input type="file" id="exCsvFile" accept=".csv,text/csv">
+              </div>
+              <div>
+                <label>除外理由(任意・CSV全行共通)</label>
+                <input type="text" id="exCsvReason" placeholder="例: 競合他社リスト">
+              </div>
+            </div>
+            <div class="btnrow"><button id="btnExCsvUpload">登録</button></div>
+            <div id="exCsvResult"></div>
+          </div>
         </div>
         <h2 style="margin-top:20px">除外中の企業 <span>EXCLUDED</span></h2>
         <div id="exListWrap"><div class="empty">接続すると表示されます</div></div>
@@ -572,15 +595,19 @@ tr.clickable:hover{background:var(--blue-soft)}
           </div>
           </div>
           <div id="previewResult"></div>
-          <div class="row" style="margin-top:12px">
+          <p class="hint" style="margin-top:12px">絞り込んだ企業情報をリストとして保存します。
+            新規リストとして作成するか、既存のリストに追加するかを選べます。</p>
+          <div class="row" style="margin-top:6px">
             <div>
-              <label>リスト名</label>
+              <label>新しいリストを作成する場合、リスト名を入力してください</label>
               <input type="text" id="fName" placeholder="例: 東京都_とび土工_Aランク">
             </div>
-            <div style="display:flex;align-items:flex-end">
-              <button id="btnSaveFilter" disabled style="width:100%">このリストを保存</button>
+            <div>
+              <label>既存のリストに追加する場合、リストを選択してください</label>
+              <select id="fExistingList"><option value="">-- 指定なし --</option></select>
             </div>
           </div>
+          <div class="btnrow"><button id="btnSaveFilter" disabled>リスト保存</button></div>
         </div>
       </section>
 
@@ -592,13 +619,17 @@ tr.clickable:hover{background:var(--blue-soft)}
             自動で紐付き、それ以外は御社専用の非公開データとして追加されます(他のお客様には見えません)。</p>
           <div class="row" style="margin-top:10px">
             <div>
-              <label>リスト名</label>
+              <label>新しいリストを作成する場合、リスト名を入力してください</label>
               <input type="text" id="cName" placeholder="例: 自社保有リスト2026">
             </div>
             <div>
-              <label>CSVファイル</label>
-              <input type="file" id="cFile" accept=".csv,text/csv">
+              <label>既存のリストに追加する場合、リストを選択してください</label>
+              <select id="cExistingList"><option value="">-- 指定なし --</option></select>
             </div>
+          </div>
+          <div style="margin-top:10px">
+            <label>CSVファイル</label>
+            <input type="file" id="cFile" accept=".csv,text/csv">
           </div>
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
             <input type="checkbox" id="cDiscoverUrls" style="width:auto">
@@ -614,6 +645,16 @@ tr.clickable:hover{background:var(--blue-soft)}
 
       <section class="page" data-page="lists">
         <h2>保存済みリスト <span>SAVED LISTS</span></h2>
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
+            <input type="checkbox" id="listsShowDeleted" style="width:auto">
+            <span>削除したものを含めて表示</span>
+          </label>
+          <div class="btnrow" style="margin:0">
+            <button class="ghost" id="btnListsBulkRestore" style="display:none">復元</button>
+            <button class="danger" id="btnListsBulkDelete" disabled>🗑 削除...</button>
+          </div>
+        </div>
         <div id="listsWrap"><div class="empty">接続すると表示されます</div></div>
         <div id="detailWrap"></div>
       </section>
@@ -1148,6 +1189,31 @@ $("exQuery").addEventListener("input", () => {
   exSearchTimer = setTimeout(runExclusionSearch, 250);
 });
 
+document.querySelectorAll('input[name="exTab"]').forEach(input => {
+  input.addEventListener("change", () => {
+    $("exTabSingle").style.display = input.value === "single" ? "" : "none";
+    $("exTabCsv").style.display = input.value === "csv" ? "" : "none";
+  });
+});
+
+$("btnExCsvUpload").addEventListener("click", async () => {
+  const file = $("exCsvFile").files[0];
+  const reason = $("exCsvReason").value.trim();
+  const el = $("exCsvResult");
+  if (!file) { el.innerHTML = `<div class="result err">CSVファイルを指定してください</div>`; return; }
+  el.innerHTML = `<div class="result">登録中…</div>`;
+  try {
+    const text = await file.text();
+    const r = await call("/api/tenant/exclusions/csv",
+      { method: "POST", body: JSON.stringify({ csv: text, reason }) });
+    el.innerHTML = `<div class="result ok">除外登録: ${r.matched}件(該当なし: ${r.not_found}件)</div>`;
+    $("exCsvFile").value = ""; $("exCsvReason").value = "";
+    await refreshExclusions();
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+});
+
 async function refreshTemplates() {
   if (!connected) return;
   const r = await call("/api/tenant/templates");
@@ -1386,12 +1452,17 @@ document.getElementById("filterInputs").addEventListener("change", () => {
 
 $("btnSaveFilter").addEventListener("click", async () => {
   const name = $("fName").value.trim();
+  const existingId = $("fExistingList").value;
   const el = $("previewResult");
-  if (!name) { el.innerHTML = `<div class="result err">リスト名を入力してください</div>`; return; }
+  if (!name && !existingId) {
+    el.innerHTML = `<div class="result err">リスト名を入力するか、既存のリストを選択してください</div>`; return;
+  }
+  const body = { filters: currentFilters() };
+  if (existingId) body.existing_list_id = Number(existingId); else body.name = name;
   try {
-    const r = await call("/api/tenant/lists", { method: "POST", body: JSON.stringify({ name, filters: currentFilters() }) });
-    el.innerHTML = `<div class="result ok">保存しました(${r.count.toLocaleString()}社) — list_id=${r.list_id}</div>`;
-    $("fName").value = "";
+    const r = await call("/api/tenant/lists", { method: "POST", body: JSON.stringify(body) });
+    el.innerHTML = `<div class="result ok">保存しました(合計${r.count.toLocaleString()}社) — list_id=${r.list_id}</div>`;
+    $("fName").value = ""; $("fExistingList").value = "";
     await refreshLists();
     refreshHomeStats();
   } catch (e) {
@@ -1401,15 +1472,19 @@ $("btnSaveFilter").addEventListener("click", async () => {
 
 $("btnUploadCsv").addEventListener("click", async () => {
   const name = $("cName").value.trim();
+  const existingId = $("cExistingList").value;
   const file = $("cFile").files[0];
   const discoverUrls = $("cDiscoverUrls").checked;
   const el = $("csvResult");
-  if (!name || !file) { el.innerHTML = `<div class="result err">リスト名とCSVファイルの両方を指定してください</div>`; return; }
+  if ((!name && !existingId) || !file) {
+    el.innerHTML = `<div class="result err">CSVファイルを指定し、リスト名を入力するか既存のリストを選択してください</div>`; return;
+  }
   el.innerHTML = `<div class="result">${discoverUrls ? "取込・問い合わせページ探索中…(時間がかかる場合があります)" : "取込中…"}</div>`;
   try {
     const text = await file.text();
-    const r = await call("/api/tenant/lists/csv",
-      { method: "POST", body: JSON.stringify({ name, csv: text, discover_urls: discoverUrls }) });
+    const body = { csv: text, discover_urls: discoverUrls };
+    if (existingId) body.existing_list_id = Number(existingId); else body.name = name;
+    const r = await call("/api/tenant/lists/csv", { method: "POST", body: JSON.stringify(body) });
     let msg = `取込完了: 合計${r.count}社(既存と一致${r.matched_existing} / 新規${r.new_companies} / スキップ${r.skipped_rows})`;
     if (r.url_discovery) {
       const d = r.url_discovery;
@@ -1418,7 +1493,7 @@ $("btnUploadCsv").addEventListener("click", async () => {
         + `${d.skipped_over_limit ? ` / 上限超過で未実施${d.skipped_over_limit}` : ""}`;
     }
     el.innerHTML = `<div class="result ok">${msg}</div>`;
-    $("cName").value = ""; $("cFile").value = ""; $("cDiscoverUrls").checked = false;
+    $("cName").value = ""; $("cExistingList").value = ""; $("cFile").value = ""; $("cDiscoverUrls").checked = false;
     await refreshLists();
     refreshHomeStats();
   } catch (e) {
@@ -1426,22 +1501,94 @@ $("btnUploadCsv").addEventListener("click", async () => {
   }
 });
 
+let allLists = [];  // include_deletedの状態に関わらず「既存リストに追加」選択肢は
+                     // 常に有効なリストだけから作るため、非削除分を別途覚えておく
+const listsSelected = new Set();
+
 async function refreshLists() {
-  const r = await call("/api/tenant/lists");
+  const includeDeleted = $("listsShowDeleted").checked;
+  const r = await call(`/api/tenant/lists${includeDeleted ? "?include_deleted=1" : ""}`);
   lastLists = r.lists;
+  allLists = includeDeleted ? r.lists.filter(l => !l.deleted_at) : r.lists;
+  listsSelected.clear();
+  renderListsTable();
+  populateExistingListSelects();
+  updateListsBulkButtons();
+}
+
+function populateExistingListSelects() {
+  const opts = `<option value="">-- 指定なし --</option>` +
+    allLists.map(l => `<option value="${l.id}">${l.name}</option>`).join("");
+  ["fExistingList", "cExistingList"].forEach(id => { if ($(id)) $(id).innerHTML = opts; });
+}
+
+function updateListsBulkButtons() {
+  const anyDeleted = [...listsSelected].some(id => lastLists.find(l => l.id === id)?.deleted_at);
+  const anyActive = [...listsSelected].some(id => !lastLists.find(l => l.id === id)?.deleted_at);
+  $("btnListsBulkDelete").disabled = !anyActive;
+  $("btnListsBulkRestore").style.display = anyDeleted ? "" : "none";
+}
+
+// MIKOMERUの保存済みリスト一覧(ID/リスト名/件数/作成日時/変更日時/復元)相当
+function renderListsTable() {
   const wrap = $("listsWrap");
-  if (!r.lists.length) { wrap.innerHTML = `<div class="empty">まだリストがありません</div>`; return; }
-  wrap.innerHTML = `<table><tr><th>名前</th><th>種別</th><th>件数</th><th>作成日時</th></tr>` +
-    r.lists.map(l => `<tr class="clickable" data-id="${l.id}">
-      <td><b>${l.name}</b></td>
-      <td><span class="pill">${l.source === "csv" ? "CSV" : "条件指定"}</span></td>
+  if (!lastLists.length) { wrap.innerHTML = `<div class="empty">まだリストがありません</div>`; return; }
+  wrap.innerHTML = `<table><tr>
+      <th style="width:24px"><input type="checkbox" id="listsSelectAll" style="width:auto"></th>
+      <th>ID</th><th>リスト名</th><th>件数</th><th>作成日時</th><th>変更日時</th><th>復元</th></tr>` +
+    lastLists.map(l => `<tr class="${l.deleted_at ? "" : "clickable"}" data-id="${l.id}"${l.deleted_at ? ' style="opacity:.55"' : ""}>
+      <td><input type="checkbox" class="listChk" data-id="${l.id}" style="width:auto" ${listsSelected.has(l.id) ? "checked" : ""}></td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${l.id}</td>
+      <td><b>${l.name}</b> <span class="pill">${l.source === "csv" ? "CSV" : "条件指定"}</span>${l.deleted_at ? ` <span class="pill err">削除済み</span>` : ""}</td>
       <td>${l.company_count.toLocaleString()}</td>
-      <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${l.created_at}</td></tr>`).join("") +
+      <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${l.created_at}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${l.updated_at || l.created_at}</td>
+      <td>${l.deleted_at ? `<button class="ghost restoreOneBtn" data-id="${l.id}" style="padding:4px 10px;font-size:11px">復元</button>` : "—"}</td>
+    </tr>`).join("") +
     `</table>`;
   wrap.querySelectorAll("tr.clickable").forEach(tr => {
-    tr.addEventListener("click", () => showDetail(tr.dataset.id));
+    tr.addEventListener("click", (e) => { if (e.target.type !== "checkbox") showDetail(tr.dataset.id); });
+  });
+  wrap.querySelectorAll(".listChk").forEach(cb => {
+    cb.addEventListener("click", (e) => e.stopPropagation());
+    cb.addEventListener("change", () => {
+      const id = Number(cb.dataset.id);
+      cb.checked ? listsSelected.add(id) : listsSelected.delete(id);
+      updateListsBulkButtons();
+    });
+  });
+  wrap.querySelectorAll(".restoreOneBtn").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await call("/api/tenant/lists/restore", { method: "POST",
+        body: JSON.stringify({ list_ids: [Number(btn.dataset.id)] }) });
+      await refreshLists();
+    });
+  });
+  const selectAll = $("listsSelectAll");
+  selectAll.addEventListener("change", () => {
+    lastLists.forEach(l => { selectAll.checked ? listsSelected.add(l.id) : listsSelected.delete(l.id); });
+    renderListsTable();
+    updateListsBulkButtons();
   });
 }
+
+$("listsShowDeleted").addEventListener("change", refreshLists);
+
+$("btnListsBulkDelete").addEventListener("click", async () => {
+  const ids = [...listsSelected].filter(id => !lastLists.find(l => l.id === id)?.deleted_at);
+  if (!ids.length) return;
+  if (!confirm(`選択した${ids.length}件のリストを削除します。よろしいですか?(あとで復元できます)`)) return;
+  await call("/api/tenant/lists/delete", { method: "POST", body: JSON.stringify({ list_ids: ids }) });
+  await refreshLists();
+});
+
+$("btnListsBulkRestore").addEventListener("click", async () => {
+  const ids = [...listsSelected].filter(id => lastLists.find(l => l.id === id)?.deleted_at);
+  if (!ids.length) return;
+  await call("/api/tenant/lists/restore", { method: "POST", body: JSON.stringify({ list_ids: ids }) });
+  await refreshLists();
+});
 
 const MEMBER_FILTERS = {
   "": "すべて", pending: "未送信", success: "成功", failed: "失敗", skip: "SKIP",
@@ -1474,18 +1621,25 @@ function bindMemberFilter(listId) {
   });
 }
 
+const memberSelected = new Set();  // リストから除外する候補として選んだcompany_id
+
 async function renderMemberTable(listId, statusFilter) {
   const wrap = $("memberTableWrap");
   wrap.innerHTML = `<div class="empty">読み込み中...</div>`;
+  memberSelected.clear();
+  updateRemoveMembersButton();
   try {
     const qs = statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : "";
     const r = await call(`/api/tenant/lists/${listId}?limit=200${qs}`);
     if (!r.members.length) { wrap.innerHTML = `<div class="empty">該当する企業がありません</div>`; return; }
-    wrap.innerHTML = `<table><tr><th>会社名</th><th>都道府県</th><th>状態</th><th>詳細</th>
+    wrap.innerHTML = `<table><tr>
+      <th style="width:24px"><input type="checkbox" id="memberSelectAll" style="width:auto"></th>
+      <th>会社名</th><th>都道府県</th><th>状態</th><th>詳細</th>
       <th>返信</th><th>商談</th><th>受注</th></tr>` +
       r.members.map(m => {
         const cls = SEND_STATUS_CLASS[m.send_status] || "";
         return `<tr>
+          <td><input type="checkbox" class="memberChk" data-id="${m.id}" style="width:auto"></td>
           <td><a href="#" class="memberHistoryLink" data-id="${m.id}">${m.name}</a></td>
           <td>${m.pref || "—"}</td>
           <td><span class="pill${cls ? " " + cls : ""}">${SEND_STATUS_LABELS[m.send_status] || m.send_status}</span></td>
@@ -1501,9 +1655,33 @@ async function renderMemberTable(listId, statusFilter) {
     wrap.querySelectorAll(".outcomeBox").forEach(cb => {
       cb.addEventListener("change", () => recordOutcome(listId, Number(cb.dataset.id), cb.dataset.field, cb.checked));
     });
+    wrap.querySelectorAll(".memberChk").forEach(cb => {
+      cb.addEventListener("change", () => {
+        const cid = Number(cb.dataset.id);
+        cb.checked ? memberSelected.add(cid) : memberSelected.delete(cid);
+        updateRemoveMembersButton();
+      });
+    });
+    const selectAll = $("memberSelectAll");
+    selectAll.addEventListener("change", () => {
+      wrap.querySelectorAll(".memberChk").forEach(cb => {
+        cb.checked = selectAll.checked;
+        selectAll.checked ? memberSelected.add(Number(cb.dataset.id)) : memberSelected.delete(Number(cb.dataset.id));
+      });
+      updateRemoveMembersButton();
+    });
   } catch (e) {
     wrap.innerHTML = `<div class="result err">${e.message}</div>`;
   }
+}
+
+function updateRemoveMembersButton() {
+  const btn = $("btnRemoveMembers");
+  if (!btn) return;
+  btn.disabled = memberSelected.size === 0;
+  btn.textContent = memberSelected.size
+    ? `🗑 選択した${memberSelected.size}社をリストから除外`
+    : "🗑 選択した企業をリストから除外";
 }
 
 async function recordOutcome(listId, companyId, field, value) {
@@ -1539,7 +1717,29 @@ async function showDetail(id) {
   el.innerHTML = `<div class="empty">読み込み中...</div>`;
   await refreshKillSwitch();
   try {
-    el.innerHTML = `<h2>このリストへ送信 <span>SEND</span></h2>
+    const lst = lastLists.find(l => String(l.id) === String(id)) || {};
+    el.innerHTML = `<h2>リスト情報 <span>#${id}</span></h2>
+      <div class="card">
+        <div class="row">
+          <div><label>件数</label><div id="detailListCount" style="font-family:var(--mono);padding:9px 0">${(lst.company_count || 0).toLocaleString()}社</div></div>
+          <div><label>作成日時</label><div style="font-family:var(--mono);font-size:12px;padding:9px 0">${lst.created_at || "—"}</div></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>変更日時</label><div style="font-family:var(--mono);font-size:12px;padding:9px 0">${lst.updated_at || lst.created_at || "—"}</div></div>
+          <div>
+            <label>リスト名</label>
+            <div style="display:flex;gap:8px;align-items:center;padding:5px 0">
+              <span id="detailListName" style="font-weight:700">${lst.name || ""}</span>
+              <button class="ghost" id="btnRenameList" style="padding:4px 10px;font-size:11px">✎ 編集</button>
+            </div>
+          </div>
+        </div>
+        <div class="btnrow">
+          <button class="ghost" id="btnDuplicateList">⧉ 複製...</button>
+          <button class="danger" id="btnDeleteList">🗑 削除...</button>
+        </div>
+      </div>
+      <h2>このリストへ送信 <span>SEND</span></h2>
       <div class="card">
         <p class="hint">問い合わせページが確認できている企業のみが送信対象になります。
           ドライランでは実際のサイトへは何も送信されません(動作確認用)。</p>
@@ -1593,17 +1793,77 @@ async function showDetail(id) {
       </div>
       <h2>予約済みの送信 <span>SCHEDULED</span></h2>
       <div id="scheduledSendsWrap"><div class="empty">読み込み中...</div></div>
-      <h2>リスト詳細 <span>#${id}</span></h2>
+      <h2>リスト詳細 <span>企業一覧</span></h2>
       <div class="chips" id="memberFilter" style="margin-bottom:10px">
         ${Object.entries(MEMBER_FILTERS).map(([key, label]) =>
           `<label class="chip${key === "" ? " on" : ""}"><input type="radio" name="memberFilter"
             value="${key}"${key === "" ? " checked" : ""}>${label}</label>`).join("")}
+      </div>
+      <div class="btnrow" style="margin-top:0;margin-bottom:8px">
+        <button class="danger" id="btnRemoveMembers" disabled>🗑 選択した企業をリストから除外</button>
       </div>
       <div id="memberTableWrap"></div>
       <div id="memberHistoryWrap"></div>`;
     await renderMemberTable(id, "");
     bindMemberFilter(id);
     await refreshScheduledSends(id);
+
+    $("btnRemoveMembers").addEventListener("click", async () => {
+      const companyIds = [...memberSelected];
+      if (!companyIds.length) return;
+      if (!confirm(`選択した${companyIds.length}社をこのリストから除外します。会社データ自体や送信履歴は消えません。よろしいですか?`)) return;
+      try {
+        const r = await call(`/api/tenant/lists/${id}/remove-members`,
+          { method: "POST", body: JSON.stringify({ company_ids: companyIds }) });
+        if (r.count != null && $("detailListCount")) {
+          $("detailListCount").textContent = `${r.count.toLocaleString()}社`;
+        }
+        const activeFilter = document.querySelector('input[name="memberFilter"]:checked')?.value || "";
+        await renderMemberTable(id, activeFilter);
+        await refreshLists();
+      } catch (e) {
+        alert("除外に失敗しました: " + e.message);
+      }
+    });
+
+    $("btnRenameList").addEventListener("click", async () => {
+      const cur = $("detailListName").textContent;
+      const name = prompt("新しいリスト名を入力してください", cur);
+      if (!name || !name.trim() || name.trim() === cur) return;
+      try {
+        await call(`/api/tenant/lists/${id}/rename`, { method: "POST", body: JSON.stringify({ name: name.trim() }) });
+        $("detailListName").textContent = name.trim();
+        await refreshLists();
+      } catch (e) {
+        alert("リスト名の変更に失敗しました: " + e.message);
+      }
+    });
+
+    $("btnDuplicateList").addEventListener("click", async () => {
+      const cur = $("detailListName").textContent;
+      const name = prompt("複製後のリスト名を入力してください", `${cur}のコピー`);
+      if (!name || !name.trim()) return;
+      try {
+        const r = await call(`/api/tenant/lists/${id}/duplicate`,
+          { method: "POST", body: JSON.stringify({ name: name.trim() }) });
+        await refreshLists();
+        alert(`複製しました(${r.count.toLocaleString()}社) — list_id=${r.list_id}`);
+      } catch (e) {
+        alert("複製に失敗しました: " + e.message);
+      }
+    });
+
+    $("btnDeleteList").addEventListener("click", async () => {
+      if (!confirm("このリストを削除します。よろしいですか?(あとで復元できます)")) return;
+      try {
+        await call("/api/tenant/lists/delete", { method: "POST", body: JSON.stringify({ list_ids: [Number(id)] }) });
+        await refreshLists();
+        $("detailWrap").innerHTML = "";
+        goPage("lists");
+      } catch (e) {
+        alert("削除に失敗しました: " + e.message);
+      }
+    });
 
     $("sendScheduleToggle").addEventListener("change", () => {
       $("sendScheduleWrap").style.display = $("sendScheduleToggle").checked ? "block" : "none";

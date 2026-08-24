@@ -34,11 +34,23 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            取り込む。discover_urls:trueで、CSVのURL列から実際に
                            問い合わせページを探す(MIKOMERUの「CSV検索(URLで検索)」
                            相当。1件ずつ実ブラウザで開くため上限あり)
-  GET  /api/tenant/lists          自テナントのリスト一覧
+  GET  /api/tenant/lists          自テナントのリスト一覧(?include_deleted=1で
+                           削除済みも含める。MIKOMERUの「削除したものを含めて表示」相当)
   GET  /api/tenant/lists/<id>     リスト詳細(自テナントのものだけ。他社分は404)。
                            ?status=success|failed|skip|pending|replied|deal|wonで
                            企業ごとの送信状態で絞り込める(1社ごとのsend_status等を
                            含む。実送信結果はdry_run=falseの送信後に反映される)
+  POST /api/tenant/lists/<id>/rename  {"name"} → リスト名変更(MIKOMERU「編集」相当)
+  POST /api/tenant/lists/<id>/duplicate  {"name"} → リストの複製(MIKOMERU「複製」相当)
+  POST /api/tenant/lists/<id>/remove-members  {"company_ids":[...]} →
+                           リストから企業を個別に除外(MIKOMERU「個別削除」相当)
+  POST /api/tenant/lists/delete   {"list_ids":[...]} → ソフト削除(一括)
+  POST /api/tenant/lists/restore  {"list_ids":[...]} → 復元(一括)。
+                           物理削除はしない(送信履歴の追跡を残すため)
+  POST /api/tenant/lists・/api/tenant/lists/csv は既存の name/filters/csv に加え
+                           existing_list_id(整数)を指定すると、新規リストではなく
+                           そのリストへ追加する(MIKOMERUの「リスト保存」モーダルの
+                           「既存のリストに追加する」相当)
   POST /api/tenant/lists/<id>/outcome  {"company_id","field":"replied"|"deal"|"won",
                            "value","memo"} → 返信・商談化・受注を手動記録(β版。
                            メール自動取得等はしない)
@@ -60,6 +72,9 @@ CACもチャネル別成績も出せない = 売り物にならない。
   GET  /api/tenant/exclusions     自テナントの送信除外設定一覧
   POST /api/tenant/exclusions          {"company_id","reason"} → 除外に追加
   POST /api/tenant/exclusions/remove   {"company_id"} → 除外を解除
+  POST /api/tenant/exclusions/csv      {"csv","reason"} → 会社名の列を含むCSVを
+                           一括で除外登録する(MIKOMERUの送信除外設定「CSVで登録」
+                           タブ相当)。商号一致で照合できた行だけ除外される
                            除外はテナント別(tenant_exclusions)。全テナント共通の
                            法令対応suppressionとは別物で、can_contact()が両方を見る
   GET  /api/tenant/templates      自テナントの送信文章テンプレート一覧
@@ -111,8 +126,10 @@ CACもチャネル別成績も出せない = 売り物にならない。
   python3 api.py serve --port 8787
   python3 api.py test              # 自己テスト（サーバを立てて叩く）
 """
+import csv
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -143,6 +160,9 @@ SALES_ENGINE_API_KEY = os.environ.get("SALES_ENGINE_API_KEY")
 _SEND_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/send$")
 _OUTCOME_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/outcome$")
 _PREVIEW_MSG_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/preview-message$")
+_RENAME_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/rename$")
+_DUPLICATE_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/duplicate$")
+_REMOVE_MEMBERS_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/remove-members$")
 _SCREENSHOT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/screenshot$")
 _AUTOFILL_QUEUE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/autofill-queue$")
 _SEND_LOG_NOTE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/note$")
@@ -339,31 +359,90 @@ def h_tenant_lists_preview(con, tenant_id, data):
 
 
 def h_tenant_lists_create(con, tenant_id, data):
+    """existing_list_id(整数)を指定すると、新規リストではなくそのリストへ
+    追加する(MIKOMERUの「リスト保存」モーダルの「既存のリストに追加する」相当)。
+    その場合nameは無視してよい(既存リスト名は変えない)。"""
+    existing_list_id = data.get("existing_list_id")
+    if existing_list_id is not None and not isinstance(existing_list_id, int):
+        return 400, {"error": "existing_list_idは整数で指定してください"}
     name = (data.get("name") or "").strip()
-    if not name:
-        return 400, {"error": "nameは必須です"}
+    if not existing_list_id and not name:
+        return 400, {"error": "nameを入力するか、既存のリストを選択してください"}
     filters = data.get("filters") or {}
     if not isinstance(filters, dict):
         return 400, {"error": "filtersはオブジェクトで指定してください"}
-    return 200, TL.create_from_filter(con, tenant_id, name, filters)
-
-
-def h_tenant_lists_csv(con, tenant_id, data):
-    name = (data.get("name") or "").strip()
-    csv_text = data.get("csv")
-    if not name or not csv_text:
-        return 400, {"error": "nameとcsvは必須です"}
-    if len(csv_text) > 10_000_000:  # 10MB上限(暴走・誤操作の被害抑制)
-        return 400, {"error": "CSVが大きすぎます(上限10MB)"}
-    discover_urls = bool(data.get("discover_urls"))
-    res = TL.create_from_csv(con, tenant_id, name, csv_text, discover_urls=discover_urls)
+    res = TL.create_from_filter(con, tenant_id, name, filters, existing_list_id=existing_list_id)
     if "error" in res:
         return 400, res
     return 200, res
 
 
-def h_tenant_lists_list(con, tenant_id):
-    return 200, {"lists": TL.list_lists(con, tenant_id)}
+def h_tenant_lists_csv(con, tenant_id, data):
+    existing_list_id = data.get("existing_list_id")
+    if existing_list_id is not None and not isinstance(existing_list_id, int):
+        return 400, {"error": "existing_list_idは整数で指定してください"}
+    name = (data.get("name") or "").strip()
+    csv_text = data.get("csv")
+    if (not existing_list_id and not name) or not csv_text:
+        return 400, {"error": "csvは必須です。nameを入力するか、既存のリストを選択してください"}
+    if len(csv_text) > 10_000_000:  # 10MB上限(暴走・誤操作の被害抑制)
+        return 400, {"error": "CSVが大きすぎます(上限10MB)"}
+    discover_urls = bool(data.get("discover_urls"))
+    res = TL.create_from_csv(con, tenant_id, name, csv_text, discover_urls=discover_urls,
+                              existing_list_id=existing_list_id)
+    if "error" in res:
+        return 400, res
+    return 200, res
+
+
+def h_tenant_lists_list(con, tenant_id, qs=None):
+    include_deleted = bool((qs or {}).get("include_deleted", ["0"])[0] == "1")
+    return 200, {"lists": TL.list_lists(con, tenant_id, include_deleted=include_deleted)}
+
+
+def h_tenant_list_rename(con, tenant_id, list_id, data):
+    """MIKOMERUの保存済みリスト詳細画面「編集」相当(リスト名の変更のみ)。"""
+    name = (data.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "nameは必須です"}
+    ok = TL.rename_list(con, tenant_id, list_id, name)
+    if not ok:
+        return 404, {"error": "リストが見つかりません"}
+    return 200, {"ok": True}
+
+
+def h_tenant_list_duplicate(con, tenant_id, list_id, data):
+    """MIKOMERUの保存済みリスト詳細画面「複製」相当。"""
+    name = (data.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "nameは必須です"}
+    res = TL.duplicate_list(con, tenant_id, list_id, name)
+    if res is None:
+        return 404, {"error": "リストが見つかりません"}
+    return 200, res
+
+
+def h_tenant_list_remove_members(con, tenant_id, list_id, data):
+    """MIKOMERUの保存済みリスト詳細画面「リスト企業の個別削除」相当。"""
+    company_ids = data.get("company_ids")
+    if not isinstance(company_ids, list) or not company_ids \
+            or not all(isinstance(x, int) for x in company_ids):
+        return 400, {"error": "company_idsは整数の配列で指定してください"}
+    removed = TL.remove_members(con, tenant_id, list_id, company_ids)
+    row = con.execute("SELECT company_count FROM target_lists WHERE id=? AND tenant_id=?",
+                       (list_id, tenant_id)).fetchone()
+    return 200, {"ok": True, "removed": removed, "count": row["company_count"] if row else None}
+
+
+def h_tenant_lists_set_deleted(con, tenant_id, data, deleted):
+    """MIKOMERUの保存済みリスト一覧「削除」チェックボックス一括削除/復元相当。
+    ソフト削除のため物理削除はしない(送信履歴の追跡を残すため)。"""
+    list_ids = data.get("list_ids")
+    if not isinstance(list_ids, list) or not list_ids \
+            or not all(isinstance(x, int) for x in list_ids):
+        return 400, {"error": "list_idsは整数の配列で指定してください"}
+    changed = TL.set_lists_deleted(con, tenant_id, list_ids, deleted)
+    return 200, {"ok": True, "changed": changed}
 
 
 def h_tenant_list_detail(con, tenant_id, list_id, qs):
@@ -629,6 +708,48 @@ def h_tenant_exclusions_remove(con, tenant_id, data):
         return 400, {"error": "company_idは必須です"}
     db.unexclude_for_tenant(con, tenant_id, company_id)
     return 200, {"ok": True}
+
+
+_EXCLUDE_CSV_NAME_COLS = {"name", "会社名", "企業名", "法人名", "商号"}
+
+
+def h_tenant_exclusions_csv(con, tenant_id, data):
+    """送信除外設定のCSV一括登録(MIKOMERUの「送信除外設定|登録」画面の
+    「CSVで登録」タブ相当)。会社名の列だけを見て、共有マスタ or 自テナントの
+    非公開データ(companies.owner_tenant_id)から商号一致で照合する。
+    照合できなかった行は除外できないため件数だけ返す(黙って無視しない)。"""
+    csv_text = data.get("csv")
+    if not csv_text:
+        return 400, {"error": "csvは必須です"}
+    if len(csv_text) > 2_000_000:  # 2MB上限(暴走・誤操作の被害抑制)
+        return 400, {"error": "CSVが大きすぎます(上限2MB)"}
+    reason = (data.get("reason") or "").strip() or None
+
+    reader = csv.DictReader(io.StringIO(csv_text))
+    rows = list(reader)[:5000]
+    if not rows:
+        return 400, {"error": "CSVにデータ行がありません"}
+
+    matched = not_found = 0
+    for row in rows:
+        raw_name = None
+        for k, v in row.items():
+            if k and k.strip().lower() in _EXCLUDE_CSV_NAME_COLS and (v or "").strip():
+                raw_name = v.strip()
+                break
+        if not raw_name:
+            not_found += 1
+            continue
+        name_norm = db.normalize_name(raw_name)
+        c = con.execute("""SELECT id FROM companies WHERE name_norm=? AND dedup_of IS NULL
+            AND (owner_tenant_id IS NULL OR owner_tenant_id=?) LIMIT 1""",
+            (name_norm, tenant_id)).fetchone()
+        if not c:
+            not_found += 1
+            continue
+        db.exclude_for_tenant(con, tenant_id, c["id"], reason=reason)
+        matched += 1
+    return 200, {"matched": matched, "not_found": not_found}
 
 
 def h_tenant_templates_list(con, tenant_id):
@@ -965,9 +1086,14 @@ class Handler(BaseHTTPRequestHandler):
         note_match = _SEND_LOG_NOTE_PATH_RE.match(path)
         manual_sent_match = _SEND_LOG_MANUAL_SENT_PATH_RE.match(path)
         preview_msg_match = _PREVIEW_MSG_PATH_RE.match(path)
-        if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv") \
+        rename_match = _RENAME_PATH_RE.match(path)
+        duplicate_match = _DUPLICATE_PATH_RE.match(path)
+        remove_members_match = _REMOVE_MEMBERS_PATH_RE.match(path)
+        if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv",
+                     "/api/tenant/lists/delete", "/api/tenant/lists/restore") \
                 or send_match or outcome_match or autofill_match or note_match \
-                or manual_sent_match or preview_msg_match:
+                or manual_sent_match or preview_msg_match \
+                or rename_match or duplicate_match or remove_members_match:
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -979,6 +1105,10 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_lists_create(con, tenant["id"], data)
                 elif path == "/api/tenant/lists/csv":
                     st, res = h_tenant_lists_csv(con, tenant["id"], data)
+                elif path == "/api/tenant/lists/delete":
+                    st, res = h_tenant_lists_set_deleted(con, tenant["id"], data, True)
+                elif path == "/api/tenant/lists/restore":
+                    st, res = h_tenant_lists_set_deleted(con, tenant["id"], data, False)
                 elif send_match:
                     st, res = h_tenant_list_send(con, tenant["id"], int(send_match.group(1)), data)
                 elif outcome_match:
@@ -993,6 +1123,13 @@ class Handler(BaseHTTPRequestHandler):
                 elif preview_msg_match:
                     st, res = h_tenant_list_preview_message(con, tenant["id"],
                                                              int(preview_msg_match.group(1)), data)
+                elif rename_match:
+                    st, res = h_tenant_list_rename(con, tenant["id"], int(rename_match.group(1)), data)
+                elif duplicate_match:
+                    st, res = h_tenant_list_duplicate(con, tenant["id"], int(duplicate_match.group(1)), data)
+                elif remove_members_match:
+                    st, res = h_tenant_list_remove_members(con, tenant["id"],
+                                                            int(remove_members_match.group(1)), data)
                 else:
                     st, res = h_tenant_send_log_autofill_queue(con, tenant["id"],
                                                                 int(autofill_match.group(1)))
@@ -1002,7 +1139,8 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
-        if path in ("/api/tenant/exclusions", "/api/tenant/exclusions/remove"):
+        if path in ("/api/tenant/exclusions", "/api/tenant/exclusions/remove",
+                     "/api/tenant/exclusions/csv"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -1010,6 +1148,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(401, {"error": "unauthorized"})
                 if path == "/api/tenant/exclusions":
                     st, res = h_tenant_exclusions_add(con, tenant["id"], data)
+                elif path == "/api/tenant/exclusions/csv":
+                    st, res = h_tenant_exclusions_csv(con, tenant["id"], data)
                 else:
                     st, res = h_tenant_exclusions_remove(con, tenant["id"], data)
                 return self._json(st, res)
@@ -1197,7 +1337,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif u.path == "/api/tenant/dashboard":
                     st, res = h_tenant_dashboard(con, tenant["id"])
                 elif u.path == "/api/tenant/lists":
-                    st, res = h_tenant_lists_list(con, tenant["id"])
+                    st, res = h_tenant_lists_list(con, tenant["id"], qs)
                 else:
                     list_id_str = u.path[len("/api/tenant/lists/"):]
                     if not list_id_str.isdigit():
@@ -1542,6 +1682,92 @@ def self_test(port=8899):
     st, r = post_auth("/api/tenant/lists/preview", {"filters": {"prefs": ["福岡県"]}}, token=key_a)
     t("他テナントがCSVで持ち込んだ非公開企業はフィルタにも出てこない",
       st == 200 and not any(s["name"] == "テナントB専用企業" for s in r.get("sample", [])))
+
+    print("\n── 保存済みリスト管理(MIKOMERU同等UI: 編集/複製/個別削除/ソフト削除/復元) ──")
+    # list_a_id/list_b_idは以降の送信テスト等で厳密な状態を前提にされているため、
+    # ここでの破壊的操作(除外・削除)は専用のlist_c_idに対して行い、既存の流れに影響させない
+    st, r = post_auth("/api/tenant/lists", {"name": "テストC_神奈川県", "filters": {"prefs": ["神奈川県"]}},
+                      token=key_a)
+    t("POST /api/tenant/lists: テスト用リストCを作成", st == 200 and bool(r.get("list_id")))
+    list_c_id = r.get("list_id")
+    member_count_before = r.get("count")  # フィルタ絞込は200件超あるため、ページングされる
+                                           # GET /api/tenant/lists/<id> のmembers件数ではなく
+                                           # 作成直後のcountをそのまま真の総数として使う
+    t("リストCにメンバーが1件以上いる(以降のテストの前提)", isinstance(member_count_before, int) and member_count_before > 0)
+    st, r_before = get_auth(f"/api/tenant/lists/{list_c_id}", token=key_a)
+    some_company_id = r_before["members"][0]["id"]
+
+    st, r = post_auth(f"/api/tenant/lists/{list_c_id}/rename", {"name": "リストC(改名)"}, token=key_a)
+    t("POST /api/tenant/lists/<id>/renameでリスト名を変更できる", st == 200 and r.get("ok"))
+    st, r = get_auth("/api/tenant/lists", token=key_a)
+    t("変更後の名前がGET一覧に反映される",
+      st == 200 and any(l["id"] == list_c_id and l["name"] == "リストC(改名)" for l in r.get("lists", [])))
+    st, r = post_auth(f"/api/tenant/lists/{list_b_id}/rename", {"name": "乗っ取り"}, token=key_a)
+    t("他テナントのリストはrenameできない(404)", st == 404)
+
+    st, r = post_auth(f"/api/tenant/lists/{list_c_id}/duplicate", {"name": "リストCの複製"}, token=key_a)
+    t("POST /api/tenant/lists/<id>/duplicateで複製できる",
+      st == 200 and r.get("list_id") and r.get("list_id") != list_c_id)
+    dup_list_id = r.get("list_id")
+    t("複製されたリストの件数が元と一致する", r.get("count") == member_count_before)
+    st, r = post_auth(f"/api/tenant/lists/{list_b_id}/duplicate", {"name": "乗っ取り複製"}, token=key_a)
+    t("他テナントのリストはduplicateできない(404)", st == 404)
+
+    st, r = post_auth(f"/api/tenant/lists/{list_c_id}/remove-members",
+                      {"company_ids": [some_company_id]}, token=key_a)
+    t("POST /api/tenant/lists/<id>/remove-membersで企業を除外できる",
+      st == 200 and r.get("removed") == 1 and r.get("count") == member_count_before - 1)
+    st, r = get_auth(f"/api/tenant/lists/{list_c_id}", token=key_a)
+    t("除外後はメンバー一覧に出てこない", st == 200 and all(m["id"] != some_company_id for m in r.get("members", [])))
+    st, r2 = get_auth("/api/tenant/lists", token=key_a)
+    t("除外後は一覧のcompany_countも減る",
+      st == 200 and any(l["id"] == list_c_id and l["company_count"] == member_count_before - 1
+                         for l in r2.get("lists", [])))
+    st, r = post_auth(f"/api/tenant/lists/{list_c_id}/remove-members",
+                      {"company_ids": [some_company_id]}, token=key_b)
+    t("他テナントのリストからは除外できない(removed=0)", st == 200 and r.get("removed") == 0)
+
+    st, r = post_auth("/api/tenant/lists/delete", {"list_ids": [dup_list_id]}, token=key_a)
+    t("POST /api/tenant/lists/deleteでソフト削除できる", st == 200 and r.get("changed") == 1)
+    st, r = get_auth("/api/tenant/lists", token=key_a)
+    t("削除後は既定の一覧に出てこない", st == 200 and all(l["id"] != dup_list_id for l in r.get("lists", [])))
+    st, r = get_auth("/api/tenant/lists?include_deleted=1", token=key_a)
+    t("include_deleted=1で削除済みも見える(復元列相当のdeleted_atが入る)",
+      st == 200 and any(l["id"] == dup_list_id and l["deleted_at"] for l in r.get("lists", [])))
+    st, r = post_auth("/api/tenant/lists/delete", {"list_ids": [dup_list_id]}, token=key_b)
+    t("他テナントのリストはdeleteできない(changed=0)", st == 200 and r.get("changed") == 0)
+    st, r = post_auth("/api/tenant/lists/restore", {"list_ids": [dup_list_id]}, token=key_a)
+    t("POST /api/tenant/lists/restoreで復元できる", st == 200 and r.get("changed") == 1)
+    st, r = get_auth("/api/tenant/lists", token=key_a)
+    t("復元後は既定の一覧に戻る", st == 200 and any(l["id"] == dup_list_id for l in r.get("lists", [])))
+
+    st, r = post_auth("/api/tenant/lists",
+                      {"filters": {"prefs": ["神奈川県"]}, "existing_list_id": list_c_id}, token=key_a)
+    t("POST /api/tenant/listsにexisting_list_idを渡すと新規作成せず既存リストへ追加",
+      st == 200 and r.get("list_id") == list_c_id)
+    st, r = get_auth("/api/tenant/lists", token=key_a)
+    t("既存リストへ追加すると同じ条件の絞込結果が反映される(先に除外した企業も条件に合えば戻る)",
+      st == 200 and any(l["id"] == list_c_id and l["company_count"] == member_count_before
+                         for l in r.get("lists", [])))
+
+    con.execute("DELETE FROM target_list_members WHERE list_id IN (?,?)", (list_c_id, dup_list_id))
+    con.execute("DELETE FROM target_lists WHERE id IN (?,?)", (list_c_id, dup_list_id))
+    con.commit()
+
+    print("\n── 送信除外設定 CSV一括登録 ──")
+    ex_csv_company = con.execute("""SELECT name FROM companies
+        WHERE dedup_of IS NULL AND owner_tenant_id IS NULL LIMIT 1""").fetchone()
+    ex_csv_text = f"会社名\n{ex_csv_company['name']}\n存在しない架空企業名XYZ999\n"
+    st, r = post_auth("/api/tenant/exclusions/csv", {"csv": ex_csv_text, "reason": "CSV一括テスト"}, token=key_a)
+    t("POST /api/tenant/exclusions/csvで一括除外できる(該当1件・不一致1件)",
+      st == 200 and r.get("matched") == 1 and r.get("not_found") == 1)
+    st, r = get_auth("/api/tenant/exclusions", token=key_a)
+    t("CSV一括除外した企業がGET /api/tenant/exclusionsに出る",
+      st == 200 and any(e["name"] == ex_csv_company["name"] for e in r.get("exclusions", [])))
+    st, r = post_auth("/api/tenant/exclusions/csv", {"csv": ""}, token=key_a)
+    t("空のcsvは400", st == 400)
+    con.execute("DELETE FROM tenant_exclusions WHERE tenant_id=? AND reason='CSV一括テスト'", (tid_a,))
+    con.commit()
 
     print("\n── 送信先リストからの送信(dry_run) ──")
     st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send", {"body": "本文のみ"}, token=key_a)

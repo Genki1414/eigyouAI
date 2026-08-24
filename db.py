@@ -413,10 +413,17 @@ def migrate(con):
         # DBへは保存しない=campaigns/touchesは再送で使い回されるため、そこに保存すると
         # 別の送信操作の設定が漏れて残ってしまう)。
         ("scheduled_sends", "track_clicks", "INTEGER DEFAULT 0"),
+        # 保存済みリストのMIKOMERU同等UI(一覧の変更日時列・ソフト削除/復元・
+        # リスト名編集)のための列。deleted_atがNULLでない行は一覧から除外される
+        # (「削除したものを含めて表示」を付けた時だけ含める)。物理削除ではなく
+        # ソフト削除にしているのは、誤削除からの復元をMIKOMERU同様に可能にするため。
+        ("target_lists", "updated_at", "TEXT"),
+        ("target_lists", "deleted_at", "TEXT"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+    con.execute("UPDATE target_lists SET updated_at=created_at WHERE updated_at IS NULL")
     con.executescript(INDEXES)   # 列追加のあとにインデックスを張る
     con.execute("""INSERT INTO meta (key, value) VALUES ('schema_version', ?)
                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",

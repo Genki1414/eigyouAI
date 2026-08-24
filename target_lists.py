@@ -126,14 +126,21 @@ def preview_filter(con, tenant_id, filters, sample_limit=10):
             "capped": total > MAX_LIST_SIZE, "sample": [dict(r) for r in sample]}
 
 
-def create_from_filter(con, tenant_id, name, filters):
+def create_from_filter(con, tenant_id, name, filters, existing_list_id=None):
+    """existing_list_idを渡すと新規リストを作らず、そのリストへ追加する
+    (MIKOMERUの「リスト保存」モーダルの「既存のリストに追加する」相当)。"""
     where, params = build_filter_sql(tenant_id, filters)
     ids = [r[0] for r in con.execute(
         f"SELECT id FROM companies WHERE {where} LIMIT ?", params + [MAX_LIST_SIZE]).fetchall()]
+    if existing_list_id:
+        result = add_members_to_list(con, tenant_id, existing_list_id, ids)
+        if result is None:
+            return {"error": "指定されたリストが見つかりません"}
+        return result
     now = datetime.now().isoformat(timespec="seconds")
     cur = con.execute("""INSERT INTO target_lists
-        (tenant_id,name,source,filter_json,company_count,created_at) VALUES (?,?,?,?,?,?)""",
-        (tenant_id, name, "filter", json.dumps(filters, ensure_ascii=False), len(ids), now))
+        (tenant_id,name,source,filter_json,company_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?)""",
+        (tenant_id, name, "filter", json.dumps(filters, ensure_ascii=False), len(ids), now, now))
     list_id = cur.lastrowid
     con.executemany("""INSERT OR IGNORE INTO target_list_members
         (list_id, company_id, send_status, created_at, updated_at) VALUES (?,?,'PENDING',?,?)""",
@@ -166,7 +173,7 @@ def _pick(row, cols):
 MAX_URL_DISCOVERY_ROWS = 30
 
 
-def create_from_csv(con, tenant_id, name, csv_text, discover_urls=False):
+def create_from_csv(con, tenant_id, name, csv_text, discover_urls=False, existing_list_id=None):
     """顧客が持ち込む企業リストを取り込む。既存の共有マスタ or 自テナントの
     既存データと商号(正規化)+都道府県が一致すればそこに寄せ、無ければ
     owner_tenant_id=自分のtenant_idの新規companyとして追加する
@@ -177,7 +184,10 @@ def create_from_csv(con, tenant_id, name, csv_text, discover_urls=False):
     アクセスして問い合わせページを探す(form_navigator.discover_contact_url()。
     フォームへの入力・送信は一切行わない、閲覧のみの探索)。1件ずつ実ブラウザを
     起動する重い処理のためMAX_URL_DISCOVERY_ROWS件までしか行わない
-    (超過分はurl_discoveryのskipped_over_limitに件数を残す。黙って切り捨てない)。"""
+    (超過分はurl_discoveryのskipped_over_limitに件数を残す。黙って切り捨てない)。
+
+    existing_list_idを渡すと新規リストを作らず、そのリストへ追加する
+    (MIKOMERUの「リスト保存」モーダルの「既存のリストに追加する」相当)。"""
     import db
 
     reader = csv.DictReader(io.StringIO(csv_text))
@@ -186,10 +196,17 @@ def create_from_csv(con, tenant_id, name, csv_text, discover_urls=False):
         return {"error": "CSVにデータ行がありません"}
 
     now = datetime.now().isoformat(timespec="seconds")
-    cur = con.execute("""INSERT INTO target_lists
-        (tenant_id,name,source,filter_json,company_count,created_at) VALUES (?,?,?,?,?,?)""",
-        (tenant_id, name, "csv", None, 0, now))
-    list_id = cur.lastrowid
+    if existing_list_id:
+        owns = con.execute("SELECT 1 FROM target_lists WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+                            (existing_list_id, tenant_id)).fetchone()
+        if not owns:
+            return {"error": "指定されたリストが見つかりません"}
+        list_id = existing_list_id
+    else:
+        cur = con.execute("""INSERT INTO target_lists
+            (tenant_id,name,source,filter_json,company_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?)""",
+            (tenant_id, name, "csv", None, 0, now, now))
+        list_id = cur.lastrowid
 
     matched = created = skipped = 0
     url_candidates = []  # discover_urls=True時に後段でクロールする(company_id, url)
@@ -224,9 +241,11 @@ def create_from_csv(con, tenant_id, name, csv_text, discover_urls=False):
         if row_url:
             url_candidates.append((cid, row_url))
 
-    total = matched + created
-    con.execute("UPDATE target_lists SET company_count=? WHERE id=?", (total, list_id))
+    con.execute("""UPDATE target_lists SET
+        company_count=(SELECT COUNT(*) FROM target_list_members WHERE list_id=?),
+        updated_at=? WHERE id=?""", (list_id, now, list_id))
     con.commit()
+    total = con.execute("SELECT company_count FROM target_lists WHERE id=?", (list_id,)).fetchone()[0]
 
     result = {"list_id": list_id, "count": total, "matched_existing": matched,
               "new_companies": created, "skipped_rows": skipped}
@@ -267,10 +286,95 @@ def _discover_contact_urls(con, candidates):
             "error": error, "skipped_over_limit": skipped_over_limit}
 
 
-def list_lists(con, tenant_id):
-    rows = con.execute("""SELECT id, name, source, company_count, created_at
-        FROM target_lists WHERE tenant_id=? ORDER BY id DESC""", (tenant_id,)).fetchall()
+def list_lists(con, tenant_id, include_deleted=False):
+    where = "tenant_id=?" if include_deleted else "tenant_id=? AND deleted_at IS NULL"
+    rows = con.execute(f"""SELECT id, name, source, company_count, created_at, updated_at, deleted_at
+        FROM target_lists WHERE {where} ORDER BY id DESC""", (tenant_id,)).fetchall()
     return [dict(r) for r in rows]
+
+
+def rename_list(con, tenant_id, list_id, name):
+    """MIKOMERUの保存済みリスト詳細画面の「編集」相当(リスト名の変更のみ)。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = con.execute("""UPDATE target_lists SET name=?, updated_at=?
+        WHERE id=? AND tenant_id=? AND deleted_at IS NULL""", (name, now, list_id, tenant_id))
+    con.commit()
+    return cur.rowcount > 0
+
+
+def set_lists_deleted(con, tenant_id, list_ids, deleted):
+    """複数リストのソフト削除/復元をまとめて行う(MIKOMERUのチェックボックス一括削除・復元相当)。
+    物理削除はしない: target_list_members/form_send_log等から参照され続けるため、
+    消してしまうと送信履歴の追跡ができなくなる。"""
+    if not list_ids:
+        return 0
+    now = datetime.now().isoformat(timespec="seconds")
+    value = now if deleted else None
+    qmarks = ",".join("?" * len(list_ids))
+    cur = con.execute(f"""UPDATE target_lists SET deleted_at=?, updated_at=?
+        WHERE tenant_id=? AND id IN ({qmarks})""", [value, now, tenant_id] + list(list_ids))
+    con.commit()
+    return cur.rowcount
+
+
+def duplicate_list(con, tenant_id, list_id, new_name):
+    """MIKOMERUの保存済みリスト詳細画面「複製」相当。フィルタ条件ではなく
+    現時点のメンバー(会社)をそのままコピーする(元リストへの送信結果等の
+    履歴には影響しない、新規の別リストとして独立させる)。"""
+    src = con.execute("SELECT * FROM target_lists WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+                       (list_id, tenant_id)).fetchone()
+    if not src:
+        return None
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = con.execute("""INSERT INTO target_lists
+        (tenant_id,name,source,filter_json,company_count,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?)""",
+        (tenant_id, new_name, src["source"], src["filter_json"], src["company_count"], now, now))
+    new_id = cur.lastrowid
+    con.execute("""INSERT INTO target_list_members (list_id, company_id, send_status, created_at, updated_at)
+        SELECT ?, company_id, 'PENDING', ?, ? FROM target_list_members WHERE list_id=?""",
+        (new_id, now, now, list_id))
+    con.commit()
+    return {"list_id": new_id, "count": src["company_count"]}
+
+
+def remove_members(con, tenant_id, list_id, company_ids):
+    """リストから個別の会社を除外する(MIKOMERUの保存済みリスト詳細画面
+    「リスト企業の個別削除」相当)。会社そのもの・送信履歴は消さない。"""
+    owns = con.execute("SELECT 1 FROM target_lists WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+                        (list_id, tenant_id)).fetchone()
+    if not owns or not company_ids:
+        return 0
+    qmarks = ",".join("?" * len(company_ids))
+    cur = con.execute(f"""DELETE FROM target_list_members WHERE list_id=?
+        AND company_id IN ({qmarks})""", [list_id] + list(company_ids))
+    removed = cur.rowcount
+    if removed:
+        now = datetime.now().isoformat(timespec="seconds")
+        con.execute("""UPDATE target_lists SET
+            company_count=(SELECT COUNT(*) FROM target_list_members WHERE list_id=?),
+            updated_at=? WHERE id=?""", (list_id, now, list_id))
+    con.commit()
+    return removed
+
+
+def add_members_to_list(con, tenant_id, list_id, company_ids):
+    """フィルタ検索・CSV取込の結果を、新規リストではなく既存リストへ追加する
+    (MIKOMERUの「リスト保存」モーダルの「既存のリストに追加する」相当)。"""
+    owns = con.execute("SELECT 1 FROM target_lists WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+                        (list_id, tenant_id)).fetchone()
+    if not owns:
+        return None
+    now = datetime.now().isoformat(timespec="seconds")
+    con.executemany("""INSERT OR IGNORE INTO target_list_members
+        (list_id, company_id, send_status, created_at, updated_at) VALUES (?,?,'PENDING',?,?)""",
+        [(list_id, cid, now, now) for cid in company_ids])
+    con.execute("""UPDATE target_lists SET
+        company_count=(SELECT COUNT(*) FROM target_list_members WHERE list_id=?),
+        updated_at=? WHERE id=?""", (list_id, now, list_id))
+    con.commit()
+    count = con.execute("SELECT company_count FROM target_lists WHERE id=?", (list_id,)).fetchone()[0]
+    return {"list_id": list_id, "count": count}
 
 
 _MEMBER_STATUS_FILTERS = {

@@ -2339,8 +2339,14 @@ async function renderSendForm(container, id) {
   container.innerHTML = `<div class="empty">読み込み中...</div>`;
   await refreshKillSwitch();
   try {
+    const targetList = allLists.find(l => String(l.id) === String(id));
+    const targetListLabel = targetList
+      ? `${targetList.name}(${targetList.company_count.toLocaleString()}社)`
+      : `リストID ${id}`;
     container.innerHTML = `<h2>送信文章 <span>MESSAGE</span></h2>
       <div class="card">
+        <p style="margin-bottom:10px;padding:10px 14px;background:var(--concrete);
+          border-radius:6px;font-weight:700">📋 送信対象リスト: ${targetListLabel}</p>
         <p class="hint">問い合わせページが確認できている企業のみが送信対象になります。
           ドライランでは実際のサイトへは何も送信されません(動作確認用)。</p>
         <div style="margin-top:10px">

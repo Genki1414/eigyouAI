@@ -257,6 +257,32 @@ tr.clickable:hover{background:var(--blue-soft)}
       <section class="page" data-page="sendlog">
         <h2>自動送信ログ <span>SEND LOG</span></h2>
         <div class="card">
+          <div class="row" style="margin-bottom:0">
+            <div>
+              <label>期間(から)</label>
+              <input type="date" id="sendLogExecDateFrom">
+            </div>
+            <div>
+              <label>期間(まで)</label>
+              <input type="date" id="sendLogExecDateTo">
+            </div>
+            <div>
+              <label>送信対象リスト</label>
+              <select id="sendLogExecListFilter"><option value="">-- 指定なし --</option></select>
+            </div>
+            <div style="display:flex;align-items:flex-end">
+              <button id="btnSendLogExecSearch">🔍 検索</button>
+            </div>
+          </div>
+        </div>
+        <div id="sendLogExecSummary" style="margin-top:12px"></div>
+        <div id="sendLogExecWrap" style="margin-top:12px"><div class="empty">接続すると表示されます</div></div>
+      </section>
+
+      <section class="page" data-page="sendlog-detail">
+        <h2>自動送信ログ | 詳細 <span id="sendLogDetailListName"></span></h2>
+        <div class="btnrow"><button class="ghost" id="btnSendLogDetailBack">← 一覧へ戻る</button></div>
+        <div class="card" style="margin-top:12px">
           <p class="hint">自動送信に失敗した企業(「一時的な失敗」「失敗(未対応)」)は、
             Chrome拡張機能「<b>AshiBase 自動入力アシスト</b>」を使うと、各行の「自動入力」ボタン→
             対象企業のフォームが新しいタブで開く→そのタブで拡張機能のアイコンをクリック、で
@@ -875,6 +901,7 @@ tr.clickable:hover{background:var(--blue-soft)}
 // ── ナビゲーション(単一ページ内の切替。リロードなし) ──
 const PAGE_TITLES = {
   home: "ホーム", autosend: "自動送信", sendlog: "自動送信ログ",
+  "sendlog-detail": "自動送信ログ | 詳細",
   "tmpl-body-list": "送信文章テンプレート | テンプレート一覧",
   "tmpl-body-add": "送信文章テンプレート | テンプレート登録",
   "tmpl-sender-list": "送信元テンプレート | テンプレート一覧",
@@ -887,13 +914,15 @@ const PAGE_TITLES = {
   conn: "接続設定",
 };
 function goPage(pageId) {
-  const item = [...document.querySelectorAll(".navitem")].find(n => n.dataset.page === pageId);
+  const navPageId = pageId === "sendlog-detail" ? "sendlog" : pageId;
+  const item = [...document.querySelectorAll(".navitem")].find(n => n.dataset.page === navPageId);
   document.querySelectorAll(".navitem").forEach(n => n.classList.toggle("active", n === item));
   document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.dataset.page === pageId));
   document.getElementById("pageTitle").textContent = PAGE_TITLES[pageId];
   if (pageId === "home") { refreshHomeStats(); refreshDashboard(); }
   if (pageId === "autosend") populateAutosendListSelect();
-  if (pageId === "sendlog") refreshSendLog();
+  if (pageId === "sendlog") { populateSendLogExecListFilter(); refreshSendLogExecutions(); }
+  if (pageId === "sendlog-detail") refreshSendLog();
   if (pageId === "searchlog") { $("searchLogDetailWrap").innerHTML = ""; refreshSearchLog(); }
   if (pageId === "exclude-list") refreshExclusions();
   if (pageId === "tmpl-body-list") refreshTemplates();
@@ -1004,6 +1033,8 @@ document.getElementById("fCapital").addEventListener("change", e => {
 
 let API = "", KEY = "", connected = false, lastLists = [], lastTemplates = [];
 let sendLogExcluded = new Set();   // countpillsでOFFにしたstatus(除外リスト)
+let currentSendLogListId = null;   // 自動送信ログ「詳細」ページが対象にしているリストID
+let currentSendLogListName = "";
 const $ = id => document.getElementById(id);
 
 // このページがapi.py自身から配信されている場合は、同一オリジンを既定値にする
@@ -1193,6 +1224,95 @@ $("saveListModalSave").addEventListener("click", async () => {
   }
 });
 
+// ── 自動送信ログ 一覧(MIKOMERU同様、会社別の明細ではなく実行単位の集計。T22) ──
+function populateSendLogExecListFilter() {
+  const sel = $("sendLogExecListFilter");
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">-- 指定なし --</option>` +
+    allLists.map(l => `<option value="${l.id}">${l.name}(${l.company_count.toLocaleString()}社)</option>`).join("");
+  if (cur && allLists.some(l => String(l.id) === cur)) sel.value = cur;
+}
+
+function goSendLogDetail(listId, listName) {
+  currentSendLogListId = listId;
+  currentSendLogListName = listName || "";
+  goPage("sendlog-detail");
+  $("sendLogDetailListName").textContent = currentSendLogListName ? `— ${currentSendLogListName}` : "";
+}
+
+async function refreshSendLogExecutions() {
+  if (!connected) return;
+  const el = $("sendLogExecWrap");
+  el.innerHTML = `<div class="empty">読み込み中...</div>`;
+  try {
+    const qs = new URLSearchParams();
+    const listId = $("sendLogExecListFilter").value;
+    if (listId) qs.set("list_id", listId);
+    const dateFrom = $("sendLogExecDateFrom").value;
+    const dateTo = $("sendLogExecDateTo").value;
+    if (dateFrom) qs.set("date_from", dateFrom);
+    if (dateTo) qs.set("date_to", dateTo);
+    const r = await call(`/api/tenant/send-log/executions?${qs.toString()}`);
+    const execs = r.executions || [];
+    const totals = r.totals || { success: 0, failed: 0, no_form: 0, total: 0 };
+    $("sendLogExecSummary").innerHTML = `
+      <p style="font-size:13px;font-weight:700">${execs.length.toLocaleString()}件見つかりました。
+        / ${totals.total.toLocaleString()}件送信しました。</p>
+      <div class="countpills">
+        <span class="countpill ok">成功: ${totals.success.toLocaleString()}件</span>
+        <span class="countpill err">失敗: ${totals.failed.toLocaleString()}件</span>
+        <span class="countpill">フォームなし: ${totals.no_form.toLocaleString()}件</span>
+      </div>`;
+
+    if (!execs.length) { el.innerHTML = `<div class="empty">該当する自動送信ログがありません</div>`; return; }
+    el.innerHTML = `<table><tr><th>ID</th><th>担当者(ID)</th><th>会社名</th><th>姓</th><th>名</th>
+        <th>メールアドレス</th><th>送信文章</th><th>備考</th><th>送信成功/総数</th>
+        <th>URLクリック数</th><th>最新クリック日時</th><th>実行日時</th><th>キャンセル</th></tr>` +
+      execs.map(x => `<tr>
+        <td><a href="#" class="execIdLink" data-id="${x.list_id}" data-name="${(x.list_name || "").replace(/"/g, "&quot;")}">${x.list_id}</a></td>
+        <td>${x.staff_name ? `${x.staff_name}(${x.staff_id})` : "—"}</td>
+        <td>${x.company_name || "—"}</td>
+        <td>${x.sender_last_name || "—"}</td>
+        <td>${x.sender_first_name || "—"}</td>
+        <td style="font-size:11px">${x.sender_email || "—"}</td>
+        <td style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+          title="${(x.subject || "").replace(/"/g, "&quot;")}">${x.subject || "—"}</td>
+        <td><input type="text" class="execNoteInput" data-id="${x.list_id}"
+          value="${(x.send_note || "").replace(/"/g, "&quot;")}" placeholder="例: 中国 解体土木プラント"
+          style="font-size:11px;padding:4px 6px;width:120px"></td>
+        <td>${x.success.toLocaleString()}/${x.total.toLocaleString()}</td>
+        <td>${x.click_count.toLocaleString()}</td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.last_clicked_at || "—"}</td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at || "—"}</td>
+        <td>—</td></tr>`).join("") +
+      `</table>`;
+    el.querySelectorAll(".execIdLink").forEach(a => {
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        goSendLogDetail(Number(a.dataset.id), a.dataset.name);
+      });
+    });
+    el.querySelectorAll(".execNoteInput").forEach(inp => {
+      let timer = null;
+      inp.addEventListener("input", () => {
+        clearTimeout(timer);
+        timer = setTimeout(async () => {
+          try {
+            await call(`/api/tenant/send-log/executions/${inp.dataset.id}/note`,
+              { method: "POST", body: JSON.stringify({ note: inp.value.trim() }) });
+          } catch (e) {
+            alert("備考の更新に失敗しました: " + e.message);
+          }
+        }, 600);
+      });
+    });
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+$("btnSendLogExecSearch").addEventListener("click", refreshSendLogExecutions);
+$("btnSendLogDetailBack").addEventListener("click", () => goPage("sendlog"));
+
 async function refreshSendLog() {
   if (!connected) return;
   const el = $("sendLogWrap");
@@ -1202,6 +1322,7 @@ async function refreshSendLog() {
     const statuses = Object.keys(LOG_STATUS_LABELS).filter(s => !sendLogExcluded.has(s));
     const qs = new URLSearchParams({ limit: "200" });
     if (q) qs.set("q", q);
+    if (currentSendLogListId) qs.set("list_id", String(currentSendLogListId));
     if (statuses.length < Object.keys(LOG_STATUS_LABELS).length) qs.set("status", statuses.join(","));
     const r = await call(`/api/tenant/send-log?${qs.toString()}`);
 
@@ -1292,6 +1413,7 @@ async function downloadSendLogCsv() {
     const statuses = Object.keys(LOG_STATUS_LABELS).filter(s => !sendLogExcluded.has(s));
     const qs = new URLSearchParams();
     if (q) qs.set("q", q);
+    if (currentSendLogListId) qs.set("list_id", String(currentSendLogListId));
     if (statuses.length < Object.keys(LOG_STATUS_LABELS).length) qs.set("status", statuses.join(","));
     const r = await call(`/api/tenant/send-log/csv?${qs.toString()}`);
     const blob = new Blob(["﻿" + r.csv], { type: "text/csv;charset=utf-8" });

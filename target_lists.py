@@ -591,7 +591,7 @@ def get_list(con, tenant_id, list_id, limit=200, offset=0, status_filter=None):
 
 
 def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks=False,
-              sender_template_id=None):
+              sender_template_id=None, staff_id=None):
     """保存済みリストからフォーム自動送信キャンペーンを作り、既存のsenders.send_campaign()
     にそのまま委譲する。can_contact()・冪等性・FormSenderのペーシング上限はすべて
     send_campaign()側の仕組みがそのまま効く(ここで独自の送信経路は作らない)。
@@ -649,6 +649,15 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
         else:
             campaign_id = con.execute("SELECT campaign_id FROM target_lists WHERE id=?",
                                        (list_id,)).fetchone()["campaign_id"]
+
+    # 「自動送信ログ」一覧(MIKOMERU同等。1リスト=1実行として集計表示する)用の
+    # スナップショット。誰が・どの送信元で・いつ実行したかをtarget_listsへ記録する。
+    # dry_run/本番どちらでも更新する(既存のform_send_log自体、両方に対して
+    # 記録される設計に合わせる。押すたびに最新の実行内容へ上書きする)。
+    con.execute("""UPDATE target_lists SET sent_by_staff_id=?, sent_sender_template_id=?,
+        last_send_started_at=? WHERE id=?""",
+        (staff_id, sender_template_id, datetime.now().isoformat(timespec="seconds"), list_id))
+    con.commit()
 
     now2 = datetime.now().isoformat(timespec="seconds")
     for m in members:
@@ -728,6 +737,92 @@ def _notify_completion(con, tenant_id, list_name, target_count, stats):
                   f"(宛先: {email}。HANDOFF.md T2参照)")
         except Exception as e:  # noqa: BLE001
             print(f"  [完了通知] 送信に失敗しました(宛先: {email}): {e}")
+
+
+# MIKOMERUの「結果ステータス」(成功/失敗/フォームなし)に合わせた集計区分。
+# form_send_log.statusはこちらより細かく原因を持つ(LOG_STATUS_LABELS参照)ため、
+# 「フォームなし」だけreason_codeで判定し、それ以外の失敗系はまとめて「失敗」にする。
+_EXEC_SUCCESS_SQL = "SUM(CASE WHEN l.status='SUCCESS' THEN 1 ELSE 0 END)"
+_EXEC_NO_FORM_SQL = ("SUM(CASE WHEN l.status='FAILED_UNSUPPORTED' "
+                      "AND l.reason_code='form_not_found' THEN 1 ELSE 0 END)")
+_EXEC_FAILED_SQL = ("SUM(CASE WHEN l.status!='SUCCESS' AND NOT "
+                     "(l.status='FAILED_UNSUPPORTED' AND l.reason_code='form_not_found') "
+                     "THEN 1 ELSE 0 END)")
+
+
+def list_send_executions(con, tenant_id, list_id=None, date_from=None, date_to=None):
+    """MIKOMERUの「自動送信ログ」一覧相当(送信結果の会社別明細ではなく、
+    「いつ・誰が・どのリストへ送ったか」という実行単位の集計)。既存設計
+    (1リスト=1campaignを使い回す。send_list()参照)にそのまま乗せ、target_listsの
+    1行=1実行として扱う。まだ一度も送信していないリスト(campaign_id IS NULL)は
+    実行ログに出さない。"""
+    where = "tl.tenant_id=? AND tl.campaign_id IS NOT NULL"
+    params = [tenant_id]
+    if list_id:
+        where += " AND tl.id=?"
+        params.append(list_id)
+    if date_from:
+        where += " AND tl.last_send_started_at>=?"
+        params.append(date_from)
+    if date_to:
+        where += " AND tl.last_send_started_at<=?"
+        params.append(date_to + "T23:59:59")
+
+    rows = con.execute(f"""SELECT tl.id, tl.name, tl.campaign_id, tl.send_note,
+            tl.last_send_started_at, tl.sent_by_staff_id, tl.sent_sender_template_id,
+            tn.name tenant_name, tn.sender_name tenant_sender_name, tn.sender_email tenant_sender_email,
+            st.name staff_name,
+            sn.sender_last_name, sn.sender_first_name, sn.sender_name tmpl_sender_name,
+            sn.sender_email tmpl_sender_email
+        FROM target_lists tl
+        JOIN tenants tn ON tn.id = tl.tenant_id
+        LEFT JOIN staff st ON st.id = tl.sent_by_staff_id
+        LEFT JOIN sender_templates sn ON sn.id = tl.sent_sender_template_id
+        WHERE {where}
+        ORDER BY tl.last_send_started_at DESC""", params).fetchall()
+
+    out = []
+    for r in rows:
+        counts = con.execute(f"""SELECT COUNT(*) total, {_EXEC_SUCCESS_SQL} success,
+                {_EXEC_FAILED_SQL} failed, {_EXEC_NO_FORM_SQL} no_form
+            FROM form_send_log l WHERE l.list_id=?""", (r["id"],)).fetchone()
+        clicks = con.execute("""SELECT COALESCE(SUM(email_click_count),0) clicks,
+                MAX(email_clicked_at) last_clicked_at
+            FROM touches WHERE campaign_id=?""", (r["campaign_id"],)).fetchone()
+        sample = con.execute("SELECT subject, body FROM touches WHERE campaign_id=? LIMIT 1",
+                              (r["campaign_id"],)).fetchone()
+
+        if r["sender_last_name"] or r["sender_first_name"]:
+            sender_last, sender_first = r["sender_last_name"] or "", r["sender_first_name"] or ""
+        else:
+            src = r["tmpl_sender_name"] if r["sent_sender_template_id"] else r["tenant_sender_name"]
+            parts = (src or "").split(maxsplit=1)
+            sender_last = parts[0] if parts else ""
+            sender_first = parts[1] if len(parts) > 1 else ""
+        sender_email = (r["tmpl_sender_email"] if r["sent_sender_template_id"] else r["tenant_sender_email"]) or ""
+
+        out.append({
+            "list_id": r["id"], "list_name": r["name"], "send_note": r["send_note"] or "",
+            "staff_id": r["sent_by_staff_id"], "staff_name": r["staff_name"],
+            "company_name": r["tenant_name"], "sender_last_name": sender_last,
+            "sender_first_name": sender_first, "sender_email": sender_email,
+            "subject": (sample["subject"] if sample else "") or "",
+            "body_preview": ((sample["body"] if sample else "") or "")[:60],
+            "success": counts["success"] or 0, "failed": counts["failed"] or 0,
+            "no_form": counts["no_form"] or 0, "total": counts["total"] or 0,
+            "click_count": clicks["clicks"] or 0, "last_clicked_at": clicks["last_clicked_at"],
+            "started_at": r["last_send_started_at"],
+        })
+    return out
+
+
+def update_send_note(con, tenant_id, list_id, note):
+    """自動送信ログ一覧の「備考」(実行=リスト単位のメモ。会社ごとの
+    form_send_log.noteとは別物)を更新する。他テナントのリストは更新できない。"""
+    n = con.execute("UPDATE target_lists SET send_note=? WHERE id=? AND tenant_id=?",
+                     (note, list_id, tenant_id)).rowcount
+    con.commit()
+    return n > 0
 
 
 def activity_log(con, tenant_id, limit=100):

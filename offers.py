@@ -177,6 +177,16 @@ def resolve_tenant_by_key(con, api_key):
     return con.execute("SELECT * FROM tenants WHERE id=?", (staff["tenant_id"],)).fetchone()
 
 
+def resolve_staff_by_key(con, api_key):
+    """api_keyが担当者個別キーであれば、その担当者行(id/name)を返す(表示用)。
+    テナント自身の共用api_keyであればNone(=「誰が実行したか」を特定できない)。
+    resolve_tenant_by_key()と同じ有効性判定(未認証の担当者は対象外)を使う。"""
+    if not api_key:
+        return None
+    return con.execute("""SELECT id, name FROM staff WHERE api_key=?
+        AND (password_hash IS NULL OR email_verified_at IS NOT NULL)""", (api_key,)).fetchone()
+
+
 def add_staff(con, tenant_id, name, email=None):
     """担当者を追加し、その担当者専用のapi_keyを発行する。
     api_keyは生成時にしか分からない(以後DBには平文で残るが、呼び出し側の

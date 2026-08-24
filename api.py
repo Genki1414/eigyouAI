@@ -82,7 +82,14 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/tenant/scheduled-sends/cancel  {"scheduled_id"} → PENDINGの予約を
                            キャンセル(実行済み・キャンセル済みは404)
   GET  /api/tenant/send-log       自テナントのフォーム自動送信履歴(form_send_log)。
-                           ?company_id=で1社分の履歴だけに絞り込める
+                           ?company_id=/?list_id=で絞り込める(会社別の明細=詳細画面用)
+  GET  /api/tenant/send-log/executions  MIKOMERUの「自動送信ログ」一覧相当(T22)。
+                           会社別の明細ではなく、「いつ・誰が・どのリストへ送ったか」を
+                           1リスト=1実行として集計して返す(target_lists.pyの
+                           list_send_executions()参照)。?list_id=/?date_from=/?date_to=
+                           (YYYY-MM-DD)で絞り込める
+  POST /api/tenant/send-log/executions/{list_id}/note  {"note"} → 実行(リスト)単位の
+                           備考を更新(会社ごとのsend-log/{id}/noteとは別物)
   GET  /api/tenant/send-log/{id}/screenshot?kind=before|after
                            送信前後のスクリーンショット画像(PNG)。自テナントの
                            記録のみ取得可(テナント分離)。無ければ404
@@ -205,6 +212,7 @@ _SCREENSHOT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/screenshot$")
 _AUTOFILL_QUEUE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/autofill-queue$")
 _SEND_LOG_NOTE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/note$")
 _SEND_LOG_MANUAL_SENT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/manual-sent$")
+_SEND_LOG_EXEC_NOTE_PATH_RE = re.compile(r"^/api/tenant/send-log/executions/(\d+)/note$")
 _VERIFY_STAFF_PATH_RE = re.compile(r"^/verify/staff/([A-Za-z0-9_-]+)$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
@@ -382,11 +390,22 @@ def verify_tenant_bearer(con, auth_header: str):
     """/api/tenant/* 用。Authorization: Bearer <tenant.api_key> からテナント行を
     解決する。運用専用の SALES_ENGINE_API_KEY とは完全に別の認証で、
     このキーはテナント自身のリスト作成・閲覧しかできない(run-step等には使えない)。
-    見つからなければNone(=呼び出し側で401にする)。"""
+    見つからなければNone(=呼び出し側で401にする)。
+
+    戻り値のdictには通常のtenants列に加えて_staff_id/_staff_name を含める
+    (誰が実行したかを記録したい呼び出し側向け。テナント共用キーで認証した
+    場合はどちらもNone=「担当者を特定できない」)。"""
     if not auth_header or not auth_header.startswith("Bearer "):
         return None
     token = auth_header[len("Bearer "):]
-    return offers.resolve_tenant_by_key(con, token)
+    tenant = offers.resolve_tenant_by_key(con, token)
+    if not tenant:
+        return None
+    result = dict(tenant)
+    staff = offers.resolve_staff_by_key(con, token)
+    result["_staff_id"] = staff["id"] if staff else None
+    result["_staff_name"] = staff["name"] if staff else None
+    return result
 
 
 # ── 送信先リスト(SaaS販売用) ─────────────────
@@ -589,17 +608,44 @@ def h_tenant_list_member_outcome(con, tenant_id, list_id, data):
     return 200, {"ok": True}
 
 
+def h_tenant_send_log_executions(con, tenant_id, qs):
+    """MIKOMERUの「自動送信ログ」一覧(T22)。会社別の明細ではなく、
+    「いつ・誰が・どのリストへ送ったか」という実行単位の集計を返す。
+    ?list_id=で対象リストを1件に絞れる(自動送信ページの送信対象リスト
+    プルダウンと同じ選択肢から選ぶ想定)。?date_from=/?date_to=はYYYY-MM-DD。"""
+    list_id = qs.get("list_id", [None])[0]
+    date_from = (qs.get("date_from", [""])[0] or "").strip() or None
+    date_to = (qs.get("date_to", [""])[0] or "").strip() or None
+    execs = TL.list_send_executions(con, tenant_id,
+                                     list_id=int(list_id) if list_id and list_id.isdigit() else None,
+                                     date_from=date_from, date_to=date_to)
+    totals = {"success": 0, "failed": 0, "no_form": 0, "total": 0}
+    for e in execs:
+        for k in totals:
+            totals[k] += e[k]
+    return 200, {"executions": execs, "totals": totals}
+
+
+def h_tenant_send_log_execution_note(con, tenant_id, list_id, data):
+    note = (data.get("note") or "").strip() or None
+    if not TL.update_send_note(con, tenant_id, list_id, note):
+        return 404, {"error": "対象の実行(リスト)が見つかりません"}
+    return 200, {"ok": True}
+
+
 def h_tenant_send_log(con, tenant_id, qs):
     """テナント自身のフォーム自動送信履歴(form_send_log)。他テナント分は
     tenant_id=?で絞り込んでいるため見えない。?company_id=で1社分の履歴
     (何度目のどの結果か、時系列)だけに絞り込める。
     ?q=で会社名の部分一致検索、?status=SUCCESS,FAILED_UNSUPPORTEDのようにカンマ区切り
     で複数の結果ステータスに絞り込める(MIKOMERU同等の検索・結果フィルタ)。
+    ?list_id=で自動送信ログ一覧(実行単位)の1行から「詳細」へ絞り込める(T22)。
     countsは(company_id/qの絞り込みは反映しつつ)statusでは絞り込む前の内訳件数
     ——一覧上部の集計バッジ用(チェックを外した項目の件数も見えている必要があるため)。"""
     limit = min(int(qs.get("limit", ["100"])[0]), 500)
     offset = int(qs.get("offset", ["0"])[0])
     company_id = qs.get("company_id", [None])[0]
+    list_id = qs.get("list_id", [None])[0]
     name_q = (qs.get("q", [""])[0] or "").strip()
     statuses = [s for s in (qs.get("status", [""])[0] or "").split(",") if s]
 
@@ -608,6 +654,9 @@ def h_tenant_send_log(con, tenant_id, qs):
     if company_id and company_id.isdigit():
         base_where += " AND l.company_id=?"
         base_params.append(int(company_id))
+    if list_id and list_id.isdigit():
+        base_where += " AND l.list_id=?"
+        base_params.append(int(list_id))
     if name_q:
         base_where += " AND c.name LIKE ?"
         base_params.append(f"%{name_q}%")
@@ -762,12 +811,16 @@ def h_tenant_send_log_manual_sent(con, tenant_id, log_id, data):
 
 
 def h_tenant_send_log_csv(con, tenant_id, qs):
-    """自動送信ログのCSVダウンロード(MIKOMERU同等)。表示中の絞り込み(?q=/?status=)
+    """自動送信ログのCSVダウンロード(MIKOMERU同等)。表示中の絞り込み(?q=/?status=/?list_id=)
     をそのまま反映する。件数上限は付けない(ダウンロード目的のため一覧表示より緩くする)。"""
     name_q = (qs.get("q", [""])[0] or "").strip()
+    list_id = qs.get("list_id", [None])[0]
     statuses = [s for s in (qs.get("status", [""])[0] or "").split(",") if s]
     where = "l.tenant_id=?"
     params = [tenant_id]
+    if list_id and list_id.isdigit():
+        where += " AND l.list_id=?"
+        params.append(int(list_id))
     if name_q:
         where += " AND c.name LIKE ?"
         params.append(f"%{name_q}%")
@@ -1076,7 +1129,7 @@ def h_tenant_dashboard(con, tenant_id):
     }
 
 
-def h_tenant_list_send(con, tenant_id, list_id, data):
+def h_tenant_list_send(con, tenant_id, list_id, data, staff_id=None):
     """保存済みリストから実際にフォーム自動送信キャンペーンを走らせる。
     dry_runは既定でTrue(=実サイトへは何も送らない)。実送信するには
     明示的に dry_run:false を指定する必要がある(取り消せない操作のため)。
@@ -1123,7 +1176,8 @@ def h_tenant_list_send(con, tenant_id, list_id, data):
                      "scheduled_at": when.isoformat(timespec="seconds")}
 
     res = TL.send_list(con, tenant_id, list_id, subject, body, dry_run=dry_run,
-                        track_clicks=track_clicks, sender_template_id=sender_template_id)
+                        track_clicks=track_clicks, sender_template_id=sender_template_id,
+                        staff_id=staff_id)
     if res is None:
         return 404, {"error": "リストが見つかりません"}
     if "error" in res:
@@ -1282,6 +1336,7 @@ class Handler(BaseHTTPRequestHandler):
         autofill_match = _AUTOFILL_QUEUE_PATH_RE.match(path)
         note_match = _SEND_LOG_NOTE_PATH_RE.match(path)
         manual_sent_match = _SEND_LOG_MANUAL_SENT_PATH_RE.match(path)
+        exec_note_match = _SEND_LOG_EXEC_NOTE_PATH_RE.match(path)
         preview_msg_match = _PREVIEW_MSG_PATH_RE.match(path)
         rename_match = _RENAME_PATH_RE.match(path)
         duplicate_match = _DUPLICATE_PATH_RE.match(path)
@@ -1291,7 +1346,7 @@ class Handler(BaseHTTPRequestHandler):
                      "/api/tenant/lists/delete", "/api/tenant/lists/restore",
                      "/api/tenant/search/filter", "/api/tenant/search/csv") \
                 or send_match or outcome_match or autofill_match or note_match \
-                or manual_sent_match or preview_msg_match \
+                or manual_sent_match or exec_note_match or preview_msg_match \
                 or rename_match or duplicate_match or remove_members_match or search_log_save_match:
             con = self._con()
             try:
@@ -1316,13 +1371,17 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_search_log_save(con, tenant["id"],
                                                         int(search_log_save_match.group(1)), data)
                 elif send_match:
-                    st, res = h_tenant_list_send(con, tenant["id"], int(send_match.group(1)), data)
+                    st, res = h_tenant_list_send(con, tenant["id"], int(send_match.group(1)), data,
+                                                  staff_id=tenant.get("_staff_id"))
                 elif outcome_match:
                     st, res = h_tenant_list_member_outcome(con, tenant["id"],
                                                             int(outcome_match.group(1)), data)
                 elif note_match:
                     st, res = h_tenant_send_log_note(con, tenant["id"],
                                                       int(note_match.group(1)), data)
+                elif exec_note_match:
+                    st, res = h_tenant_send_log_execution_note(con, tenant["id"],
+                                                                int(exec_note_match.group(1)), data)
                 elif manual_sent_match:
                     st, res = h_tenant_send_log_manual_sent(con, tenant["id"],
                                                              int(manual_sent_match.group(1)), data)
@@ -1527,6 +1586,7 @@ class Handler(BaseHTTPRequestHandler):
         if (u.path == "/api/tenant/lists" or u.path.startswith("/api/tenant/lists/")
                 or u.path == "/api/tenant/send-log"
                 or u.path == "/api/tenant/send-log/csv"
+                or u.path == "/api/tenant/send-log/executions"
                 or u.path == "/api/tenant/autofill/pending"
                 or u.path == "/api/tenant/scheduled-sends"
                 or u.path == "/api/tenant/exclusions"
@@ -1548,6 +1608,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_send_log(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/send-log/csv":
                     st, res = h_tenant_send_log_csv(con, tenant["id"], qs)
+                elif u.path == "/api/tenant/send-log/executions":
+                    st, res = h_tenant_send_log_executions(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/autofill/pending":
                     st, res = h_tenant_autofill_pending(con, tenant["id"])
                 elif u.path == "/api/tenant/scheduled-sends":
@@ -2344,6 +2406,79 @@ def self_test(port=8899):
     st, r = get_auth(f"/api/tenant/send-log?q={urllib.parse.quote(company1_name)}", token=key_a)
     t("?q=で会社名の部分一致検索ができる",
       len(r["log"]) == 1 and r["log"][0]["company_id"] == 1)
+
+    print("\n── 自動送信ログ一覧(実行単位の集計。T22, MIKOMERUの「自動送信ログ」一覧相当) ──")
+    t22_staff_id, t22_staff_key = OF.add_staff(con, tid_a, "T22担当者", email=None)
+    t22_company = con.execute(
+        "SELECT id FROM companies WHERE contact_url IS NOT NULL AND dedup_of IS NULL LIMIT 1").fetchone()[0]
+    now_t22 = datetime.now().isoformat(timespec="seconds")
+    cur = con.execute("""INSERT INTO target_lists (tenant_id,name,source,company_count,created_at)
+        VALUES (?,?,?,?,?)""", (tid_a, "T22実行テスト用リスト", "filter", 1, now_t22))
+    t22_list_id = cur.lastrowid
+    con.execute("""INSERT INTO target_list_members (list_id, company_id, send_status, created_at, updated_at)
+        VALUES (?,?,'PENDING',?,?)""", (t22_list_id, t22_company, now_t22, now_t22))
+    con.commit()
+
+    st, r = post_auth(f"/api/tenant/lists/{t22_list_id}/send",
+                      {"subject": "T22件名", "body": "T22本文"}, token=t22_staff_key)
+    t("担当者キーでも送信でき、campaign_idが作られる", st == 200 and isinstance(r.get("campaign_id"), int))
+    t22_campaign_id = r.get("campaign_id")
+    t("send_list()実行後、target_listsに担当者IDがスナップショットされる",
+      con.execute("SELECT sent_by_staff_id FROM target_lists WHERE id=?",
+                  (t22_list_id,)).fetchone()[0] == t22_staff_id)
+
+    # dry_runはform_send_logへ書かないため(前述の「自動送信ログ」節と同じ理由)、
+    # 集計対象のform_send_log/クリック数は手で補う
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url, started_at,
+        status, reason_code) VALUES (?,?,?,'https://example.co.jp',?,'SUCCESS','success_text_matched')""",
+        (t22_company, tid_a, t22_list_id, now_t22))
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url, started_at,
+        status, reason_code) VALUES (?,?,?,'https://example.co.jp',?,'FAILED_UNSUPPORTED','form_not_found')""",
+        (t22_company, tid_a, t22_list_id, now_t22))
+    con.execute("UPDATE touches SET email_click_count=3, email_clicked_at=? WHERE campaign_id=?",
+                (now_t22, t22_campaign_id))
+    con.commit()
+
+    st, r = get_auth("/api/tenant/send-log/executions")
+    t("認証ヘッダなしのGET .../executionsは401", st == 401)
+
+    st, r = get_auth(f"/api/tenant/send-log/executions?list_id={t22_list_id}", token=key_a)
+    t("GET .../executions?list_id=で1件の実行に絞り込める",
+      st == 200 and len(r.get("executions", [])) == 1)
+    ex = r["executions"][0]
+    t("担当者名が反映される", ex["staff_name"] == "T22担当者")
+    t("会社名(テナント名)が反映される", ex["company_name"] == "test-tenant-A")
+    t("送信元テンプレート未指定時はテナントのsender_nameから姓を補う",
+      ex["sender_last_name"] == "test-tenant-A" and ex["sender_email"] == "a@example.co.jp")
+    t("送信文章(件名)が反映される", ex["subject"] == "T22件名")
+    t("成功/失敗/フォームなし/総数が正しく集計される",
+      ex["success"] == 1 and ex["no_form"] == 1 and ex["failed"] == 0 and ex["total"] == 2)
+    t("URLクリック数が集計される", ex["click_count"] == 3)
+    t("最新クリック日時が反映される", ex["last_clicked_at"] == now_t22)
+
+    st, r = get_auth(f"/api/tenant/send-log/executions?list_id={t22_list_id}", token=key_b)
+    t("他テナントからは見えない(0件)", st == 200 and len(r.get("executions", [])) == 0)
+
+    st, r = post_auth(f"/api/tenant/send-log/executions/{t22_list_id}/note",
+                      {"note": "テスト実行メモ"}, token=key_b)
+    t("他テナントは実行の備考を更新できない(404)", st == 404)
+    st, r = post_auth(f"/api/tenant/send-log/executions/{t22_list_id}/note",
+                      {"note": "テスト実行メモ"}, token=key_a)
+    t("POST .../executions/<list_id>/note で実行単位の備考を更新できる", st == 200 and r.get("ok"))
+    st, r = get_auth(f"/api/tenant/send-log/executions?list_id={t22_list_id}", token=key_a)
+    t("更新した備考が反映される", st == 200 and r["executions"][0]["send_note"] == "テスト実行メモ")
+
+    st, r = get_auth(f"/api/tenant/send-log?list_id={t22_list_id}", token=key_a)
+    t("GET /api/tenant/send-log?list_id=で会社別の明細(詳細ページ用)に絞り込める",
+      st == 200 and len(r.get("log", [])) == 2)
+
+    con.execute("DELETE FROM form_send_log WHERE list_id=?", (t22_list_id,))
+    con.execute("DELETE FROM touches WHERE campaign_id=?", (t22_campaign_id,))
+    con.execute("DELETE FROM campaigns WHERE id=?", (t22_campaign_id,))
+    con.execute("DELETE FROM target_list_members WHERE list_id=?", (t22_list_id,))
+    con.execute("DELETE FROM target_lists WHERE id=?", (t22_list_id,))
+    con.execute("DELETE FROM staff WHERE id=?", (t22_staff_id,))
+    con.commit()
 
     print("\n── 送信前後スクリーンショット ──")
     def get_raw(path, token=None):

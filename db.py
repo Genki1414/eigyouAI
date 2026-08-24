@@ -435,6 +435,18 @@ def migrate(con):
         ("staff", "email_verified_at", "TEXT"),
         ("staff", "password_reset_token", "TEXT"),
         ("staff", "password_reset_expires_at", "TEXT"),
+        # 自動送信ログをMIKOMERU同様の「実行(リスト送信)単位の一覧」にするための列(T22)。
+        # 1リスト=1campaignを使い回す既存設計(send_list()参照)に乗せる形で、
+        # 「実行」をtarget_listsの1行として扱う。send_noteは一覧上で編集できる備考
+        # (会社ごとのform_send_log.noteとは別物、実行=リスト単位のメモ)。
+        # sent_by_staff_id/sent_sender_template_id/last_send_started_atは、
+        # そのリストへ最後に送信ボタンが押された時点のスナップショット
+        # (誰が・どの送信元で・いつ実行したか。一覧の担当者/会社名・姓・名・
+        # メールアドレス/実行日時列に使う)。
+        ("target_lists", "send_note", "TEXT"),
+        ("target_lists", "sent_by_staff_id", "INTEGER"),
+        ("target_lists", "sent_sender_template_id", "INTEGER"),
+        ("target_lists", "last_send_started_at", "TEXT"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:

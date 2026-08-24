@@ -207,7 +207,8 @@ tr.clickable:hover{background:var(--blue-soft)}
             1. 左メニューの「接続設定」でAPIキーを入力して接続します<br>
             2. 「リスト取得」で都道府県・業種・ランク等の条件を選ぶと、該当件数が自動で表示されます。名前を付けて保存できます<br>
             3. 自社で持っている企業リストがあれば「CSV検索」で取り込めます<br>
-            4. 作成したリストは「保存済みリスト」から確認・送信できます(「自動送信」も同じ画面です)
+            4. 作成したリストは「保存済みリスト」で内容を確認でき、「自動送信」でリストと送信文章
+              (テンプレートも使えます)を選んで送信します
           </p>
         </div>
       </section>
@@ -215,11 +216,16 @@ tr.clickable:hover{background:var(--blue-soft)}
       <section class="page" data-page="autosend">
         <h2>自動送信 <span>AUTO SEND</span></h2>
         <div class="card">
-          <p class="hint">送信は「保存済みリスト」からリストを選んで行います。リストの詳細画面に
-            件名・本文の入力欄と送信ボタンがあります。既定はドライラン(実際には送信しない)で、
-            本番送信するには明示的にチェックを外す必要があります。</p>
-          <div class="btnrow"><button class="ghost" id="btnGoLists">保存済みリストを開く</button></div>
+          <p class="hint">送信対象リストを選び、送信文章(直接入力するか、あらかじめ
+            「送信文章テンプレート」メニューで登録したテンプレートを選択)を指定して送信します。
+            既定はドライラン(実際には送信しない)で、本番送信するには明示的にチェックを外す
+            必要があります。リストがまだ無い場合は「リスト取得」「CSV検索」で作成してください。</p>
+          <div style="margin-top:10px;max-width:420px">
+            <label>送信対象リスト <span style="color:var(--warn);font-weight:700">必須</span></label>
+            <select id="autosendListSelect"><option value="">-- リストを選択してください --</option></select>
+          </div>
         </div>
+        <div id="autosendFormWrap"></div>
       </section>
 
       <section class="page" data-page="sendlog">
@@ -488,12 +494,16 @@ tr.clickable:hover{background:var(--blue-soft)}
 
         <div class="card step">
           <h3>3. 保存したリストを確認・送信する</h3>
-          <p>「保存済みリスト」ページで作成済みのリストを確認できます。リストをクリックすると
-            詳細画面が開き、そこから実際にフォーム自動送信できます。</p>
+          <p>「保存済みリスト」ページで作成済みのリストを確認できます(リスト名の変更・複製・
+            企業の個別除外・削除/復元もここで行います)。実際にフォーム自動送信するのは
+            「自動送信」ページです。リストの詳細画面の「📧 フォーム送信...」ボタンを押すと、
+            そのリストが選択された状態で自動送信ページに移動します。</p>
           <ul>
             <li>送信対象は「問い合わせページのURLが確認できている企業」のみです。</li>
-            <li>「テンプレートを使う」で保存済みの文面を選ぶと、件名・本文が自動で入力されます
-              (「送信文章テンプレート」ページで事前に登録しておきます)。</li>
+            <li>「自動送信」ページ上部の「送信対象リスト」でリストを選ぶと、送信文章の
+              入力欄が表示されます。「送信文章テンプレートを使う」で保存済みの文面を選ぶと、
+              件名・本文が自動で入力されます(「送信文章テンプレート」ページで事前に登録して
+              おきます)。</li>
             <li><b>ドライラン</b>(既定でオン)では実際のサイトへは何も送信されません。動作確認用です。
               チェックを外すと本番送信になり、実際の企業サイトへ送信されます。取り消せない操作のため、
               確認ダイアログが表示されます。</li>
@@ -721,6 +731,7 @@ function goPage(pageId) {
   document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.dataset.page === pageId));
   document.getElementById("pageTitle").textContent = PAGE_TITLES[pageId];
   if (pageId === "home") { refreshHomeStats(); refreshDashboard(); }
+  if (pageId === "autosend") populateAutosendListSelect();
   if (pageId === "sendlog") refreshSendLog();
   if (pageId === "exclude") refreshExclusions();
   if (pageId === "tmpl-body") refreshTemplates();
@@ -926,8 +937,6 @@ async function refreshDashboard() {
     $("dashRecentWrap").innerHTML = `<div class="result err">${e.message}</div>`;
   }
 }
-
-$("btnGoLists").addEventListener("click", () => goPage("lists"));
 
 // 自動入力アシストはChrome拡張機能(chrome_extension/)側で行う。以前はブックマークレット
 // (javascript:リンク)で同じことをしていたが、対象企業の実サイトが厳しめのCSPや
@@ -1513,6 +1522,7 @@ async function refreshLists() {
   listsSelected.clear();
   renderListsTable();
   populateExistingListSelects();
+  populateAutosendListSelect();
   updateListsBulkButtons();
 }
 
@@ -1735,64 +1745,11 @@ async function showDetail(id) {
           </div>
         </div>
         <div class="btnrow">
+          <button id="btnGoAutosend">📧 フォーム送信...</button>
           <button class="ghost" id="btnDuplicateList">⧉ 複製...</button>
           <button class="danger" id="btnDeleteList">🗑 削除...</button>
         </div>
       </div>
-      <h2>このリストへ送信 <span>SEND</span></h2>
-      <div class="card">
-        <p class="hint">問い合わせページが確認できている企業のみが送信対象になります。
-          ドライランでは実際のサイトへは何も送信されません(動作確認用)。</p>
-        <div style="margin-top:10px">
-          <label>テンプレートを使う(任意)</label>
-          <select id="sendTemplate">
-            <option value="">選択しない(件名・本文を直接入力)</option>
-            ${lastTemplates.map(x => `<option value="${x.id}">${x.name}</option>`).join("")}
-          </select>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <div><label>件名</label><input type="text" id="sendSubject" placeholder="例: 積算のお手伝いをさせてください"></div>
-          <div><label>本文</label><textarea id="sendBody" rows="3" placeholder="本文を入力してください"></textarea></div>
-        </div>
-        <p class="hint" style="margin-top:4px"><code>##TO_COMPANY_NAME##</code>(送信先の会社名)・
-          <code>##FROM_FAMILY_NAME##</code>(送信元の姓)が使えます。</p>
-        <div class="btnrow" style="margin-top:4px"><button class="ghost" id="btnPreviewMessage">👁️ プレビュー</button></div>
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
-          <input type="checkbox" id="sendDryRun" checked style="width:auto">
-          <span id="sendDryRunLabel">ドライラン(実際には送信しません)</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
-          <input type="checkbox" id="sendTrackClicks" style="width:auto">
-          <span>URLアクセスの記録(本文中のURLがクリックされたかを記録する。
-            URLは記録用URLへ置き換えられます)</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
-          <input type="checkbox" id="sendScheduleToggle" style="width:auto">
-          <span>送信開始日時を指定する(OFFの場合は送信後すぐに処理が開始します)</span>
-        </label>
-        <div id="sendScheduleWrap" style="display:none;margin-top:8px;max-width:280px">
-          <input type="datetime-local" id="sendScheduleAt">
-        </div>
-        <div class="btnrow"><button id="btnSend">送信する</button></div>
-        <div id="sendResult"></div>
-        <div id="sendProgressWrap" style="display:none;margin-top:12px">
-          <p class="hint">送信には時間がかかる場合があります。件数・混雑状況によっては数分かかることもあります。
-            画面を閉じても処理は続きます。</p>
-          <div class="card" style="background:var(--concrete)">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-              <b id="sendProgressBadge">処理中</b>
-            </div>
-            <div style="height:10px;background:var(--line);border-radius:6px;overflow:hidden;position:relative">
-              <div id="sendProgressBar" style="height:100%;width:30%;background:#7c3aed;border-radius:6px"></div>
-            </div>
-            <div class="btnrow" id="sendProgressDoneRow" style="margin-top:12px;display:none">
-              <button id="btnSendProgressDone">完了</button>
-            </div>
-          </div>
-        </div>
-      </div>
-      <h2>予約済みの送信 <span>SCHEDULED</span></h2>
-      <div id="scheduledSendsWrap"><div class="empty">読み込み中...</div></div>
       <h2>リスト詳細 <span>企業一覧</span></h2>
       <div class="chips" id="memberFilter" style="margin-bottom:10px">
         ${Object.entries(MEMBER_FILTERS).map(([key, label]) =>
@@ -1806,7 +1763,12 @@ async function showDetail(id) {
       <div id="memberHistoryWrap"></div>`;
     await renderMemberTable(id, "");
     bindMemberFilter(id);
-    await refreshScheduledSends(id);
+
+    $("btnGoAutosend").addEventListener("click", () => {
+      goPage("autosend");
+      $("autosendListSelect").value = String(id);
+      $("autosendListSelect").dispatchEvent(new Event("change"));
+    });
 
     $("btnRemoveMembers").addEventListener("click", async () => {
       const companyIds = [...memberSelected];
@@ -1864,6 +1826,86 @@ async function showDetail(id) {
         alert("削除に失敗しました: " + e.message);
       }
     });
+
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+// ── 自動送信(MIKOMERU同様: 自動送信画面でリスト+送信文章を選んで送信する) ──
+function populateAutosendListSelect() {
+  const sel = $("autosendListSelect");
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">-- リストを選択してください --</option>` +
+    allLists.map(l => `<option value="${l.id}">${l.name}(${l.company_count.toLocaleString()}社)</option>`).join("");
+  if (cur && allLists.some(l => String(l.id) === cur)) sel.value = cur;
+}
+
+$("autosendListSelect").addEventListener("change", () => {
+  const listId = $("autosendListSelect").value;
+  if (!listId) { $("autosendFormWrap").innerHTML = ""; return; }
+  renderSendForm($("autosendFormWrap"), listId);
+});
+
+async function renderSendForm(container, id) {
+  container.innerHTML = `<div class="empty">読み込み中...</div>`;
+  await refreshKillSwitch();
+  try {
+    container.innerHTML = `<h2>送信文章 <span>MESSAGE</span></h2>
+      <div class="card">
+        <p class="hint">問い合わせページが確認できている企業のみが送信対象になります。
+          ドライランでは実際のサイトへは何も送信されません(動作確認用)。</p>
+        <div style="margin-top:10px">
+          <label>送信文章テンプレートを使う(任意。「送信文章テンプレート」メニューで登録)</label>
+          <select id="sendTemplate">
+            <option value="">選択しない(件名・本文を直接入力)</option>
+            ${lastTemplates.map(x => `<option value="${x.id}">${x.name}</option>`).join("")}
+          </select>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>件名</label><input type="text" id="sendSubject" placeholder="例: 積算のお手伝いをさせてください"></div>
+          <div><label>本文</label><textarea id="sendBody" rows="3" placeholder="本文を入力してください"></textarea></div>
+        </div>
+        <p class="hint" style="margin-top:4px"><code>##TO_COMPANY_NAME##</code>(送信先の会社名)・
+          <code>##FROM_FAMILY_NAME##</code>(送信元の姓)が使えます。</p>
+        <div class="btnrow" style="margin-top:4px"><button class="ghost" id="btnPreviewMessage">👁️ プレビュー</button></div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
+          <input type="checkbox" id="sendDryRun" checked style="width:auto">
+          <span id="sendDryRunLabel">ドライラン(実際には送信しません)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
+          <input type="checkbox" id="sendTrackClicks" style="width:auto">
+          <span>URLアクセスの記録(本文中のURLがクリックされたかを記録する。
+            URLは記録用URLへ置き換えられます)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
+          <input type="checkbox" id="sendScheduleToggle" style="width:auto">
+          <span>送信開始日時を指定する(OFFの場合は送信後すぐに処理が開始します)</span>
+        </label>
+        <div id="sendScheduleWrap" style="display:none;margin-top:8px;max-width:280px">
+          <input type="datetime-local" id="sendScheduleAt">
+        </div>
+        <div class="btnrow"><button id="btnSend">送信する</button></div>
+        <div id="sendResult"></div>
+        <div id="sendProgressWrap" style="display:none;margin-top:12px">
+          <p class="hint">送信には時間がかかる場合があります。件数・混雑状況によっては数分かかることもあります。
+            画面を閉じても処理は続きます。</p>
+          <div class="card" style="background:var(--concrete)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <b id="sendProgressBadge">処理中</b>
+            </div>
+            <div style="height:10px;background:var(--line);border-radius:6px;overflow:hidden;position:relative">
+              <div id="sendProgressBar" style="height:100%;width:30%;background:#7c3aed;border-radius:6px"></div>
+            </div>
+            <div class="btnrow" id="sendProgressDoneRow" style="margin-top:12px;display:none">
+              <button id="btnSendProgressDone">完了</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <h2>予約済みの送信 <span>SCHEDULED</span></h2>
+      <div id="scheduledSendsWrap"><div class="empty">読み込み中...</div></div>`;
+    await refreshScheduledSends(id);
 
     $("sendScheduleToggle").addEventListener("change", () => {
       $("sendScheduleWrap").style.display = $("sendScheduleToggle").checked ? "block" : "none";
@@ -1972,13 +2014,11 @@ async function showDetail(id) {
           `対象${sr.target_count.toLocaleString()}社 / ` +
           `送信${sr.stats.sent} 失敗${sr.stats.failed} ガードで中止${sr.stats.blocked} 配信停止${sr.stats.suppressed}` +
           `${sr.stats.stopped ? ` Kill Switchで中止${sr.stats.stopped}` : ""}</div>`;
-        const checkedFilter = document.querySelector('input[name="memberFilter"]:checked');
-        await renderMemberTable(id, checkedFilter ? checkedFilter.value : "");
-        document.getElementById("memberTableWrap").scrollIntoView({ behavior: "smooth", block: "start" });
+        await refreshLists();
       };
     });
   } catch (e) {
-    el.innerHTML = `<div class="result err">${e.message}</div>`;
+    container.innerHTML = `<div class="result err">${e.message}</div>`;
   }
 }
 

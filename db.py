@@ -447,6 +447,21 @@ def migrate(con):
         ("target_lists", "sent_by_staff_id", "INTEGER"),
         ("target_lists", "sent_sender_template_id", "INTEGER"),
         ("target_lists", "last_send_started_at", "TEXT"),
+        # MIKOMERUの自動送信フォームは会社名・住所・部署・役職・氏名・カナ・メール・
+        # 電話番号を送信の都度その場で編集できる(送信元テンプレート選択時に自動入力
+        # されるが、送信直前に上書きしてもテンプレート自体は変更されない)。部署・役職は
+        # これまで無かった項目のため追加する(T23)。tenants側にも持たせるのは、
+        # 「有効化」で送信元テンプレートの内容をテナント既定として反映する既存の
+        # activate_sender_template()の対称性を保つため。
+        ("tenants", "sender_department", "TEXT"), ("tenants", "sender_position", "TEXT"),
+        ("sender_templates", "sender_department", "TEXT"), ("sender_templates", "sender_position", "TEXT"),
+        # MIKOMERUの自動送信フォームの「営業拒否サイトへの送信」「過去送信対象キャンセル」
+        # 「送信元をその場で上書き」を予約送信でも同じように効かせるための列。
+        # track_clicks/sender_template_idと同じ理由でscheduled_sendsにも持たせる
+        # (cron実行時点=scheduled_send_cli.pyまで必要な設定のため)。
+        ("scheduled_sends", "allow_no_solicit", "INTEGER DEFAULT 0"),
+        ("scheduled_sends", "cancel_recent_days", "INTEGER"),
+        ("scheduled_sends", "sender_override_json", "TEXT"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
@@ -619,19 +634,21 @@ def delete_message_template(con, tenant_id, template_id):
 def add_sender_template(con, tenant_id, name, sender_name, sender_email,
                          sender_address="", optout_url=None, last_name=None, first_name=None,
                          last_name_kana=None, first_name_kana=None, postal_code=None,
-                         prefecture=None, city=None, block=None, building=None, phone=None):
-    """last_name〜phoneはすべて任意項目。姓・名・フリガナ・郵便番号・住所(都道府県/
-    市区町村/丁目番地/建物名)・電話番号が別欄の問い合わせフォーム向け(MIKOMERU同等)。
-    未指定なら空のまま保存し、送信時にsenders.py側で妥当な既定値へフォールバックする。"""
+                         prefecture=None, city=None, block=None, building=None, phone=None,
+                         department=None, position=None):
+    """last_name〜positionはすべて任意項目。姓・名・フリガナ・郵便番号・住所(都道府県/
+    市区町村/丁目番地/建物名)・部署・役職・電話番号が別欄の問い合わせフォーム向け
+    (MIKOMERU同等)。未指定なら空のまま保存し、送信時にsenders.py側で妥当な既定値へ
+    フォールバックする。"""
     cur = con.execute("""INSERT INTO sender_templates
         (tenant_id, name, sender_name, sender_email, sender_address, optout_url,
          sender_last_name, sender_first_name, sender_last_name_kana, sender_first_name_kana,
          sender_postal_code, sender_prefecture, sender_city, sender_block, sender_building,
-         sender_phone, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+         sender_phone, sender_department, sender_position, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (tenant_id, name, sender_name, sender_email, sender_address, optout_url,
          last_name, first_name, last_name_kana, first_name_kana, postal_code,
-         prefecture, city, block, building, phone,
+         prefecture, city, block, building, phone, department, position,
          datetime.now().isoformat(timespec="seconds")))
     con.commit()
     return cur.lastrowid
@@ -641,7 +658,8 @@ def list_sender_templates(con, tenant_id):
     rows = con.execute("""SELECT id, name, sender_name, sender_email, sender_address,
         optout_url, sender_last_name, sender_first_name, sender_last_name_kana,
         sender_first_name_kana, sender_postal_code, sender_prefecture, sender_city,
-        sender_block, sender_building, sender_phone, created_at FROM sender_templates
+        sender_block, sender_building, sender_phone, sender_department, sender_position,
+        created_at FROM sender_templates
         WHERE tenant_id=? ORDER BY created_at DESC""", (tenant_id,)).fetchall()
     return [dict(r) for r in rows]
 
@@ -660,18 +678,20 @@ def activate_sender_template(con, tenant_id, template_id):
     row = con.execute("""SELECT sender_name, sender_email, sender_address, optout_url,
         sender_last_name, sender_first_name, sender_last_name_kana, sender_first_name_kana,
         sender_postal_code, sender_prefecture, sender_city, sender_block, sender_building,
-        sender_phone
+        sender_phone, sender_department, sender_position
         FROM sender_templates WHERE id=? AND tenant_id=?""", (template_id, tenant_id)).fetchone()
     if not row:
         return False
     con.execute("""UPDATE tenants SET sender_name=?, sender_email=?, sender_address=?,
         optout_url=?, sender_last_name=?, sender_first_name=?, sender_last_name_kana=?,
         sender_first_name_kana=?, sender_postal_code=?, sender_prefecture=?, sender_city=?,
-        sender_block=?, sender_building=?, sender_phone=? WHERE id=?""",
+        sender_block=?, sender_building=?, sender_phone=?, sender_department=?, sender_position=?
+        WHERE id=?""",
         (row["sender_name"], row["sender_email"], row["sender_address"], row["optout_url"],
          row["sender_last_name"], row["sender_first_name"], row["sender_last_name_kana"],
          row["sender_first_name_kana"], row["sender_postal_code"], row["sender_prefecture"],
          row["sender_city"], row["sender_block"], row["sender_building"], row["sender_phone"],
+         row["sender_department"], row["sender_position"],
          tenant_id))
     con.commit()
     return True
@@ -698,13 +718,18 @@ def set_form_send_log_manual_sent(con, tenant_id, log_id, manual_sent):
 
 # ── 予約送信(MIKOMERU同等の「送信開始日時を指定する」機能) ──
 def create_scheduled_send(con, tenant_id, list_id, subject, body, dry_run, scheduled_at,
-                           track_clicks=False, sender_template_id=None):
+                           track_clicks=False, sender_template_id=None, allow_no_solicit=False,
+                           cancel_recent_days=None, sender_override=None):
+    import json
     cur = con.execute("""INSERT INTO scheduled_sends
         (tenant_id, list_id, subject, body, dry_run, scheduled_at, track_clicks,
-         sender_template_id, status, created_at)
-        VALUES (?,?,?,?,?,?,?,?,'PENDING',?)""",
+         sender_template_id, allow_no_solicit, cancel_recent_days, sender_override_json,
+         status, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,'PENDING',?)""",
         (tenant_id, list_id, subject, body, 1 if dry_run else 0, scheduled_at,
-         1 if track_clicks else 0, sender_template_id, datetime.now().isoformat(timespec="seconds")))
+         1 if track_clicks else 0, sender_template_id, 1 if allow_no_solicit else 0,
+         cancel_recent_days, json.dumps(sender_override, ensure_ascii=False) if sender_override else None,
+         datetime.now().isoformat(timespec="seconds")))
     con.commit()
     return cur.lastrowid
 
@@ -761,7 +786,7 @@ def cancel_scheduled_send(con, tenant_id, scheduled_id):
 def due_scheduled_sends(con, now_iso):
     """期限が来たPENDINGを取得する。scheduled_send_cli.pyがcronから呼ぶ。"""
     rows = con.execute("""SELECT id, tenant_id, list_id, subject, body, dry_run, track_clicks,
-            sender_template_id
+            sender_template_id, allow_no_solicit, cancel_recent_days, sender_override_json
         FROM scheduled_sends WHERE status='PENDING' AND scheduled_at<=?
         ORDER BY scheduled_at""", (now_iso,)).fetchall()
     return [dict(r) for r in rows]

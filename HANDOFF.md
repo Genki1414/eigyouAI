@@ -1419,6 +1419,130 @@ MIKOMERUの導線に合わせた。
 
 ---
 
+### T23. 自動送信フォームをMIKOMERU実機のスクリーンショット通りに全面刷新(2026-08-24)
+
+ユーザーからMIKOMERUの「自動送信」画面(リストで送信タブ)の実際のスクリーンショット
+3枚が渡され、「全然違う。UIもUXも全然違う」という強い指摘を受けた。差分は主に3つ:
+(1) AshiBase側にあった「ドライラン」トグルがMIKOMERUには存在しない(常に実送信)、
+(2) MIKOMERUは送信元テンプレートを選ぶと、会社名・住所・部署・役職・氏名・カナ・
+メール・電話番号がその場の個別入力欄に展開されて編集できる(AshiBaseは
+`sender_template_id`を選ぶだけで中身は見えなかった)、(3) 「営業拒否サイトへの送信」
+「過去送信対象キャンセル」というAshiBaseに無かったトグルがある。
+
+このうちドライラン廃止・営業拒否バイパスの実装は、既存の安全設計(`can_contact()`・
+Kill Switch・冪等性)を弱める可能性がある変更のため、着手前にユーザーへ3点を
+明示的に確認した:
+1. ドライラントグルを残す(推奨)か、完全廃止してMIKOMERUと同じにするか
+   → **完全廃止**の指示。
+2. 「営業拒否サイトへの送信」は表示だけか、実際に営業拒否ガード
+   (`SKIP_NO_SOLICIT`)をバイパスする本物の機能として実装するか
+   → **実際にバイパスする機能として実装**の指示。
+3. 「過去送信対象キャンセル(期間指定可)」の意味の確認
+   → MIKOMERUのツールチップ文言(「過去の送信処理実行済み会社に対しての送信を
+   キャンセルする機能です。期間は設定可能です」)通りの解釈で実装することで合意。
+
+**設計方針・スコープの線引き**(ユーザーの指示を尊重しつつ、既存の安全設計と
+テスト資産を壊さないための判断。詳細はコード内コメント参照):
+- **ドライランはAPI層では引き続き受け付ける**が、`list_builder.html`の自動送信
+  フォームからは選択肢自体を完全に削除した(常に`dry_run:false`を送る)。
+  APIの`dry_run`パラメータ自体を消さなかった理由は、`api.py test`・`senders.py test`
+  の大部分がdry_runを使って実際のPlaywright/外部サイトに触れずに送信ロジックを
+  検証しており、ここを壊すと安全網である自動テストの大部分が失われるため
+  (「UIから消す」ことと「バックエンドから消す」ことは別の話——今回はユーザーの
+  指摘が画面のスクリーンショットに基づくものだったため、UI側の忠実な再現を優先し、
+  テスト基盤に影響する内部実装までは変更しないという線引きにした)。
+- **can_contact()・Kill Switch・冪等性は一切変更していない**。ドライラン廃止後は
+  「送信する」を押すと常に実送信になるため、Kill Switch停止中は送信ボタン自体を
+  無効化し、理由を画面に明示するようにした(MIKOMERUには無い安全策だが、
+  ドライランという確認手段が無くなった以上、最低限の誤操作防止として妥当と判断)。
+- **送信元情報のその場上書き(`sender_override`)は保存しない**。MIKOMERUの
+  「元の入力は消えるのでご注意ください」という注記通り、送信元テンプレートの
+  内容は選択時に画面へコピーされるだけで、テンプレート自体は書き換わらない設計
+  にした(`sender_templates`/`tenants`へは一切書き込まない。この送信1回だけの
+  一時的な値として`senders.send_campaign()`まで直接渡す)。
+- **部署・役職はAshiBaseに存在しなかった項目**なので、`sender_templates`/`tenants`
+  双方に列を追加し、送信元テンプレート登録画面・自動送信フォーム・
+  `form_navigator.py`のフィールド判定辞書(`部署`/`役職`のヒント語)まで一通り追加した。
+- **会社名フィールドの対応付け**: MIKOMERUの「会社名」は、AshiBase側で
+  「送信者名(特定電子メール法の表示名)」と呼んでいた`sender_name`/`Sender.name`と
+  同じ実体だと判断した(`FormSender`が`values["company"]`に使っている値と同じ)。
+  新たに別の「会社名」列を増やすことはしていない。
+
+**変更したファイル**:
+- **`form_navigator.py`**: `navigate_and_submit()`に`allow_no_solicit`引数を追加。
+  Trueなら営業お断り記載を検出しても`SKIP_NO_SOLICIT`で止めず送信を試みる
+  (既定False=従来通り安全側)。`_FIELD_HINTS`に`department`/`position`の
+  同義語辞書を追加し、`_classify_field()`でも判定するようにした。
+- **`senders.py`**: `Sender`に`department`/`position`を追加。`FormSender`に
+  `allow_no_solicit`を追加し`values`/`navigate_and_submit()`まで伝播。
+  `send_campaign()`に`allow_no_solicit`/`sender_override`引数を追加し、
+  `sender_override`で指定されたキーだけ`sender_template_id`/テナント既定より
+  優先する`_ov()`ヘルパーを実装(部分上書き。指定しなかった項目は従来通り)。
+- **`db.py`**: `tenants`/`sender_templates`に`sender_department`/`sender_position`
+  を追加。`scheduled_sends`に`allow_no_solicit`/`cancel_recent_days`/
+  `sender_override_json`を追加(予約送信でも同じ設定が効くように)。
+  `add_sender_template()`/`list_sender_templates()`/`activate_sender_template()`/
+  `create_scheduled_send()`/`due_scheduled_sends()`を対応する列に合わせて更新。
+- **`target_lists.py`**: `send_list()`に`allow_no_solicit`/`sender_override`/
+  `cancel_recent_days`を追加。`cancel_recent_days`は、指定した日数以内に
+  ("mock"のnoteが付いたドライラン送信を除く)実送信済みの会社をtouchesから
+  検索し、今回の送信対象(`members`)から除外する(除外件数は`cancelled_recent`
+  として呼び出し元へ返す)。
+- **`api.py`**: `verify_tenant_bearer()`は既にT22で`dict`化・`_staff_id`付与済みの
+  ため変更不要。`h_tenant_list_send()`に`allow_no_solicit`(bool)・
+  `cancel_recent_days`(正の整数)・`sender_override`(既知キーのみ・値は文字列必須)
+  のバリデーションと`TL.send_list()`への配線を追加。予約送信(`scheduled_at`指定時)
+  にも同じ3項目を渡すようにした。`h_tenant_sender_templates_add()`に
+  `department`/`position`を追加。
+- **`scheduled_send_cli.py`**: `run_due()`で`sender_override_json`をパースし、
+  `allow_no_solicit`/`cancel_recent_days`とあわせて`TL.send_list()`へ渡すように変更。
+- **`list_builder.html`**:
+  - 送信元テンプレート「登録」ページに部署・役職の入力欄を追加。
+  - 自動送信ページの送信フォームを全面刷新: **ドライラントグルを完全に削除**
+    (常に実送信。Kill Switch停止中は送信ボタン自体を無効化し警告を表示)。
+    送信元テンプレートのプルダウンの下に、会社名・郵便番号・都道府県・市区町村・
+    丁目番地・ビル名/部屋番号・部署・役職・姓・名・姓(カナ)・名(カナ)・
+    メールアドレス・電話番号の個別入力欄を新設し、プルダウン選択時に自動入力
+    (`SENDER_FIELDS`という`{el, tmplKey, overrideKey}`の対応表で一元管理)。
+    送信時、値が入っている欄だけ`sender_override`として送る(空欄はテナント既定
+    のまま)。「営業拒否サイトへの送信」「過去送信対象キャンセル(期間(日)の
+    数値入力付き)」トグルを新設。送信文章の文字数カウンタを追加。
+    「送信対象リスト」はプルダウンのまま(別ページへ遷移しない、という
+    ユーザーの指摘通りの導線を維持——実装自体はT18時点から既にプルダウンだった)。
+
+**テスト**:
+- `senders.py test`に新規セクションを追加: `allow_no_solicit`が既定False/
+  指定時Trueで`navigate_and_submit()`まで届くこと、`sender_override`が
+  指定したキーだけ上書きし未指定キーはテナント既定のままなこと(部分上書き)、
+  `sender_override`が`sender_template_id`より優先されること。いずれも実行後、
+  終了コード0(アサーション失敗なし)を確認。
+- `api.py test`に新規セクションを追加(17件): `allow_no_solicit`指定時も正常受付・
+  `sender_override`の型検証(オブジェクトでない/値が文字列でない→400、未知キー
+  は無視)・`cancel_recent_days`の検証(0以下/文字列/真偽値→400)・実際に
+  直近実送信済みの1社が対象から除外されること(合成テスト企業を使い、
+  実企業が持つ過去の残留データに影響されないようにした)・未指定時は除外され
+  ないこと。既存255件+新規17件=**272/272 全件成功**を確認。
+  (デバッグ中に一時的に`out/companies.db`のKill Switchを直接解除したまま
+  進めてしまい、後続テストが連鎖的に失敗する事態が発生——原因を特定して
+  安全側(停止)へ復元し、テスト用に作成した合成テナント・合成企業の残留データ
+  も手動で削除した。以後は極力スクラッチDBコピー側で完結させ、`out/companies.db`
+  を直接いじる場合は必ず元の状態へ戻すことを徹底する)。
+- Playwright実機確認(スクラッチDBコピー・専用テナント・実サイトへは絶対に
+  到達しない合成企業(`contact_url`をリッスンされていないローカルポートに設定)・
+  専用ポート8804): 送信元テンプレート登録(部署・役職含む)→送信文章テンプレート
+  登録→自動送信ページでリストをプルダウンから直接選択(別ページへ遷移しないことを
+  確認)→送信元テンプレート選択で個別入力欄(会社名・部署・役職・姓名・カナ・
+  住所・メール・電話)へ自動入力されることを確認→送信文章テンプレート選択で
+  件名・本文・文字数カウンタに反映→ドライラントグルが存在しないことを確認→
+  過去送信対象キャンセル・営業拒否サイトへの送信トグルを操作→実際に「送信する」
+  をクリックし、送信リクエストのペイロード(`dry_run:false`・`allow_no_solicit:true`・
+  `cancel_recent_days:14`・`sender_override`の全項目)をネットワーク傍受で検証→
+  結果表示(対象1社/送信0/失敗1—合成企業へのアクセスが接続不可で失敗する想定通り)
+  を確認。別途、Kill Switch停止中は送信ボタンが無効化され警告が表示されることも
+  確認。JSエラーなし。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

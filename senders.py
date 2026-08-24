@@ -71,6 +71,8 @@ class Sender:
     block: str = ""
     building: str = ""
     phone: str = ""
+    department: str = ""
+    position: str = ""
 
 
 # ── 基底クラス ──────────────────────────────
@@ -304,12 +306,13 @@ class FormSender(BaseSender):
     URL_RE = re.compile(r"^https?://", re.I)
 
     def __init__(self, con, dry_run=True, tenant_id=None, offer_id=None, list_id=None,
-                 keep_debug_fields=False):
+                 keep_debug_fields=False, allow_no_solicit=False):
         super().__init__(con, dry_run=dry_run)
         self.tenant_id = tenant_id
         self.offer_id = offer_id
         self.list_id = list_id
         self.keep_debug_fields = keep_debug_fields
+        self.allow_no_solicit = allow_no_solicit
         self._run_count = 0  # このインスタンス(=1回の実行)での試行数
         self._attempt_count = 0  # このインスタンス(=1社への1回のsend())での試行回数。
                                   # R.retry()が_deliver()を再試行するたびに増える。
@@ -394,10 +397,12 @@ class FormSender(BaseSender):
                   "postal_code": sender.postal_code or "",
                   "prefecture": sender.prefecture or "", "city": sender.city or "",
                   "block": sender.block or "", "building": sender.building or "",
+                  "department": sender.department or "", "position": sender.position or "",
                   "last_name": sender.last_name or sender.name, "first_name": sender.first_name or "",
                   "subject": subject or "", "message": body, "furigana": furigana}
         result = FN.navigate_and_submit(to.contact_url, values,
-                                         screenshot_dir=C.OUT_DIR / "form_screenshots")
+                                         screenshot_dir=C.OUT_DIR / "form_screenshots",
+                                         allow_no_solicit=self.allow_no_solicit)
         execution_seconds = _time.monotonic() - t0
         _log_form_send(self.con, to.company_id, result, to.contact_url,
                         tenant_id=self.tenant_id, offer_id=self.offer_id, list_id=self.list_id,
@@ -420,12 +425,14 @@ class FormSender(BaseSender):
 REGISTRY = {s.channel: s for s in (MailSender, FaxSender, SmsSender, PostSender, FormSender)}
 
 
-def get_sender(channel, con, dry_run=True, tenant_id=None, offer_id=None, list_id=None):
+def get_sender(channel, con, dry_run=True, tenant_id=None, offer_id=None, list_id=None,
+                allow_no_solicit=False):
     cls = REGISTRY.get(channel)
     if not cls:
         raise ValueError(f"未対応チャネル: {channel}")
     if cls is FormSender:
-        return cls(con, dry_run=dry_run, tenant_id=tenant_id, offer_id=offer_id, list_id=list_id)
+        return cls(con, dry_run=dry_run, tenant_id=tenant_id, offer_id=offer_id, list_id=list_id,
+                   allow_no_solicit=allow_no_solicit)
     return cls(con, dry_run=dry_run)
 
 
@@ -465,7 +472,7 @@ def rewrite_tracked_links(con, touch_id, body, base_url):
 
 # ── 一括送信 ────────────────────────────────
 def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clicks=False,
-                   sender_template_id=None):
+                   sender_template_id=None, allow_no_solicit=False, sender_override=None):
     """キャンペーンの未送信分を実際に送る。
     campaign.py simulate の本番版がこれ。接触ガードはここでも最終確認する。
     track_clicks=Trueなら、本文中のURLをクリック計測リンクへ置き換える
@@ -480,7 +487,17 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
     保存せず呼び出しごとに都度指定する。所有者テナントの検証はh_tenant_list_send()側の
     呼び出し元で行うため、ここでは見つからなければ黙って既定の送信元にフォールバックしない
     ——存在しないIDを渡された場合はテナントの有効な送信元を使う(誤って別テナントの
-    テンプレートを指定してもデータは漏れないが、念のためtenant_idでも絞り込む)。"""
+    テンプレートを指定してもデータは漏れないが、念のためtenant_idでも絞り込む)。
+
+    allow_no_solicit: MIKOMERUの「営業拒否サイトへの送信」相当。Trueだと営業お断りの
+    記載があるサイトにもフォーム送信を試みる(can_contact()等の接触ガードとは無関係の、
+    フォーム側の記載を見てのスキップ判定をバイパスするだけ)。
+
+    sender_override: {"name","email","postal_code","prefecture","city","block","building",
+    "department","position","last_name","first_name","last_name_kana","first_name_kana","phone"}
+    のうち指定されたキーだけ、sender_template_id/テナント既定より優先する(MIKOMERUの
+    自動送信フォームで「テンプレートの内容を送信直前に上書きする」相当。この送信だけの
+    その場限りの値で、sender_templates/tenantsへは一切保存しない)。"""
     import db
 
     q = """SELECT t.id tid, t.channel, t.subject, t.body, t.company_id, t.step,
@@ -489,7 +506,8 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
                   tn.sender_name sname, tn.sender_email, tn.sender_address, tn.optout_url,
                   tn.sender_last_name, tn.sender_first_name, tn.sender_last_name_kana,
                   tn.sender_first_name_kana, tn.sender_postal_code, tn.sender_prefecture,
-                  tn.sender_city, tn.sender_block, tn.sender_building, tn.sender_phone
+                  tn.sender_city, tn.sender_block, tn.sender_building, tn.sender_phone,
+                  tn.sender_department, tn.sender_position
            FROM touches t
            JOIN companies c ON c.id = t.company_id
            LEFT JOIN campaigns cp ON cp.id = t.campaign_id
@@ -516,9 +534,15 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
         override_sender_row = con.execute("""SELECT sender_name, sender_email, sender_address,
             optout_url, sender_last_name, sender_first_name, sender_last_name_kana,
             sender_first_name_kana, sender_postal_code, sender_prefecture, sender_city,
-            sender_block, sender_building, sender_phone
+            sender_block, sender_building, sender_phone, sender_department, sender_position
             FROM sender_templates WHERE id=? AND tenant_id=?""",
             (sender_template_id, rows[0]["tenant_id"])).fetchone()
+
+    def _ov(key, fallback):
+        """sender_overrideで指定された値があればそちらを優先する(空文字は無視)。"""
+        if sender_override and sender_override.get(key):
+            return sender_override[key]
+        return fallback
 
     print(f"送信対象 {len(rows)}件 / {'DRY RUN（実送信しません）' if dry_run else '★本番送信★'}")
     cost = 0
@@ -545,23 +569,30 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
 
         s = override_sender_row or r
         sender = Sender(
-            name=(s["sender_name"] if override_sender_row else r["sname"]) or "AshiBase（足場ベース）",
-            email=s["sender_email"] or "info@ashibase.jp",
+            name=_ov("name", (s["sender_name"] if override_sender_row else r["sname"])
+                     or "AshiBase（足場ベース）"),
+            email=_ov("email", s["sender_email"] or "info@ashibase.jp"),
             address=s["sender_address"] or "",
             optout_url=s["optout_url"] or "https://ashibase.jp/optout",
-            last_name=s["sender_last_name"] or "", first_name=s["sender_first_name"] or "",
-            last_name_kana=s["sender_last_name_kana"] or "",
-            first_name_kana=s["sender_first_name_kana"] or "",
-            postal_code=s["sender_postal_code"] or "",
-            prefecture=s["sender_prefecture"] or "", city=s["sender_city"] or "",
-            block=s["sender_block"] or "", building=s["sender_building"] or "",
-            phone=s["sender_phone"] or "")
+            last_name=_ov("last_name", s["sender_last_name"] or ""),
+            first_name=_ov("first_name", s["sender_first_name"] or ""),
+            last_name_kana=_ov("last_name_kana", s["sender_last_name_kana"] or ""),
+            first_name_kana=_ov("first_name_kana", s["sender_first_name_kana"] or ""),
+            postal_code=_ov("postal_code", s["sender_postal_code"] or ""),
+            prefecture=_ov("prefecture", s["sender_prefecture"] or ""),
+            city=_ov("city", s["sender_city"] or ""),
+            block=_ov("block", s["sender_block"] or ""),
+            building=_ov("building", s["sender_building"] or ""),
+            phone=_ov("phone", s["sender_phone"] or ""),
+            department=_ov("department", s["sender_department"] or ""),
+            position=_ov("position", s["sender_position"] or ""))
         to = Recipient(company_id=r["company_id"], name=r["name"], email=r["email"],
                        fax=r["fax"], phone=r["phone"], address=r["address"],
                        contact_url=r["contact_url"])
 
         adapter = get_sender(r["channel"], con, dry_run=dry_run,
-                              tenant_id=r["tenant_id"], offer_id=r["offer_id"], list_id=r["list_id"])
+                              tenant_id=r["tenant_id"], offer_id=r["offer_id"], list_id=r["list_id"],
+                              allow_no_solicit=allow_no_solicit)
         # ドライランと本番送信は別の冪等キー空間を使う。同じキーだとドライランが
         # 冪等キーを占有してしまい、その後の本番送信が「送信済み(冪等キー一致)」
         # として何もせず素通りしてしまう(実サイトに一度も送らないまま「完了」扱いになる)。
@@ -774,7 +805,7 @@ if __name__ == "__main__":
         con.commit()
 
         def _capture_values(tenant_id, offer_name, subject="件名", body="本文", track_clicks=False,
-                             sender_template_id=None):
+                             sender_template_id=None, allow_no_solicit=False, sender_override=None):
             offer_id = con.execute("SELECT id FROM offers WHERE tenant_id=?", (tenant_id,)).fetchone()[0]
             cur = con.execute("""INSERT INTO campaigns (name, started_at, target_rule, offer_id)
                 VALUES (?,?,?,?)""",
@@ -786,13 +817,17 @@ if __name__ == "__main__":
             captured = {}
             import form_navigator as FN
             orig_navigate = FN.navigate_and_submit
-            FN.navigate_and_submit = lambda url, values, **k: (
-                captured.update(values),
-                FN.NavigationResult(status="SUCCESS", reason_code="success_text_matched",
-                                    submit_attempted=True))[-1]
+
+            def _fake_navigate(url, values, **k):
+                captured.update(values)
+                captured["_kwargs"] = k
+                return FN.NavigationResult(status="SUCCESS", reason_code="success_text_matched",
+                                            submit_attempted=True)
+            FN.navigate_and_submit = _fake_navigate
             try:
                 send_campaign(con, cid, step=1, dry_run=False, track_clicks=track_clicks,
-                               sender_template_id=sender_template_id)
+                               sender_template_id=sender_template_id,
+                               allow_no_solicit=allow_no_solicit, sender_override=sender_override)
                 if track_clicks:
                     # trackingリンクをクリックした体で解決し、その結果もcapturedへ
                     # 詰めて返す(呼び出し側がtouch_idを知らなくても確認できるように)。
@@ -859,6 +894,43 @@ if __name__ == "__main__":
             print(f"  {'✓' if ok_no_override else '✗'} sender_template_id未指定なら従来通りテナントの"
                   "有効化済み送信元が使われる(他の呼び出しに影響しない)")
             con.execute("DELETE FROM sender_templates WHERE id=?", (override_st_id,))
+            con.commit()
+
+            print("\n── allow_no_solicit(MIKOMERUの「営業拒否サイトへの送信」相当) ──")
+            v_no_bypass = _capture_values(tid_custom, "test-no-solicit-default")
+            ok_no_bypass_default = v_no_bypass.get("_kwargs", {}).get("allow_no_solicit") is False
+            print(f"  {'✓' if ok_no_bypass_default else '✗'} 既定はFalseでnavigate_and_submit()へ渡る"
+                  "(営業拒否スキップは従来通り有効)")
+            v_bypass = _capture_values(tid_custom, "test-no-solicit-bypass", allow_no_solicit=True)
+            ok_bypass = v_bypass.get("_kwargs", {}).get("allow_no_solicit") is True
+            print(f"  {'✓' if ok_bypass else '✗'} allow_no_solicit=Trueがnavigate_and_submit()まで届く")
+
+            print("\n── sender_override(自動送信フォームでの送信元その場上書き。T23) ──")
+            v_ov_partial = _capture_values(
+                tid_custom, "test-sender-override-partial",
+                sender_override={"department": "工事部", "position": "代表取締役",
+                                  "last_name": "上書姓"})
+            ok_ov_partial = (v_ov_partial.get("department") == "工事部"
+                              and v_ov_partial.get("position") == "代表取締役"
+                              and v_ov_partial.get("last_name") == "上書姓"
+                              # 指定していないfirst_nameはテナント既定(太郎)のまま
+                              and v_ov_partial.get("first_name") == "太郎")
+            print(f"  department={v_ov_partial.get('department')!r} "
+                  f"position={v_ov_partial.get('position')!r} "
+                  f"last_name={v_ov_partial.get('last_name')!r} first_name={v_ov_partial.get('first_name')!r}")
+            print(f"  {'✓' if ok_ov_partial else '✗'} sender_overrideで指定したキーだけ上書きされ、"
+                  "指定していないキーはテナント既定のまま(部分上書き)")
+
+            temp_st_id = db.add_sender_template(
+                con, tid_custom, "上書き比較用テンプレート", "テンプレ送信者", "tmpl@test-a.example.co.jp",
+                last_name="テンプレ姓")
+            v_ov_over_template = _capture_values(
+                tid_custom, "test-sender-override-over-template",
+                sender_template_id=temp_st_id, sender_override={"last_name": "上書き優先姓"})
+            ok_ov_over_template = v_ov_over_template.get("last_name") == "上書き優先姓"
+            print(f"  {'✓' if ok_ov_over_template else '✗'} sender_overrideはsender_template_idより"
+                  f"優先される(last_name={v_ov_over_template.get('last_name')!r})")
+            con.execute("DELETE FROM sender_templates WHERE id=?", (temp_st_id,))
             con.commit()
         finally:
             db.set_global_kill_switch(con, orig_ks2, reason=orig_ks2_reason, updated_by="test-restore")

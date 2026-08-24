@@ -67,6 +67,8 @@ _FIELD_HINTS = {
     "first_name": ["名", "first name", "given name"],
     "name": ["お名前", "氏名", "担当者名", "ご担当者", "ご担当者名", "your name", "name"],
     "furigana": ["フリガナ", "ふりがな", "カナ", "かな", "kana"],
+    "department": ["部署", "部署名", "所属", "department", "division"],
+    "position": ["役職", "役職名", "position", "job title"],
 }
 
 # "name"という汎用語を除いた、氏名(フルネーム)固有のフレーズ手がかりのみ。
@@ -205,6 +207,10 @@ def _classify_field(page, el):
         return "message"
     if any(h in text for h in _FIELD_HINTS["company"]):
         return "company"
+    if any(h in text for h in _FIELD_HINTS["department"]):
+        return "department"
+    if any(h in text for h in _FIELD_HINTS["position"]):
+        return "position"
     if any(h in text for h in _FIELD_HINTS["subject"]):
         return "subject"
     if any(h in text for h in _FIELD_HINTS["furigana"]):
@@ -472,12 +478,16 @@ def discover_contact_url(start_url, *, headless=True):
         return result
 
 
-def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None):
+def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None, allow_no_solicit=False):
     """フォームへの一連の操作を行い、NavigationResultを返す。
     values: {"company","name","email","phone","message","subject", ...} の埋める値の辞書。
     screenshot_dir: 指定すると、問い合わせページ到達直後(送信前)と送信ボタン押下後
     (送信後)のスクリーンショットをこの配下に保存する(Noneなら撮影しない。テストでは
     Playwright未起動のケースが多いため既定でOFF)。
+    allow_no_solicit: Trueだと「営業目的お断り」等の記載を検出してもSKIP_NO_SOLICITで
+    止めず、そのまま送信を試みる(MIKOMERUの「営業拒否サイトへの送信」相当。
+    マニュアル通り「送信テスト用の機能。ご注意ください」——既定はFalseで従来通り
+    スキップする安全側)。
     例外は投げない(FAILED_RETRYABLEにしたい一時エラーだけは呼び出し側で判断できるよう
     resultのstatusで表現する。senders.py側でR.Retryableへ変換するかはそちら任せ)。"""
     from playwright.sync_api import sync_playwright
@@ -523,7 +533,7 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                     result.status = "SKIP_CAPTCHA"
                     result.reason_code = "captcha_detected"
                     return result
-                if _detect_no_solicit(page_text):
+                if _detect_no_solicit(page_text) and not allow_no_solicit:
                     result.status = "SKIP_NO_SOLICIT"
                     result.reason_code = "no_solicitation_notice"
                     return result

@@ -69,15 +69,23 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            "value","memo"} → 返信・商談化・受注を手動記録(β版。
                            メール自動取得等はしない)
   POST /api/tenant/lists/<id>/send  {"subject","body","dry_run","scheduled_at",
-                           "sender_template_id"} → リストへフォーム自動送信。
-                           dry_run既定true(=実サイトへは送らない)。can_contact()・
+                           "sender_template_id","allow_no_solicit","cancel_recent_days",
+                           "sender_override"} → リストへフォーム自動送信。
+                           dry_run既定true(=実サイトへは送らない。list_builder.htmlの
+                           UI自体はMIKOMERU同様トグルを持たず常にfalseを送るが、
+                           API自体は引き続きtrueを既定に受け付ける)。can_contact()・
                            冪等性・ペーシング上限はsend_campaign()経由でそのまま適用
                            される(HANDOFF.mdの原則を厳守)。scheduled_at(未来のISO日時)
                            を指定すると即時実行せずscheduled_sendsへ予約登録するだけに
                            なる。sender_template_id(整数)を指定すると、テナントの
                            「有効化」済み送信元の代わりにその送信元テンプレートを
                            この送信だけに使う(MIKOMERUの自動送信画面「送信元テンプレート
-                           から選択」相当)
+                           から選択」相当)。allow_no_solicit(bool)はMIKOMERUの「営業拒否
+                           サイトへの送信」相当(既定false)。cancel_recent_days(正の整数)は
+                           「過去送信対象キャンセル」相当(指定日数以内に実送信済みの会社を
+                           対象から除外)。sender_override(オブジェクト)は会社名/住所/
+                           部署/役職/氏名/カナ/メール/電話のうち指定したものだけ、
+                           この送信に限りその場で上書きする(保存はしない)
   GET  /api/tenant/scheduled-sends?list_id=  予約送信の一覧(自テナント分のみ)
   POST /api/tenant/scheduled-sends/cancel  {"scheduled_id"} → PENDINGの予約を
                            キャンセル(実行済み・キャンセル済みは404)
@@ -107,7 +115,9 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/tenant/templates/delete    {"template_id"} → 削除
   GET  /api/tenant/sender-templates    自テナントの送信元テンプレート一覧
   POST /api/tenant/sender-templates    {"name","sender_name","sender_email",
-                           "sender_address","optout_url"} → 保存
+                           "sender_address","optout_url","last_name","first_name",
+                           "last_name_kana","first_name_kana","postal_code","prefecture",
+                           "city","block","building","phone","department","position"} → 保存
   POST /api/tenant/sender-templates/delete    {"template_id"} → 削除
   POST /api/tenant/sender-templates/activate  {"template_id"} → このテナントの
                            送信者情報(tenants.sender_*)へ反映。反映先は
@@ -967,7 +977,8 @@ def h_tenant_sender_templates_add(con, tenant_id, data):
                                   postal_code=opt("postal_code"),
                                   prefecture=opt("prefecture"), city=opt("city"),
                                   block=opt("block"), building=opt("building"),
-                                  phone=opt("phone"))
+                                  phone=opt("phone"), department=opt("department"),
+                                  position=opt("position"))
     return 200, {"ok": True, "template_id": tid}
 
 
@@ -1129,10 +1140,48 @@ def h_tenant_dashboard(con, tenant_id):
     }
 
 
+_SENDER_OVERRIDE_KEYS = {"name", "email", "postal_code", "prefecture", "city", "block", "building",
+                          "department", "position", "last_name", "first_name",
+                          "last_name_kana", "first_name_kana", "phone"}
+
+
+def _parse_sender_override(data):
+    """自動送信フォームで送信元テンプレートの内容を送信直前にその場で上書きする値
+    (MIKOMERU同等。sender_templates/tenantsへは保存しない)。未知のキーは無視し、
+    文字列以外の値が来たら400にする。空のdict/未指定ならNoneを返す(=上書きなし)。"""
+    raw = data.get("sender_override")
+    if raw is None:
+        return None, None
+    if not isinstance(raw, dict):
+        return None, "sender_overrideはオブジェクトで指定してください"
+    override = {}
+    for k, v in raw.items():
+        if k not in _SENDER_OVERRIDE_KEYS:
+            continue
+        if v is None:
+            continue
+        if not isinstance(v, str):
+            return None, f"sender_override.{k}は文字列で指定してください"
+        v = v.strip()
+        if v:
+            override[k] = v
+    return (override or None), None
+
+
 def h_tenant_list_send(con, tenant_id, list_id, data, staff_id=None):
     """保存済みリストから実際にフォーム自動送信キャンペーンを走らせる。
     dry_runは既定でTrue(=実サイトへは何も送らない)。実送信するには
     明示的に dry_run:false を指定する必要がある(取り消せない操作のため)。
+    UI側(list_builder.html)はMIKOMERU同様にドライランのトグル自体を持たず、
+    常にdry_run:falseを送る(=顧客からは常に実送信。この関数自体はAPIとして
+    dry_runを引き続き受け付ける——ops/テスト用途で内部的に使うため)。
+
+    allow_no_solicit: MIKOMERUの「営業拒否サイトへの送信」相当(既定False=従来通り
+    スキップする安全側)。sender_override: 送信元情報の一部/全部をこの送信だけ
+    その場で上書きする(MIKOMERUの自動送信フォームの各入力欄に相当)。
+    cancel_recent_days: MIKOMERUの「過去送信対象キャンセル」相当。指定日数以内に
+    実送信済みの会社をこの送信の対象から除外する。
+
     scheduled_at(ISO日時。未来のみ)を指定すると、即時実行せずscheduled_sendsへ
     予約として登録するだけになる(MIKOMERUの「送信開始日時を指定する」相当。
     実際の実行はscheduled_send_cli.pyがcronから拾ってTL.send_list()をそのまま
@@ -1145,6 +1194,17 @@ def h_tenant_list_send(con, tenant_id, list_id, data, staff_id=None):
     if not isinstance(dry_run, bool):
         dry_run = True
     track_clicks = bool(data.get("track_clicks"))
+    allow_no_solicit = bool(data.get("allow_no_solicit"))
+
+    cancel_recent_days = data.get("cancel_recent_days")
+    if cancel_recent_days is not None:
+        if not isinstance(cancel_recent_days, int) or isinstance(cancel_recent_days, bool) \
+                or cancel_recent_days <= 0:
+            return 400, {"error": "cancel_recent_daysは正の整数で指定してください"}
+
+    sender_override, ov_err = _parse_sender_override(data)
+    if ov_err:
+        return 400, {"error": ov_err}
 
     sender_template_id = data.get("sender_template_id")
     if sender_template_id is not None:
@@ -1171,13 +1231,17 @@ def h_tenant_list_send(con, tenant_id, list_id, data, staff_id=None):
         sid = db.create_scheduled_send(con, tenant_id, list_id, subject, body, dry_run,
                                         when.isoformat(timespec="seconds"),
                                         track_clicks=track_clicks,
-                                        sender_template_id=sender_template_id)
+                                        sender_template_id=sender_template_id,
+                                        allow_no_solicit=allow_no_solicit,
+                                        cancel_recent_days=cancel_recent_days,
+                                        sender_override=sender_override)
         return 200, {"scheduled": True, "scheduled_id": sid,
                      "scheduled_at": when.isoformat(timespec="seconds")}
 
     res = TL.send_list(con, tenant_id, list_id, subject, body, dry_run=dry_run,
                         track_clicks=track_clicks, sender_template_id=sender_template_id,
-                        staff_id=staff_id)
+                        staff_id=staff_id, allow_no_solicit=allow_no_solicit,
+                        cancel_recent_days=cancel_recent_days, sender_override=sender_override)
     if res is None:
         return 404, {"error": "リストが見つかりません"}
     if "error" in res:
@@ -2203,6 +2267,77 @@ def self_test(port=8899):
     st, r = post_auth(f"/api/tenant/lists/{list_b_id}/send",
                       {"subject": "x", "body": "y"}, token=key_a)
     t("他テナントのリストへは送信できない(404)", st == 404)
+
+    print("\n── 自動送信の新パラメータ(T23: 営業拒否バイパス/送信元上書き/過去送信対象キャンセル) ──")
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "x", "body": "y", "allow_no_solicit": True}, token=key_a)
+    t("allow_no_solicit:trueを指定しても送信自体は正常に受け付けられる", st == 200)
+
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "x", "body": "y", "sender_override": "not-an-object"}, token=key_a)
+    t("sender_overrideがオブジェクトでないと400", st == 400)
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "x", "body": "y", "sender_override": {"department": 123}}, token=key_a)
+    t("sender_overrideの値が文字列でないと400", st == 400)
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "x", "body": "y",
+                       "sender_override": {"department": "工事部", "unknown_key": "無視される"}},
+                      token=key_a)
+    t("sender_overrideの未知のキーは無視され、既知のキーだけで正常に受け付けられる", st == 200)
+
+    for bad in (-1, 0, "30", True):
+        st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                          {"subject": "x", "body": "y", "cancel_recent_days": bad}, token=key_a)
+        t(f"cancel_recent_days={bad!r}は正の整数でないと400", st == 400)
+
+    # cancel_recent_days: 直近に実送信済みの会社が今回の送信対象から除外されることを確認。
+    # 実企業(id=1等)は他のテストが残した過去のtouches(古いnote等)を持つ場合があり、
+    # 「直近に送信済みか」の判定が汚染されるため、専用の合成企業を使って確実にクリーンな
+    # 状態から検証する(senders.py testの company_id=999997 と同じ考え方)。
+    con.execute("DELETE FROM touches WHERE company_id IN (999995, 999996)")
+    con.execute("DELETE FROM companies WHERE id IN (999995, 999996)")
+    con.execute("""INSERT INTO companies (id, name, contact_url) VALUES
+        (999995, 'テスト_cancel_recent_days_A', 'https://example.co.jp/contact/'),
+        (999996, 'テスト_cancel_recent_days_B', 'https://example.co.jp/contact/')""")
+    con.commit()
+    cr_companies = [999995, 999996]
+    now_cr = datetime.now().isoformat(timespec="seconds")
+    cur = con.execute("""INSERT INTO target_lists (tenant_id,name,source,company_count,created_at)
+        VALUES (?,?,?,?,?)""", (tid_a, "テストA_cancel_recent_days", "filter", 2, now_cr))
+    cr_list_id = cur.lastrowid
+    con.executemany("""INSERT INTO target_list_members (list_id, company_id, send_status,
+        created_at, updated_at) VALUES (?,?,'PENDING',?,?)""",
+        [(cr_list_id, cid, now_cr, now_cr) for cid in cr_companies])
+    # 1社は「直近に実送信済み」として下ごしらえする(別campaignでの過去の送信を模す)。
+    # note に provider_id=mock_ を含めない=ドライランではなく実送信だったという印
+    cur2 = con.execute("""INSERT INTO campaigns (name, started_at, target_rule, offer_id)
+        VALUES (?,?,?,?)""", ("cancel_recent_days下ごしらえ", now_cr, "1=0",
+                               con.execute("SELECT id FROM offers WHERE tenant_id=?",
+                                           (tid_a,)).fetchone()[0]))
+    prior_campaign_id = cur2.lastrowid
+    con.execute("""INSERT INTO touches (campaign_id, company_id, channel, variant, step,
+        subject, body, sent_at, note) VALUES (?,?,'フォーム','A',1,'過去','過去',?,'provider_id=form_prior')""",
+        (prior_campaign_id, cr_companies[0], now_cr))
+    con.commit()
+
+    res_cr = TL.send_list(con, tid_a, cr_list_id, "件名", "本文", dry_run=True, cancel_recent_days=30)
+    t("cancel_recent_days指定時、直近実送信済みの1社が対象から除外される",
+      res_cr is not None and "error" not in res_cr
+      and res_cr.get("target_count") == 1 and res_cr.get("cancelled_recent") == 1)
+
+    res_cr_off = TL.send_list(con, tid_a, cr_list_id, "件名", "本文", dry_run=True)
+    t("cancel_recent_days未指定なら従来通り2社とも対象のまま",
+      res_cr_off is not None and "error" not in res_cr_off
+      and res_cr_off.get("target_count") == 2 and res_cr_off.get("cancelled_recent") == 0)
+
+    con.execute("DELETE FROM touches WHERE campaign_id IN (?,?)",
+                 (prior_campaign_id, res_cr["campaign_id"]))
+    con.execute("DELETE FROM campaigns WHERE id IN (?,?)", (prior_campaign_id, res_cr["campaign_id"]))
+    con.execute("DELETE FROM target_list_members WHERE list_id=?", (cr_list_id,))
+    con.execute("DELETE FROM target_lists WHERE id=?", (cr_list_id,))
+    con.execute("DELETE FROM touches WHERE company_id IN (999995, 999996)")
+    con.execute("DELETE FROM companies WHERE id IN (999995, 999996)")
+    con.commit()
 
     print("\n── 予約送信(MIKOMERUの「送信開始日時を指定する」相当) ──")
     past_at = (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds")

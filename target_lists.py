@@ -17,7 +17,7 @@ import argparse
 import csv
 import io
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import config as C
 
@@ -591,7 +591,8 @@ def get_list(con, tenant_id, list_id, limit=200, offset=0, status_filter=None):
 
 
 def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks=False,
-              sender_template_id=None, staff_id=None):
+              sender_template_id=None, staff_id=None, allow_no_solicit=False,
+              sender_override=None, cancel_recent_days=None):
     """保存済みリストからフォーム自動送信キャンペーンを作り、既存のsenders.send_campaign()
     にそのまま委譲する。can_contact()・冪等性・FormSenderのペーシング上限はすべて
     send_campaign()側の仕組みがそのまま効く(ここで独自の送信経路は作らない)。
@@ -602,6 +603,15 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
     INSERT OR IGNOREで重複しない。既に送信済み(sent_at IS NOT NULL)の行は
     send_campaign()側のWHERE条件で自動的に対象から外れるため、再送信を押しても
     未送信分だけがもう一度試される(リトライにはなるが二重送信にはならない)。
+
+    allow_no_solicit/sender_overrideはそのままsenders.send_campaign()へ渡す
+    (MIKOMERUの「営業拒否サイトへの送信」「送信元テンプレートの内容を送信直前に
+    上書きする」相当。詳細はsend_campaign()のdocstring参照)。
+
+    cancel_recent_days: MIKOMERUの「過去送信対象キャンセル(期間指定可)」相当。
+    指定した日数以内に(このリストに限らず)実送信済みの会社は、今回の送信対象から
+    除外する(ドライランでの送信は対象にしない。can_contact()の生涯上限・最短間隔
+    ガードとは別の、ユーザーが都度選べる追加フィルタという位置づけ)。
     """
     import senders
     import db
@@ -623,6 +633,23 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
     if not members:
         return {"error": "このリストにはフォーム送信可能な企業がありません"
                           "(問い合わせURLが確認できた企業のみ送信対象になります)"}
+
+    cancelled_recent = 0
+    if cancel_recent_days:
+        cutoff = (datetime.now() - timedelta(days=cancel_recent_days)).isoformat(timespec="seconds")
+        member_ids = [m["id"] for m in members]
+        placeholders = ",".join("?" * len(member_ids))
+        recently_sent = {row["company_id"] for row in con.execute(
+            f"""SELECT DISTINCT company_id FROM touches
+                WHERE company_id IN ({placeholders}) AND sent_at IS NOT NULL AND sent_at>=?
+                  AND instr(COALESCE(note,''), 'provider_id=mock_')=0""",
+            member_ids + [cutoff]).fetchall()}
+        if recently_sent:
+            cancelled_recent = len(recently_sent)
+            members = [m for m in members if m["id"] not in recently_sent]
+        if not members:
+            return {"error": f"過去送信対象キャンセルにより、送信可能な企業がありません"
+                              f"(直近{cancel_recent_days}日以内に送信済み)"}
 
     if lst["campaign_id"]:
         campaign_id = lst["campaign_id"]
@@ -688,12 +715,13 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
     con.commit()
 
     stats = senders.send_campaign(con, campaign_id, step=1, dry_run=dry_run,
-                                   track_clicks=track_clicks, sender_template_id=sender_template_id)
+                                   track_clicks=track_clicks, sender_template_id=sender_template_id,
+                                   allow_no_solicit=allow_no_solicit, sender_override=sender_override)
     if not dry_run:
         db.sync_target_list_member_status(con, list_id, campaign_id, step=1)
         _notify_completion(con, tenant_id, lst["name"], len(members), stats)
     return {"campaign_id": campaign_id, "target_count": len(members),
-            "dry_run": dry_run, "stats": stats}
+            "dry_run": dry_run, "stats": stats, "cancelled_recent": cancelled_recent}
 
 
 def _notify_completion(con, tenant_id, list_name, target_count, stats):

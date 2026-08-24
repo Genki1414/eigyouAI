@@ -387,6 +387,16 @@ tr.clickable:hover{background:var(--blue-soft)}
             送信されます(誤った内容を入れて送るよりは空欄の方が安全なため)。</p>
           <div class="row" style="margin-top:6px">
             <div>
+              <label>部署(任意)</label>
+              <input type="text" id="sDepartment" placeholder="例: 工事部">
+            </div>
+            <div>
+              <label>役職(任意)</label>
+              <input type="text" id="sPosition" placeholder="例: 代表取締役">
+            </div>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <div>
               <label>姓(任意)</label>
               <input type="text" id="sLastName" placeholder="例: 中川">
             </div>
@@ -1640,17 +1650,19 @@ $("btnSaveSenderTemplate").addEventListener("click", async () => {
   const block = $("sBlock").value.trim();
   const building = $("sBuilding").value.trim();
   const phone = $("sPhone").value.trim();
+  const department = $("sDepartment").value.trim();
+  const position = $("sPosition").value.trim();
   const el = $("sTmplResult");
   if (!name || !sender_name || !sender_email) { el.innerHTML = `<div class="result err">テンプレート名・送信者名・返信先メールアドレスは必須です</div>`; return; }
   try {
     await call("/api/tenant/sender-templates", { method: "POST", body: JSON.stringify({
       name, sender_name, sender_email, sender_address, optout_url,
       last_name, first_name, last_name_kana, first_name_kana, postal_code,
-      prefecture, city, block, building, phone }) });
+      prefecture, city, block, building, phone, department, position }) });
     el.innerHTML = `<div class="result ok">保存しました</div>`;
     ["sName", "sSenderName", "sSenderEmail", "sSenderAddress", "sOptoutUrl",
      "sLastName", "sFirstName", "sLastNameKana", "sFirstNameKana", "sPostalCode",
-     "sPrefecture", "sCity", "sBlock", "sBuilding", "sPhone"]
+     "sPrefecture", "sCity", "sBlock", "sBuilding", "sPhone", "sDepartment", "sPosition"]
       .forEach(id => $(id).value = "");
     await refreshSenderTemplates();
   } catch (e) {
@@ -2469,39 +2481,83 @@ async function renderSendForm(container, id) {
       <div class="card">
         <p style="margin-bottom:10px;padding:10px 14px;background:var(--concrete);
           border-radius:6px;font-weight:700">📋 送信対象リスト: ${targetListLabel}</p>
-        <p class="hint">問い合わせページが確認できている企業のみが送信対象になります。
-          ドライランでは実際のサイトへは何も送信されません(動作確認用)。</p>
-        <div style="margin-top:10px">
+        <p class="hint">問い合わせページが確認できている企業のみが送信対象になります。</p>
+
+        <div style="margin-top:14px">
+          <label>送信元テンプレートから選択(任意。選択すると、テンプレートに登録されている
+            送信元情報が下の各入力欄に自動入力されます。元の入力は消えるのでご注意ください)</label>
+          <select id="sendSenderTemplate">
+            <option value="">---(現在「有効化」中の送信元を使う)</option>
+            ${lastSenderTemplates.map(x => `<option value="${x.id}">${x.name}(${x.sender_name})</option>`).join("")}
+          </select>
+        </div>
+        <p class="hint" style="margin-top:8px">以下は空欄のまま送信すると、現在「有効化」中の
+          送信元(送信元テンプレート画面)の内容がそのまま使われます。ここで入力/変更した内容は
+          この送信だけに反映され、送信元テンプレート側は書き換わりません。</p>
+        <div class="row" style="margin-top:10px">
+          <div><label>会社名</label><input type="text" id="sendCompanyName" placeholder="例: 株式会社〇〇"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>郵便番号</label><input type="text" id="sendPostalCode" placeholder="例: 100-0001"></div>
+          <div><label>都道府県</label><input type="text" id="sendPrefecture" placeholder="例: 東京都"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>市区町村</label><input type="text" id="sendCity" placeholder="例: 千代田区丸の内"></div>
+          <div><label>丁目番地</label><input type="text" id="sendBlock" placeholder="例: 1-1-1"></div>
+        </div>
+        <div style="margin-top:10px"><label>ビル名・部屋番号</label>
+          <input type="text" id="sendBuilding" placeholder="例: 〇〇ビル3F"></div>
+        <div class="row" style="margin-top:10px">
+          <div><label>部署</label><input type="text" id="sendDepartment" placeholder="例: 営業部"></div>
+          <div><label>役職</label><input type="text" id="sendPosition" placeholder="例: 代表取締役"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>姓</label><input type="text" id="sendLastName" placeholder="例: 中川"></div>
+          <div><label>名</label><input type="text" id="sendFirstName" placeholder="例: 太郎"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>姓(カナ)</label><input type="text" id="sendLastNameKana" placeholder="例: ナカガワ"></div>
+          <div><label>名(カナ)</label><input type="text" id="sendFirstNameKana" placeholder="例: タロウ"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>メールアドレス</label><input type="text" id="sendEmail" placeholder="例: info@example.co.jp"></div>
+          <div><label>電話番号</label><input type="text" id="sendPhone" placeholder="例: 03-1234-5678"></div>
+        </div>
+
+        <div style="margin-top:18px">
           <label>送信文章テンプレートを使う(任意。「送信文章テンプレート」メニューで登録)</label>
           <select id="sendTemplate">
             <option value="">選択しない(件名・本文を直接入力)</option>
             ${lastTemplates.map(x => `<option value="${x.id}">${x.name}</option>`).join("")}
           </select>
         </div>
-        <div style="margin-top:10px">
-          <label>送信元テンプレートから選択(任意。「送信元テンプレート」メニューで登録。
-            選ばないと現在「有効化」中の送信元が使われます)</label>
-          <select id="sendSenderTemplate">
-            <option value="">選択しない(現在有効化中の送信元を使う)</option>
-            ${lastSenderTemplates.map(x => `<option value="${x.id}">${x.name}(${x.sender_name})</option>`).join("")}
-          </select>
-        </div>
         <div class="row" style="margin-top:10px">
           <div><label>件名</label><input type="text" id="sendSubject" placeholder="例: 積算のお手伝いをさせてください"></div>
-          <div><label>本文</label><textarea id="sendBody" rows="3" placeholder="本文を入力してください"></textarea></div>
+          <div><label>本文</label><textarea id="sendBody" rows="6" placeholder="本文を入力してください"></textarea></div>
         </div>
         <p class="hint" style="margin-top:4px"><code>##TO_COMPANY_NAME##</code>(送信先の会社名)・
-          <code>##FROM_FAMILY_NAME##</code>(送信元の姓)が使えます。</p>
+          <code>##FROM_FAMILY_NAME##</code>(送信元の姓)が使えます。 <span id="sendBodyCount">0 文字</span></p>
         <div class="btnrow" style="margin-top:4px"><button class="ghost" id="btnPreviewMessage">👁️ プレビュー</button></div>
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
-          <input type="checkbox" id="sendDryRun" checked style="width:auto">
-          <span id="sendDryRunLabel">ドライラン(実際には送信しません)</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
+
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:14px">
           <input type="checkbox" id="sendTrackClicks" style="width:auto">
           <span>URLアクセスの記録(本文中のURLがクリックされたかを記録する。
             URLは記録用URLへ置き換えられます)</span>
         </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
+          <input type="checkbox" id="sendAllowNoSolicit" style="width:auto">
+          <span>営業拒否サイトへの送信(送信テスト用の機能です。営業拒否をしているサイトにも
+            送信実行されます。ご注意ください)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
+          <input type="checkbox" id="sendCancelRecentToggle" style="width:auto">
+          <span>過去送信対象キャンセル(過去の送信処理実行済み会社に対しての送信をキャンセルする
+            機能です。期間は設定可能です)</span>
+        </label>
+        <div id="sendCancelRecentWrap" style="display:none;margin-top:8px;max-width:200px">
+          <label>直近何日以内に送信済みの会社を除外するか</label>
+          <input type="number" id="sendCancelRecentDays" value="30" min="1">
+        </div>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
           <input type="checkbox" id="sendScheduleToggle" style="width:auto">
           <span>送信開始日時を指定する(OFFの場合は送信後すぐに処理が開始します)</span>
@@ -2509,6 +2565,10 @@ async function renderSendForm(container, id) {
         <div id="sendScheduleWrap" style="display:none;margin-top:8px;max-width:280px">
           <input type="datetime-local" id="sendScheduleAt">
         </div>
+
+        <div id="killSwitchSendNote" style="display:none;margin-top:10px;padding:10px 14px;
+          background:#FBEAE4;color:var(--warn);border-radius:6px;font-weight:700">
+          ⚠ 現在Kill Switchにより本番送信が停止されています。解除されるまで送信できません。</div>
         <div class="btnrow"><button id="btnSend">送信する</button></div>
         <div id="sendResult"></div>
         <div id="sendProgressWrap" style="display:none;margin-top:12px">
@@ -2534,11 +2594,42 @@ async function renderSendForm(container, id) {
     $("sendScheduleToggle").addEventListener("change", () => {
       $("sendScheduleWrap").style.display = $("sendScheduleToggle").checked ? "block" : "none";
     });
+    $("sendCancelRecentToggle").addEventListener("change", () => {
+      $("sendCancelRecentWrap").style.display = $("sendCancelRecentToggle").checked ? "block" : "none";
+    });
 
     $("sendTemplate").addEventListener("change", () => {
       const tmpl = lastTemplates.find(x => String(x.id) === $("sendTemplate").value);
-      if (tmpl) { $("sendSubject").value = tmpl.subject; $("sendBody").value = tmpl.body; }
+      if (tmpl) { $("sendSubject").value = tmpl.subject; $("sendBody").value = tmpl.body; updateSendBodyCount(); }
     });
+
+    // el: 画面の入力欄id / tmplKey: 送信元テンプレートAPIが返すキー(自動入力元) /
+    // overrideKey: POST /send のsender_overrideへ送るキー(senders.pyのSender項目名と一致)
+    const SENDER_FIELDS = [
+      { el: "sendCompanyName", tmplKey: "sender_name", overrideKey: "name" },
+      { el: "sendPostalCode", tmplKey: "sender_postal_code", overrideKey: "postal_code" },
+      { el: "sendPrefecture", tmplKey: "sender_prefecture", overrideKey: "prefecture" },
+      { el: "sendCity", tmplKey: "sender_city", overrideKey: "city" },
+      { el: "sendBlock", tmplKey: "sender_block", overrideKey: "block" },
+      { el: "sendBuilding", tmplKey: "sender_building", overrideKey: "building" },
+      { el: "sendDepartment", tmplKey: "sender_department", overrideKey: "department" },
+      { el: "sendPosition", tmplKey: "sender_position", overrideKey: "position" },
+      { el: "sendLastName", tmplKey: "sender_last_name", overrideKey: "last_name" },
+      { el: "sendFirstName", tmplKey: "sender_first_name", overrideKey: "first_name" },
+      { el: "sendLastNameKana", tmplKey: "sender_last_name_kana", overrideKey: "last_name_kana" },
+      { el: "sendFirstNameKana", tmplKey: "sender_first_name_kana", overrideKey: "first_name_kana" },
+      { el: "sendEmail", tmplKey: "sender_email", overrideKey: "email" },
+      { el: "sendPhone", tmplKey: "sender_phone", overrideKey: "phone" },
+    ];
+    $("sendSenderTemplate").addEventListener("change", () => {
+      const tmpl = lastSenderTemplates.find(x => String(x.id) === $("sendSenderTemplate").value);
+      SENDER_FIELDS.forEach(f => { $(f.el).value = (tmpl ? tmpl[f.tmplKey] : "") || ""; });
+    });
+
+    function updateSendBodyCount() {
+      $("sendBodyCount").textContent = `${$("sendBody").value.length} 文字`;
+    }
+    $("sendBody").addEventListener("input", updateSendBodyCount);
 
     $("btnPreviewMessage").addEventListener("click", async () => {
       const subject = $("sendSubject").value.trim();
@@ -2556,28 +2647,36 @@ async function renderSendForm(container, id) {
       }
     });
 
-    const dryRunBox = $("sendDryRun"), dryRunLabel = $("sendDryRunLabel");
-    dryRunBox.addEventListener("change", () => {
-      dryRunLabel.textContent = dryRunBox.checked
-        ? "ドライラン(実際には送信しません)"
-        : "⚠ 本番送信 — 実際の企業サイトへ送信されます。取り消せません";
-      dryRunLabel.style.color = dryRunBox.checked ? "" : "var(--warn)";
-      dryRunLabel.style.fontWeight = dryRunBox.checked ? "400" : "700";
-    });
+    // MIKOMERU同様、この画面にドライラン(動作確認用の疑似送信)の選択肢は無い。
+    // 「送信する」を押すと常に実送信になる(Kill Switch停止中は送信自体をブロックする)。
     if (killSwitchStopped) {
-      dryRunBox.checked = true;
-      dryRunBox.disabled = true;
-      dryRunLabel.textContent = "ドライラン(本番送信は現在Kill Switchで停止されています)";
+      $("killSwitchSendNote").style.display = "block";
+      $("btnSend").disabled = true;
     }
 
     $("btnSend").addEventListener("click", async () => {
       const subject = $("sendSubject").value.trim();
       const body = $("sendBody").value.trim();
-      const dryRun = dryRunBox.checked;
       const trackClicks = $("sendTrackClicks").checked;
+      const allowNoSolicit = $("sendAllowNoSolicit").checked;
       const senderTemplateId = $("sendSenderTemplate").value ? Number($("sendSenderTemplate").value) : null;
       const rEl = $("sendResult");
       if (!subject || !body) { rEl.innerHTML = `<div class="result err">件名と本文を入力してください</div>`; return; }
+
+      const senderOverride = {};
+      SENDER_FIELDS.forEach(f => {
+        const v = $(f.el).value.trim();
+        if (v) senderOverride[f.overrideKey] = v;
+      });
+
+      let cancelRecentDays = null;
+      if ($("sendCancelRecentToggle").checked) {
+        cancelRecentDays = Number($("sendCancelRecentDays").value);
+        if (!Number.isInteger(cancelRecentDays) || cancelRecentDays <= 0) {
+          rEl.innerHTML = `<div class="result err">過去送信対象キャンセルの期間(日)は正の整数で指定してください</div>`;
+          return;
+        }
+      }
 
       const scheduling = $("sendScheduleToggle").checked;
       let scheduledAt = null;
@@ -2590,15 +2689,21 @@ async function renderSendForm(container, id) {
         }
         scheduledAt = raw;   // datetime-localはローカルタイムゾーンのISO風文字列(秒無し)
       }
-      if (!scheduling && !dryRun
-          && !confirm("本番送信します。実際の企業サイトへ送信され、取り消せません。よろしいですか?")) return;
+      const confirmMsg = scheduling
+        ? "指定した日時に本番送信を予約します。実際の企業サイトへ送信され、取り消せません。よろしいですか?"
+        : "本番送信します。実際の企業サイトへ送信され、取り消せません。よろしいですか?";
+      if (!confirm(confirmMsg)) return;
+
+      const payload = { subject, body, dry_run: false, track_clicks: trackClicks,
+        sender_template_id: senderTemplateId, allow_no_solicit: allowNoSolicit,
+        cancel_recent_days: cancelRecentDays,
+        sender_override: Object.keys(senderOverride).length ? senderOverride : undefined };
 
       if (scheduling) {
         rEl.innerHTML = `<div class="result">予約中…</div>`;
         try {
-          const payload = { subject, body, dry_run: dryRun, scheduled_at: scheduledAt, track_clicks: trackClicks,
-            sender_template_id: senderTemplateId };
-          const sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
+          const sr = await call(`/api/tenant/lists/${id}/send`,
+            { method: "POST", body: JSON.stringify({ ...payload, scheduled_at: scheduledAt }) });
           rEl.innerHTML = `<div class="result ok">予約しました(${sr.scheduled_at}に開始)</div>`;
           await refreshScheduledSends(id);
         } catch (e) {
@@ -2620,8 +2725,6 @@ async function renderSendForm(container, id) {
 
       let sr = null, err = null;
       try {
-        const payload = { subject, body, dry_run: dryRun, track_clicks: trackClicks,
-          sender_template_id: senderTemplateId };
         sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
       } catch (e) {
         err = e;
@@ -2629,7 +2732,7 @@ async function renderSendForm(container, id) {
       bar.classList.remove("indeterminate"); bar.classList.add("done");
       $("sendProgressBadge").textContent = "✓ 完了";
       $("sendProgressDoneRow").style.display = "block";
-      $("btnSend").disabled = false;
+      $("btnSend").disabled = killSwitchStopped;
 
       $("btnSendProgressDone").onclick = async () => {
         $("sendProgressWrap").style.display = "none";
@@ -2637,8 +2740,8 @@ async function renderSendForm(container, id) {
           rEl.innerHTML = `<div class="result err">${err.message}</div>`;
           return;
         }
-        rEl.innerHTML = `<div class="result ok">${dryRun ? "[ドライラン] " : ""}` +
-          `対象${sr.target_count.toLocaleString()}社 / ` +
+        rEl.innerHTML = `<div class="result ok">対象${sr.target_count.toLocaleString()}社` +
+          `${sr.cancelled_recent ? `(過去送信対象キャンセルで${sr.cancelled_recent}社除外)` : ""} / ` +
           `送信${sr.stats.sent} 失敗${sr.stats.failed} ガードで中止${sr.stats.blocked} 配信停止${sr.stats.suppressed}` +
           `${sr.stats.stopped ? ` Kill Switchで中止${sr.stats.stopped}` : ""}</div>`;
         await refreshLists();

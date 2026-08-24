@@ -13,6 +13,7 @@ crontabから数分おきに`run-due`を実行する想定(deploy/crontab参照)
   python3 scheduled_send_cli.py list        # PENDINGの予約一覧を表示
 """
 import argparse
+import json
 from datetime import datetime
 
 import db
@@ -28,9 +29,13 @@ def run_due(con):
     print(f"{len(due)}件の予約を実行します")
     for s in due:
         try:
+            override = json.loads(s["sender_override_json"]) if s.get("sender_override_json") else None
             res = TL.send_list(con, s["tenant_id"], s["list_id"], s["subject"], s["body"],
                                dry_run=bool(s["dry_run"]), track_clicks=bool(s["track_clicks"]),
-                               sender_template_id=s["sender_template_id"])
+                               sender_template_id=s["sender_template_id"],
+                               allow_no_solicit=bool(s.get("allow_no_solicit")),
+                               cancel_recent_days=s.get("cancel_recent_days"),
+                               sender_override=override)
             if res is None:
                 db.finish_scheduled_send(con, s["id"], "FAILED",
                                          {"error": "リストが見つかりません(削除された可能性)"})

@@ -413,6 +413,10 @@ def migrate(con):
         # DBへは保存しない=campaigns/touchesは再送で使い回されるため、そこに保存すると
         # 別の送信操作の設定が漏れて残ってしまう)。
         ("scheduled_sends", "track_clicks", "INTEGER DEFAULT 0"),
+        # 自動送信画面で「送信元テンプレートから選択」した場合の指定(MIKOMERU同等)。
+        # NULLならテナントの「有効化」済み送信元(tenants.sender_*)をそのまま使う。
+        # track_clicksと同じ理由でscheduled_sendsにも持たせる(cron実行時点まで必要)。
+        ("scheduled_sends", "sender_template_id", "INTEGER"),
         # 保存済みリストのMIKOMERU同等UI(一覧の変更日時列・ソフト削除/復元・
         # リスト名編集)のための列。deleted_atがNULLでない行は一覧から除外される
         # (「削除したものを含めて表示」を付けた時だけ含める)。物理削除ではなく
@@ -670,12 +674,13 @@ def set_form_send_log_manual_sent(con, tenant_id, log_id, manual_sent):
 
 # ── 予約送信(MIKOMERU同等の「送信開始日時を指定する」機能) ──
 def create_scheduled_send(con, tenant_id, list_id, subject, body, dry_run, scheduled_at,
-                           track_clicks=False):
+                           track_clicks=False, sender_template_id=None):
     cur = con.execute("""INSERT INTO scheduled_sends
-        (tenant_id, list_id, subject, body, dry_run, scheduled_at, track_clicks, status, created_at)
-        VALUES (?,?,?,?,?,?,?,'PENDING',?)""",
+        (tenant_id, list_id, subject, body, dry_run, scheduled_at, track_clicks,
+         sender_template_id, status, created_at)
+        VALUES (?,?,?,?,?,?,?,?,'PENDING',?)""",
         (tenant_id, list_id, subject, body, 1 if dry_run else 0, scheduled_at,
-         1 if track_clicks else 0, datetime.now().isoformat(timespec="seconds")))
+         1 if track_clicks else 0, sender_template_id, datetime.now().isoformat(timespec="seconds")))
     con.commit()
     return cur.lastrowid
 
@@ -710,7 +715,7 @@ def resolve_click_token(con, token):
 
 def list_scheduled_sends(con, tenant_id, list_id=None):
     q = """SELECT s.id, s.list_id, tl.name list_name, s.subject, s.dry_run, s.scheduled_at,
-            s.track_clicks, s.status, s.created_at, s.executed_at
+            s.track_clicks, s.sender_template_id, s.status, s.created_at, s.executed_at
         FROM scheduled_sends s LEFT JOIN target_lists tl ON tl.id = s.list_id
         WHERE s.tenant_id=?"""
     params = [tenant_id]
@@ -731,7 +736,8 @@ def cancel_scheduled_send(con, tenant_id, scheduled_id):
 
 def due_scheduled_sends(con, now_iso):
     """期限が来たPENDINGを取得する。scheduled_send_cli.pyがcronから呼ぶ。"""
-    rows = con.execute("""SELECT id, tenant_id, list_id, subject, body, dry_run, track_clicks
+    rows = con.execute("""SELECT id, tenant_id, list_id, subject, body, dry_run, track_clicks,
+            sender_template_id
         FROM scheduled_sends WHERE status='PENDING' AND scheduled_at<=?
         ORDER BY scheduled_at""", (now_iso,)).fetchall()
     return [dict(r) for r in rows]

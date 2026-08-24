@@ -42,6 +42,28 @@ CREATE TABLE IF NOT EXISTS target_list_members (
   FOREIGN KEY(list_id) REFERENCES target_lists(id),
   FOREIGN KEY(company_id) REFERENCES companies(id)
 );
+
+-- MIKOMERUの「CSV検索ログ」相当。リスト取得(フィルタ)・CSV検索(会社名/URL)を
+-- 実行するたびに1行記録する。target_listsと違い、検索しただけではリストにならない
+-- (MIKOMERUの「検索しただけではリストとして保存されない」仕様と同じ)。
+-- 実際にリストへ保存するのはsave_search_log_as_list()を呼んだ時だけ。
+CREATE TABLE IF NOT EXISTS search_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,             -- 'filter' | 'csv_name' | 'csv_url'
+  label TEXT NOT NULL,            -- 検索条件の要約(絞込条件の説明文 or アップロードしたファイル名)
+  filters_json TEXT,              -- kind='filter'の場合の条件(再現用。保存時に再実行する)
+  company_ids_json TEXT NOT NULL, -- 見つかった会社ID(成功分)のJSON配列。保存時にそのまま使う
+  success_count INTEGER DEFAULT 0,
+  not_found_count INTEGER DEFAULT 0,  -- CSVの行のうち一致する会社が見つからなかった数
+  no_contact_count INTEGER DEFAULT 0, -- 見つかったが問い合わせページ未確定の数
+  csv_rows_json TEXT,             -- kind='csv_*'の場合、ダウンロード用に元CSV行+照合結果を保持
+  status TEXT NOT NULL DEFAULT 'DONE',  -- 現状は同期処理のため常にDONE。将来の非同期化に備えて残す
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(tenant_id) REFERENCES tenants(id)
+);
+CREATE INDEX IF NOT EXISTS idx_search_log_tenant ON search_log(tenant_id);
 """
 
 # 暴走・誤操作の被害を抑えるための保守的な初期値(FormSenderのペーシングと同じ考え方)。
@@ -147,6 +169,15 @@ def create_from_filter(con, tenant_id, name, filters, existing_list_id=None):
                      [(list_id, cid, now, now) for cid in ids])
     con.commit()
     return {"list_id": list_id, "count": len(ids)}
+
+
+def run_filter_search(con, tenant_id, filters, sample_limit=200):
+    """MIKOMERUの「リストを取得する」の[検索]実行相当。件数と結果テーブル(先頭
+    sample_limit件)を返す。MIKOMERUのCSV検索ログはCSV検索(会社名/URL)専用で
+    このフィルタ絞込には無いため、こちらはsearch_logへは記録しない(preview_filter()
+    と同じ計算だが、ライブ絞込中の軽いプレビューではなく[検索]ボタンを押した時の
+    本検索として、結果テーブルに使うのに十分な件数を返す点だけが違う)。"""
+    return preview_filter(con, tenant_id, filters, sample_limit=sample_limit)
 
 
 # CSVの列名ゆれを吸収する(顧客が用意するファイルなので厳密な形式を要求しない)
@@ -286,6 +317,153 @@ def _discover_contact_urls(con, candidates):
             "error": error, "skipped_over_limit": skipped_over_limit}
 
 
+def run_csv_search(con, tenant_id, filename, csv_text, mode="name", name_col=None, url_col=None,
+                    pref_col=None):
+    """MIKOMERUの「CSV検索でリストを取得する」相当。「会社名で検索」「URLで検索」の
+    2モードがあり、検索しただけではリストにならず、まずsearch_logへ記録する
+    (保存は別途save_search_log_as_list()を呼ぶ)。
+
+    MIKOMERUとの意図的な違い: MIKOMERUは自社が保有する会社基本情報DBを検索するだけで、
+    一致しない行(「会社不明」)は何も作られない。AshiBaseの「CSV検索」は元々
+    「自社の企業リストを取り込む」機能(MIKOMERUに無い独自機能)を兼ねているため、
+    一致しない行は御社専用の非公開企業として新規に追加する。これは仕様の劣化ではなく、
+    自社保有リストを送信対象にできるというAshiBase側の価値をそのまま残すための設計判断。
+
+    mode='url'の場合は、name_col/url_colで指定した列を使い、問い合わせページの探索
+    (discover_contact_url)を必ず行う(MIKOMERUの「URLで検索」が問い合わせページURLの
+    発見を目的にしているのと同じ)。"""
+    import db
+
+    reader = csv.DictReader(io.StringIO(csv_text))
+    rows = list(reader)[:MAX_CSV_ROWS]
+    if not rows:
+        return {"error": "CSVにデータ行がありません"}
+
+    now = datetime.now().isoformat(timespec="seconds")
+    company_ids = []
+    csv_rows_detail = []
+    matched = created = skipped = 0
+    url_candidates = []
+
+    for row in rows:
+        raw_name = ((row.get(name_col) or "").strip() if name_col else _pick(row, _NAME_COLS))
+        if not raw_name:
+            skipped += 1
+            csv_rows_detail.append({"row": row, "status": "not_found"})
+            continue
+        pref = ((row.get(pref_col) or "").strip() or None if pref_col else _pick(row, _PREF_COLS))
+        name_norm = db.normalize_name(raw_name)
+        row_url = ((row.get(url_col) or "").strip() if url_col else _pick(row, _URL_COLS))
+
+        existing = con.execute("""SELECT id FROM companies
+            WHERE name_norm=? AND (pref=? OR ? IS NULL)
+              AND dedup_of IS NULL AND (owner_tenant_id IS NULL OR owner_tenant_id=?)
+            LIMIT 1""", (name_norm, pref, pref, tenant_id)).fetchone()
+        if existing:
+            cid = existing["id"]
+            matched += 1
+        else:
+            cur2 = con.execute("""INSERT INTO companies
+                (name, name_norm, pref, phone, email, website_url, data_source, owner_tenant_id)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (raw_name, name_norm, pref, _pick(row, _PHONE_COLS), _pick(row, _EMAIL_COLS),
+                 row_url, "customer_upload", tenant_id))
+            cid = cur2.lastrowid
+            created += 1
+        company_ids.append(cid)
+        csv_rows_detail.append({"row": row, "status": "success", "company_id": cid, "name": raw_name})
+        if row_url:
+            url_candidates.append((cid, row_url))
+
+    url_discovery = None
+    if mode == "url" and url_candidates:
+        url_discovery = _discover_contact_urls(con, url_candidates)
+
+    no_contact = 0
+    if company_ids:
+        placeholders = ",".join("?" * len(company_ids))
+        no_contact = con.execute(
+            f"SELECT COUNT(*) FROM companies WHERE id IN ({placeholders}) AND contact_url IS NULL",
+            company_ids).fetchone()[0]
+
+    label = f"ファイル名: {filename}" if filename else "CSV検索"
+    cur = con.execute("""INSERT INTO search_log
+        (tenant_id, kind, label, filters_json, company_ids_json, success_count,
+         not_found_count, no_contact_count, csv_rows_json, status, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (tenant_id, "csv_url" if mode == "url" else "csv_name", label, None,
+         json.dumps(company_ids), len(company_ids), skipped, no_contact,
+         json.dumps(csv_rows_detail, ensure_ascii=False), "DONE", now, now))
+    con.commit()
+
+    result = {"search_log_id": cur.lastrowid, "count": len(company_ids),
+              "matched_existing": matched, "new_companies": created, "skipped_rows": skipped,
+              "no_contact_count": no_contact}
+    if url_discovery:
+        result["url_discovery"] = url_discovery
+    return result
+
+
+def list_search_log(con, tenant_id, limit=200):
+    rows = con.execute("""SELECT id, kind, label, success_count, not_found_count, no_contact_count,
+        status, created_at, updated_at FROM search_log WHERE tenant_id=?
+        ORDER BY id DESC LIMIT ?""", (tenant_id, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_search_log(con, tenant_id, search_log_id):
+    row = con.execute("SELECT * FROM search_log WHERE id=? AND tenant_id=?",
+                       (search_log_id, tenant_id)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    company_ids = json.loads(d["company_ids_json"] or "[]")
+    companies = []
+    if company_ids:
+        placeholders = ",".join("?" * len(company_ids))
+        crows = con.execute(f"""SELECT id, name, pref, corporate_no, trades, rank, capital,
+            contact_url, has_contact_form FROM companies WHERE id IN ({placeholders})""",
+            company_ids).fetchall()
+        by_id = {r["id"]: dict(r) for r in crows}
+        companies = [by_id[cid] for cid in company_ids if cid in by_id]
+    d["companies"] = companies
+    d["filters"] = json.loads(d["filters_json"]) if d["filters_json"] else None
+    d["csv_rows"] = json.loads(d["csv_rows_json"]) if d["csv_rows_json"] else None
+    return d
+
+
+def save_search_log_as_list(con, tenant_id, search_log_id, name=None, existing_list_id=None):
+    """MIKOMERUの検索ログ詳細「リスト保存」相当。検索ログはCSV検索(会社名/URL)
+    専用のため(リスト取得のフィルタ絞込にはMIKOMERUにもログが無い)、常に検索時点の
+    company_idsをそのまま使う(CSVそのものは既に失われているため再実行できない)。"""
+    log = con.execute("SELECT * FROM search_log WHERE id=? AND tenant_id=?",
+                       (search_log_id, tenant_id)).fetchone()
+    if not log:
+        return {"error": "検索ログが見つかりません"}
+    if not name and not existing_list_id:
+        return {"error": "リスト名を入力するか、既存のリストを選択してください"}
+
+    company_ids = json.loads(log["company_ids_json"] or "[]")
+    if not company_ids:
+        return {"error": "このログには保存できる企業がありません"}
+    if existing_list_id:
+        result = add_members_to_list(con, tenant_id, existing_list_id, company_ids)
+        if result is None:
+            return {"error": "指定されたリストが見つかりません"}
+        return result
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = con.execute("""INSERT INTO target_lists
+        (tenant_id,name,source,filter_json,company_count,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?)""",
+        (tenant_id, name, "csv", None, len(company_ids), now, now))
+    list_id = cur.lastrowid
+    con.executemany("""INSERT OR IGNORE INTO target_list_members
+        (list_id, company_id, send_status, created_at, updated_at) VALUES (?,?,'PENDING',?,?)""",
+        [(list_id, cid, now, now) for cid in company_ids])
+    con.commit()
+    return {"list_id": list_id, "count": len(company_ids)}
+
+
 def list_lists(con, tenant_id, include_deleted=False):
     where = "tenant_id=?" if include_deleted else "tenant_id=? AND deleted_at IS NULL"
     rows = con.execute(f"""SELECT id, name, source, company_count, created_at, updated_at, deleted_at
@@ -412,7 +590,8 @@ def get_list(con, tenant_id, list_id, limit=200, offset=0, status_filter=None):
     return {"list": dict(lst), "members": [dict(r) for r in members]}
 
 
-def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks=False):
+def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks=False,
+              sender_template_id=None):
     """保存済みリストからフォーム自動送信キャンペーンを作り、既存のsenders.send_campaign()
     にそのまま委譲する。can_contact()・冪等性・FormSenderのペーシング上限はすべて
     send_campaign()側の仕組みがそのまま効く(ここで独自の送信経路は作らない)。
@@ -500,7 +679,7 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
     con.commit()
 
     stats = senders.send_campaign(con, campaign_id, step=1, dry_run=dry_run,
-                                   track_clicks=track_clicks)
+                                   track_clicks=track_clicks, sender_template_id=sender_template_id)
     if not dry_run:
         db.sync_target_list_member_status(con, list_id, campaign_id, step=1)
         _notify_completion(con, tenant_id, lst["name"], len(members), stats)

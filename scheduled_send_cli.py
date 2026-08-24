@@ -29,7 +29,8 @@ def run_due(con):
     for s in due:
         try:
             res = TL.send_list(con, s["tenant_id"], s["list_id"], s["subject"], s["body"],
-                               dry_run=bool(s["dry_run"]), track_clicks=bool(s["track_clicks"]))
+                               dry_run=bool(s["dry_run"]), track_clicks=bool(s["track_clicks"]),
+                               sender_template_id=s["sender_template_id"])
             if res is None:
                 db.finish_scheduled_send(con, s["id"], "FAILED",
                                          {"error": "リストが見つかりません(削除された可能性)"})

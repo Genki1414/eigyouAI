@@ -159,6 +159,7 @@ tr.clickable:hover{background:var(--blue-soft)}
       <div class="navgroup-label">会社情報</div>
       <div class="navitem" data-page="filter">リスト取得</div>
       <div class="navitem" data-page="csv">CSV検索</div>
+      <div class="navitem" data-page="searchlog">CSV検索ログ</div>
       <div class="navitem" data-page="lists">保存済みリスト</div>
       <div class="navgroup-label">その他</div>
       <div class="navitem" data-page="staff">担当者管理</div>
@@ -216,13 +217,24 @@ tr.clickable:hover{background:var(--blue-soft)}
       <section class="page" data-page="autosend">
         <h2>自動送信 <span>AUTO SEND</span></h2>
         <div class="card">
-          <p class="hint">送信対象リストを選び、送信文章(直接入力するか、あらかじめ
-            「送信文章テンプレート」メニューで登録したテンプレートを選択)を指定して送信します。
-            既定はドライラン(実際には送信しない)で、本番送信するには明示的にチェックを外す
-            必要があります。リストがまだ無い場合は「リスト取得」「CSV検索」で作成してください。</p>
-          <div style="margin-top:10px;max-width:420px">
+          <p class="hint">送信文章(直接入力するか、あらかじめ「送信文章テンプレート」メニューで
+            登録したテンプレートを選択)を指定して送信します。既定はドライラン(実際には送信しない)で、
+            本番送信するには明示的にチェックを外す必要があります。</p>
+          <div class="chips" id="autosendTabs" style="margin-top:10px">
+            <label class="chip on"><input type="radio" name="autosendTab" value="list" checked>リストで送信</label>
+            <label class="chip"><input type="radio" name="autosendTab" value="csv">CSVで送信</label>
+          </div>
+          <div id="autosendListTab" style="margin-top:10px;max-width:420px">
             <label>送信対象リスト <span style="color:var(--warn);font-weight:700">必須</span></label>
             <select id="autosendListSelect"><option value="">-- リストを選択してください --</option></select>
+            <p class="hint" style="margin-top:4px">リストがまだ無い場合は「リスト取得」「CSV検索」で作成してください。</p>
+          </div>
+          <div id="autosendCsvTab" style="display:none;margin-top:10px">
+            <p class="hint">CSVをアップロードすると、内容から自動でリストを作成して送信対象にします
+              (会社名の列を自動判定します。列を細かく指定したい場合は「CSV検索」ページをご利用ください)。</p>
+            <input type="file" id="autosendCsvFile" accept=".csv,text/csv">
+            <div class="btnrow"><button id="btnAutosendCsvUpload">取り込む</button></div>
+            <div id="autosendCsvResult"></div>
           </div>
         </div>
         <div id="autosendFormWrap"></div>
@@ -479,16 +491,20 @@ tr.clickable:hover{background:var(--blue-soft)}
 
         <div class="card step">
           <h3>2. 送信先の企業を集める</h3>
-          <p>2通りの方法があります。</p>
+          <p>2通りの方法があります。どちらも検索しただけではリストにならず、
+            結果を確認してから「リスト保存」で確定させます。</p>
           <ol>
             <li><b>共有マスタから条件で絞り込む</b>(「リスト取得」ページ):
-              都道府県・業種・スコアランク・資本金の上限などの条件を選ぶと、
-              選択中の条件に該当する件数がその場で表示されます。条件を決めたら
-              リスト名を付けて保存します。</li>
-            <li><b>自社の企業リストを取り込む</b>(「CSV検索」ページ): お手持ちのCSVを
-              アップロードします。会社名の列は必須で、それ以外(都道府県・電話番号・メール・URL)は
-              あれば認識します。既存データと商号が一致する行は自動で紐付き、それ以外は
-              御社専用の非公開データとして追加されます(他のお客様には見えません)。</li>
+              都道府県・業種・スコアランク・資本金の上限などの条件を選び、[検索]を押すと
+              該当件数と結果一覧が表示されます。「リスト保存」で新規リストとして作成するか、
+              既存のリストに追加するかを選べます。</li>
+            <li><b>CSVで検索する</b>(「CSV検索」ページ): 「会社名で検索」「URLで検索」
+              (問い合わせページの自動探索)のタブがあります。CSVをアップロードすると内容の
+              プレビューが表示されるので、会社名(・任意で所在地/URL)の列を指定して
+              [検索実行]します。既存データと商号が一致する行は自動で紐付き、それ以外は
+              御社専用の非公開データとして追加されます(他のお客様には見えません)。
+              実行結果は「CSV検索ログ」ページにも記録され、あとから見返して
+              「リスト保存」「ダウンロード」できます。</li>
           </ol>
         </div>
 
@@ -500,10 +516,15 @@ tr.clickable:hover{background:var(--blue-soft)}
             そのリストが選択された状態で自動送信ページに移動します。</p>
           <ul>
             <li>送信対象は「問い合わせページのURLが確認できている企業」のみです。</li>
-            <li>「自動送信」ページ上部の「送信対象リスト」でリストを選ぶと、送信文章の
-              入力欄が表示されます。「送信文章テンプレートを使う」で保存済みの文面を選ぶと、
-              件名・本文が自動で入力されます(「送信文章テンプレート」ページで事前に登録して
-              おきます)。</li>
+            <li>「自動送信」ページには「リストで送信」「CSVで送信」のタブがあります。
+              「リストで送信」では上部の「送信対象リスト」でリストを選ぶと送信文章の
+              入力欄が表示されます。「CSVで送信」ではその場でCSVをアップロードすると
+              自動でリストが作られ、続けて送信文章を入力できます。</li>
+            <li>「送信文章テンプレートを使う」で保存済みの文面を選ぶと、件名・本文が
+              自動で入力されます(「送信文章テンプレート」ページで事前に登録しておきます)。
+              「送信元テンプレートから選択」で送信元を切り替えれば、この送信だけ
+              「有効化」中の送信元とは別の送信者名・返信先で送れます(未選択なら現在
+              有効化中の送信元が使われます)。</li>
             <li><b>ドライラン</b>(既定でオン)では実際のサイトへは何も送信されません。動作確認用です。
               チェックを外すと本番送信になり、実際の企業サイトへ送信されます。取り消せない操作のため、
               確認ダイアログが表示されます。</li>
@@ -604,53 +625,67 @@ tr.clickable:hover{background:var(--blue-soft)}
             <label class="chip"><input type="checkbox" id="fContact">問い合わせフォームURL確定済みのみ</label>
           </div>
           </div>
+          <div class="btnrow"><button id="btnRunFilterSearch" disabled>🔍 検索</button></div>
           <div id="previewResult"></div>
-          <p class="hint" style="margin-top:12px">絞り込んだ企業情報をリストとして保存します。
-            新規リストとして作成するか、既存のリストに追加するかを選べます。</p>
-          <div class="row" style="margin-top:6px">
-            <div>
-              <label>新しいリストを作成する場合、リスト名を入力してください</label>
-              <input type="text" id="fName" placeholder="例: 東京都_とび土工_Aランク">
-            </div>
-            <div>
-              <label>既存のリストに追加する場合、リストを選択してください</label>
-              <select id="fExistingList"><option value="">-- 指定なし --</option></select>
-            </div>
+          <div class="btnrow" id="filterSaveRow" style="display:none">
+            <button id="btnOpenSaveFilterModal">📋 リスト保存</button>
           </div>
-          <div class="btnrow"><button id="btnSaveFilter" disabled>リスト保存</button></div>
         </div>
       </section>
 
       <section class="page" data-page="csv">
-        <h2>自社の企業リストを取り込む <span>CSV UPLOAD</span></h2>
+        <h2>CSV検索でリストを取得する <span>CSV SEARCH</span></h2>
         <div class="card">
-          <p class="hint">列名は「会社名/name」「都道府県/pref」「電話番号」「メール」「URL」等、
-            日本語・英語どちらでも認識します。会社名の列だけは必須です。既存データと商号が一致する行は
-            自動で紐付き、それ以外は御社専用の非公開データとして追加されます(他のお客様には見えません)。</p>
-          <div class="row" style="margin-top:10px">
-            <div>
-              <label>新しいリストを作成する場合、リスト名を入力してください</label>
-              <input type="text" id="cName" placeholder="例: 自社保有リスト2026">
-            </div>
-            <div>
-              <label>既存のリストに追加する場合、リストを選択してください</label>
-              <select id="cExistingList"><option value="">-- 指定なし --</option></select>
-            </div>
+          <p class="hint">お手持ちのCSVを取り込み、既存データと照合します。「会社名で検索」と
+            「URLで検索」(問い合わせページの自動探索)のどちらかを選べます。会社名の列は必須です。
+            既存データと商号が一致する行は自動で紐付き、それ以外は御社専用の非公開データとして
+            追加されます(他のお客様には見えません)。</p>
+          <div class="chips" id="csvTabs" style="margin-top:10px">
+            <label class="chip on"><input type="radio" name="csvTab" value="name" checked>会社名で検索</label>
+            <label class="chip"><input type="radio" name="csvTab" value="url">URLで検索</label>
           </div>
-          <div style="margin-top:10px">
-            <label>CSVファイル</label>
+
+          <div style="margin-top:12px">
+            <label>(1) CSVファイルを選択してください</label>
             <input type="file" id="cFile" accept=".csv,text/csv">
+            <div id="csvFileInfo" class="hint" style="margin-top:4px"></div>
           </div>
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
-            <input type="checkbox" id="cDiscoverUrls" style="width:auto">
-            <span>URL列から問い合わせページを自動検出する(CSVに「URL」列が必要。実際にサイトへ
-              アクセスするため時間がかかります。最大30件まで)</span>
-          </label>
-          <div class="btnrow">
-            <button id="btnUploadCsv" disabled>アップロード</button>
+
+          <div id="csvPreviewWrap" style="display:none;margin-top:12px">
+            <label>(2) CSVの内容(1件目のみ表示)</label>
+            <div id="csvPreviewTable"></div>
+
+            <div class="row" style="margin-top:10px">
+              <div>
+                <label>(3) 会社名の列を指定してください <span style="color:var(--warn);font-weight:700">必須</span></label>
+                <select id="cNameCol"></select>
+              </div>
+              <div id="cPrefColWrap">
+                <label>所在地の列(任意。指定すると絞込の精度が上がる可能性があります)</label>
+                <select id="cPrefCol"><option value="">-- 指定なし --</option></select>
+              </div>
+            </div>
+            <div id="cUrlColWrap" style="display:none;margin-top:10px;max-width:280px">
+              <label>URLの列を指定してください <span style="color:var(--warn);font-weight:700">必須</span></label>
+              <select id="cUrlCol"></select>
+            </div>
+
+            <div class="btnrow"><button id="btnRunCsvSearch">🔍 検索実行</button></div>
           </div>
+
           <div id="csvResult"></div>
+          <div class="btnrow" id="csvSaveRow" style="display:none">
+            <button id="btnOpenSaveCsvModal">📋 リスト保存</button>
+          </div>
         </div>
+      </section>
+
+      <section class="page" data-page="searchlog">
+        <h2>CSV検索ログ <span>SEARCH LOG</span></h2>
+        <p class="hint">「CSV検索」(会社名で検索/URLで検索)を実行するたびに1件記録されます。
+          検索しただけではリストとして保存されないため、あとから見返して「リスト保存」できます。</p>
+        <div id="searchLogWrap" style="margin-top:10px"><div class="empty">接続すると表示されます</div></div>
+        <div id="searchLogDetailWrap"></div>
       </section>
 
       <section class="page" data-page="lists">
@@ -716,12 +751,32 @@ tr.clickable:hover{background:var(--blue-soft)}
     </div>
   </div>
 </div>
+
+<div class="imgmodal" id="saveListModal">
+  <div class="imgmodal-inner" style="max-width:480px">
+    <div class="imgmodal-head">
+      <b>会社情報をリストとして保存します</b>
+      <button class="ghost" id="saveListModalClose">閉じる</button>
+    </div>
+    <p class="hint" id="saveListModalNote"></p>
+    <div style="margin-top:10px">
+      <label>新しいリストを作成する場合、リスト名を入力してください</label>
+      <input type="text" id="saveListModalName">
+    </div>
+    <div style="margin-top:10px">
+      <label>既存のリストに追加する場合、リストを選択してください</label>
+      <select id="saveListModalExisting"><option value="">-- 指定なし --</option></select>
+    </div>
+    <div id="saveListModalResult"></div>
+    <div class="btnrow" style="justify-content:flex-end"><button id="saveListModalSave">保存</button></div>
+  </div>
+</div>
 <script>
 // ── ナビゲーション(単一ページ内の切替。リロードなし) ──
 const PAGE_TITLES = {
   home: "ホーム", autosend: "自動送信", sendlog: "自動送信ログ",
   "tmpl-body": "送信文章テンプレート", "tmpl-sender": "送信元テンプレート", exclude: "送信除外設定",
-  filter: "リスト取得", csv: "CSV検索", lists: "保存済みリスト",
+  filter: "リスト取得", csv: "CSV検索", searchlog: "CSV検索ログ", lists: "保存済みリスト",
   staff: "担当者管理", news: "お知らせ一覧", otherlog: "その他ログ", manual: "マニュアルDL",
   conn: "接続設定",
 };
@@ -733,6 +788,7 @@ function goPage(pageId) {
   if (pageId === "home") { refreshHomeStats(); refreshDashboard(); }
   if (pageId === "autosend") populateAutosendListSelect();
   if (pageId === "sendlog") refreshSendLog();
+  if (pageId === "searchlog") { $("searchLogDetailWrap").innerHTML = ""; refreshSearchLog(); }
   if (pageId === "exclude") refreshExclusions();
   if (pageId === "tmpl-body") refreshTemplates();
   if (pageId === "tmpl-sender") refreshSenderTemplates();
@@ -749,7 +805,7 @@ document.getElementById("navLogout").addEventListener("click", () => {
   KEY = ""; connected = false;
   $("apiKey").value = "";
   setConnStatus("未接続", "off");
-  ["btnSaveFilter", "btnUploadCsv"].forEach(id => $(id).disabled = true);
+  ["btnRunFilterSearch", "btnRunCsvSearch"].forEach(id => $(id).disabled = true);
   goPage("home");
 });
 
@@ -869,9 +925,9 @@ $("btnConnect").addEventListener("click", async () => {
     // 常に空になるバグがあった(接続直後は必ずこの順序を守ること)
     connected = true;
     await refreshTemplates();
+    await refreshSenderTemplates();
     setConnStatus("接続済み", "on");
-    ["btnSaveFilter", "btnUploadCsv"].forEach(id => $(id).disabled = false);
-    runPreview();
+    ["btnRunFilterSearch", "btnRunCsvSearch"].forEach(id => $(id).disabled = false);
     refreshHomeStats();
     refreshDashboard();
     refreshKillSwitch();
@@ -992,6 +1048,38 @@ $("imgModalClose").addEventListener("click", () => $("imgModal").classList.remov
 $("imgModal").addEventListener("click", (e) => { if (e.target.id === "imgModal") $("imgModal").classList.remove("open"); });
 $("previewModalClose").addEventListener("click", () => $("previewModal").classList.remove("open"));
 $("previewModal").addEventListener("click", (e) => { if (e.target.id === "previewModal") $("previewModal").classList.remove("open"); });
+
+// ── リスト保存モーダル(MIKOMERUの「会社情報をリストとして保存します」ポップアップ相当)。
+// リスト取得・CSV検索・CSV検索ログのどの画面からも同じモーダルを使い回す ──
+let saveListModalHandler = null;
+function openSaveListModal(note, handler) {
+  saveListModalHandler = handler;
+  $("saveListModalNote").textContent = note || "";
+  $("saveListModalName").value = "";
+  $("saveListModalExisting").innerHTML = `<option value="">-- 指定なし --</option>` +
+    allLists.map(l => `<option value="${l.id}">${l.name}</option>`).join("");
+  $("saveListModalResult").innerHTML = "";
+  $("saveListModal").classList.add("open");
+}
+$("saveListModalClose").addEventListener("click", () => $("saveListModal").classList.remove("open"));
+$("saveListModal").addEventListener("click", (e) => { if (e.target.id === "saveListModal") $("saveListModal").classList.remove("open"); });
+$("saveListModalSave").addEventListener("click", async () => {
+  const name = $("saveListModalName").value.trim();
+  const existingId = $("saveListModalExisting").value;
+  const el = $("saveListModalResult");
+  if (!name && !existingId) {
+    el.innerHTML = `<div class="result err">リスト名を入力するか、既存のリストを選択してください</div>`; return;
+  }
+  el.innerHTML = `<div class="result">保存中…</div>`;
+  try {
+    const r = await saveListModalHandler(name, existingId ? Number(existingId) : null);
+    el.innerHTML = `<div class="result ok">保存しました(合計${r.count.toLocaleString()}社) — list_id=${r.list_id}</div>`;
+    await refreshLists();
+    setTimeout(() => $("saveListModal").classList.remove("open"), 900);
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+});
 
 async function refreshSendLog() {
   if (!connected) return;
@@ -1264,9 +1352,11 @@ $("btnSaveTemplate").addEventListener("click", async () => {
   }
 });
 
+let lastSenderTemplates = [];
 async function refreshSenderTemplates() {
   if (!connected) return;
   const r = await call("/api/tenant/sender-templates");
+  lastSenderTemplates = r.templates;
   const el = $("sTmplListWrap");
   if (!r.templates.length) { el.innerHTML = `<div class="empty">登録済みの送信元はありません</div>`; return; }
   el.innerHTML = `<table><tr><th>名前</th><th>送信者名</th><th>返信先</th><th></th></tr>` +
@@ -1428,18 +1518,19 @@ function currentFilters() {
   return f;
 }
 
-// 選択が変わるたびに自動でプレビューする。連続クリック(エリア一括選択等)で
-// リクエストが乱発しないよう軽くデバウンスし、さらに古いリクエストの応答が
-// 後から返ってきても新しい選択結果を上書きしないようseqで捨てる
-let previewSeq = 0, previewTimer = null;
-async function runPreview() {
+// MIKOMERUの「リストを取得する」同様、選択のたびに自動検索するのではなく
+// [検索]ボタンを押した時だけ実行する(結果テーブル→[リスト保存]の順)
+let lastFilterSearch = null;
+async function runFilterSearch() {
   if (!connected) return;
   const el = $("previewResult");
-  const seq = ++previewSeq;
-  el.innerHTML = `<div class="result">集計中…</div>`;
+  $("filterSaveRow").style.display = "none";
+  lastFilterSearch = null;
+  el.innerHTML = `<div class="result">検索中…</div>`;
   try {
-    const r = await call("/api/tenant/lists/preview", { method: "POST", body: JSON.stringify({ filters: currentFilters() }) });
-    if (seq !== previewSeq) return;
+    const filters = currentFilters();
+    const r = await call("/api/tenant/search/filter", { method: "POST", body: JSON.stringify({ filters }) });
+    lastFilterSearch = filters;
     const sampleTable = !r.sample.length ? "" :
       `<table style="margin-top:8px"><tr><th>会社名</th><th>都道府県</th><th>ランク</th></tr>` +
       r.sample.map(c => `<tr><td>${c.name}</td><td>${c.pref || "—"}</td><td>${c.rank || "—"}</td></tr>`).join("") +
@@ -1447,54 +1538,113 @@ async function runPreview() {
       (r.count_before_cap > r.sample.length
         ? `<p class="hint" style="margin-top:4px">先頭${r.sample.length}社を表示(保存前のプレビューのため。全件は保存後に「保存済みリスト」で確認できます)</p>`
         : "");
-    el.innerHTML = `<div class="result ok">該当 ${r.count_before_cap.toLocaleString()}社` +
+    el.innerHTML = `<div class="result ok">${r.count_before_cap.toLocaleString()}件見つかりました` +
       (r.capped ? `(上限20,000件のため実際に保存されるのは20,000社)` : ``) + `</div>` + sampleTable;
+    if (r.count_before_cap > 0) $("filterSaveRow").style.display = "";
   } catch (e) {
-    if (seq !== previewSeq) return;
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }
 }
-document.getElementById("filterInputs").addEventListener("change", () => {
-  clearTimeout(previewTimer);
-  previewTimer = setTimeout(runPreview, 200);
-});
+$("btnRunFilterSearch").addEventListener("click", runFilterSearch);
 
-$("btnSaveFilter").addEventListener("click", async () => {
-  const name = $("fName").value.trim();
-  const existingId = $("fExistingList").value;
-  const el = $("previewResult");
-  if (!name && !existingId) {
-    el.innerHTML = `<div class="result err">リスト名を入力するか、既存のリストを選択してください</div>`; return;
-  }
-  const body = { filters: currentFilters() };
-  if (existingId) body.existing_list_id = Number(existingId); else body.name = name;
-  try {
+$("btnOpenSaveFilterModal").addEventListener("click", () => {
+  if (!lastFilterSearch) return;
+  openSaveListModal("※ 保存する会社数によっては時間がかかる場合があります", async (name, existingId) => {
+    const body = { filters: lastFilterSearch };
+    if (existingId) body.existing_list_id = existingId; else body.name = name;
     const r = await call("/api/tenant/lists", { method: "POST", body: JSON.stringify(body) });
-    el.innerHTML = `<div class="result ok">保存しました(合計${r.count.toLocaleString()}社) — list_id=${r.list_id}</div>`;
-    $("fName").value = ""; $("fExistingList").value = "";
-    await refreshLists();
     refreshHomeStats();
-  } catch (e) {
-    el.innerHTML = `<div class="result err">${e.message}</div>`;
-  }
+    return r;
+  });
 });
 
-$("btnUploadCsv").addEventListener("click", async () => {
-  const name = $("cName").value.trim();
-  const existingId = $("cExistingList").value;
-  const file = $("cFile").files[0];
-  const discoverUrls = $("cDiscoverUrls").checked;
-  const el = $("csvResult");
-  if ((!name && !existingId) || !file) {
-    el.innerHTML = `<div class="result err">CSVファイルを指定し、リスト名を入力するか既存のリストを選択してください</div>`; return;
+// ── CSV検索(MIKOMERUの「会社名で検索」「URLで検索」相当)。
+// (1)ファイル選択→(2)内容プレビュー(1件目)→(3)列指定→[検索実行]の順で進める ──
+function splitCsvLine(line) {
+  const out = []; let cur = ""; let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else { inQuotes = false; } }
+      else cur += ch;
+    } else if (ch === '"') { inQuotes = true; }
+    else if (ch === ",") { out.push(cur); cur = ""; }
+    else { cur += ch; }
   }
-  el.innerHTML = `<div class="result">${discoverUrls ? "取込・問い合わせページ探索中…(時間がかかる場合があります)" : "取込中…"}</div>`;
+  out.push(cur);
+  return out.map(s => s.trim());
+}
+const CSV_NAME_HINTS = ["name", "会社名", "企業名", "法人名", "商号"];
+const CSV_PREF_HINTS = ["pref", "都道府県", "県"];
+const CSV_URL_HINTS = ["website_url", "url", "hp", "ホームページ", "サイト"];
+function guessCsvColumn(headers, hints) {
+  const lower = headers.map(h => h.toLowerCase());
+  for (const hint of hints) {
+    const idx = lower.indexOf(hint.toLowerCase());
+    if (idx !== -1) return headers[idx];
+  }
+  return "";
+}
+
+let csvFileText = null, csvHeaders = [];
+
+function csvMode() {
+  return document.querySelector('input[name="csvTab"]:checked').value;
+}
+
+document.querySelectorAll('input[name="csvTab"]').forEach(input => {
+  input.addEventListener("change", () => {
+    $("cUrlColWrap").style.display = csvMode() === "url" ? "" : "none";
+    $("csvResult").innerHTML = ""; $("csvSaveRow").style.display = "none";
+  });
+});
+
+$("cFile").addEventListener("change", async () => {
+  const file = $("cFile").files[0];
+  $("csvResult").innerHTML = ""; $("csvSaveRow").style.display = "none";
+  if (!file) { $("csvPreviewWrap").style.display = "none"; return; }
+  csvFileText = await file.text();
+  const lines = csvFileText.split(/\r\n|\n|\r/).filter((l, i) => i < 2 || l.trim());
+  csvHeaders = lines[0] ? splitCsvLine(lines[0]) : [];
+  const firstRow = lines[1] ? splitCsvLine(lines[1]) : [];
+  const rowCount = csvFileText.split(/\r\n|\n|\r/).filter(l => l.trim()).length - 1;
+  $("csvFileInfo").textContent = `ファイル名: ${file.name} / 件数: ${Math.max(rowCount, 0)}`;
+
+  const colOpts = csvHeaders.map(h => `<option value="${h}">${h}</option>`).join("");
+  $("cNameCol").innerHTML = colOpts;
+  $("cUrlCol").innerHTML = colOpts;
+  $("cPrefCol").innerHTML = `<option value="">-- 指定なし --</option>` + colOpts;
+  $("cNameCol").value = guessCsvColumn(csvHeaders, CSV_NAME_HINTS) || csvHeaders[0] || "";
+  $("cUrlCol").value = guessCsvColumn(csvHeaders, CSV_URL_HINTS) || csvHeaders[0] || "";
+  $("cPrefCol").value = guessCsvColumn(csvHeaders, CSV_PREF_HINTS);
+
+  $("csvPreviewTable").innerHTML = !csvHeaders.length ? `<div class="empty">列が検出できませんでした</div>` :
+    `<table>` + csvHeaders.map((h, i) => `<tr><th>${h}</th><td>${firstRow[i] ?? ""}</td></tr>`).join("") + `</table>`;
+  $("csvPreviewWrap").style.display = "";
+});
+
+let lastCsvSearchLogId = null;
+
+$("btnRunCsvSearch").addEventListener("click", async () => {
+  const el = $("csvResult");
+  $("csvSaveRow").style.display = "none";
+  lastCsvSearchLogId = null;
+  if (!csvFileText) { el.innerHTML = `<div class="result err">CSVファイルを選択してください</div>`; return; }
+  const mode = csvMode();
+  const nameCol = $("cNameCol").value;
+  const urlCol = $("cUrlCol").value;
+  const prefCol = $("cPrefCol").value;
+  if (!nameCol) { el.innerHTML = `<div class="result err">会社名の列を指定してください</div>`; return; }
+  if (mode === "url" && !urlCol) { el.innerHTML = `<div class="result err">URLの列を指定してください</div>`; return; }
+  el.innerHTML = `<div class="result">${mode === "url" ? "検索・問い合わせページ探索中…(時間がかかる場合があります)" : "検索中…"}</div>`;
   try {
-    const text = await file.text();
-    const body = { csv: text, discover_urls: discoverUrls };
-    if (existingId) body.existing_list_id = Number(existingId); else body.name = name;
-    const r = await call("/api/tenant/lists/csv", { method: "POST", body: JSON.stringify(body) });
-    let msg = `取込完了: 合計${r.count}社(既存と一致${r.matched_existing} / 新規${r.new_companies} / スキップ${r.skipped_rows})`;
+    const body = { csv: csvFileText, mode, name_col: nameCol, filename: $("cFile").files[0]?.name };
+    if (mode === "url") body.url_col = urlCol;
+    if (prefCol) body.pref_col = prefCol;
+    const r = await call("/api/tenant/search/csv", { method: "POST", body: JSON.stringify(body) });
+    lastCsvSearchLogId = r.search_log_id;
+    let msg = `検索完了: 該当${r.count}社(既存と一致${r.matched_existing} / 新規${r.new_companies} / 会社不明${r.skipped_rows})`;
+    if (r.no_contact_count) msg += ` / 問い合わせページ不明${r.no_contact_count}`;
     if (r.url_discovery) {
       const d = r.url_discovery;
       msg += `<br>問い合わせページ探索: 発見${d.found} / フォームなし${d.no_form} / `
@@ -1502,13 +1652,124 @@ $("btnUploadCsv").addEventListener("click", async () => {
         + `${d.skipped_over_limit ? ` / 上限超過で未実施${d.skipped_over_limit}` : ""}`;
     }
     el.innerHTML = `<div class="result ok">${msg}</div>`;
-    $("cName").value = ""; $("cExistingList").value = ""; $("cFile").value = ""; $("cDiscoverUrls").checked = false;
-    await refreshLists();
+    if (r.count > 0) $("csvSaveRow").style.display = "";
     refreshHomeStats();
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }
 });
+
+$("btnOpenSaveCsvModal").addEventListener("click", () => {
+  if (!lastCsvSearchLogId) return;
+  openSaveListModal("※ 検索結果のうち見つかった会社のみ保存します。", async (name, existingId) => {
+    const body = {};
+    if (existingId) body.existing_list_id = existingId; else body.name = name;
+    const r = await call(`/api/tenant/search-log/${lastCsvSearchLogId}/save-as-list`,
+      { method: "POST", body: JSON.stringify(body) });
+    return r;
+  });
+});
+
+// ── CSV検索ログ(MIKOMERUのCSV検索ログ一覧・詳細相当) ──
+const SEARCH_LOG_KIND_LABELS = { csv_name: "会社名検索", csv_url: "URL検索" };
+
+async function refreshSearchLog() {
+  const el = $("searchLogWrap");
+  el.innerHTML = `<div class="empty">読み込み中...</div>`;
+  try {
+    const r = await call("/api/tenant/search-log");
+    if (!r.logs.length) { el.innerHTML = `<div class="empty">検索ログはまだありません</div>`; return; }
+    el.innerHTML = `<table><tr><th>ID</th><th>種別</th><th>検索条件</th><th>結果件数</th>
+        <th>ステータス</th><th>検索日時</th></tr>` +
+      r.logs.map(l => `<tr class="clickable" data-id="${l.id}">
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${l.id}</td>
+        <td><span class="pill">${SEARCH_LOG_KIND_LABELS[l.kind] || l.kind}</span></td>
+        <td>${l.label}</td>
+        <td>${l.success_count.toLocaleString()}件
+          ${l.not_found_count ? `<span class="pill err">会社不明${l.not_found_count}</span>` : ""}
+          ${l.no_contact_count ? `<span class="pill">問い合わせページ不明${l.no_contact_count}</span>` : ""}</td>
+        <td><span class="pill ok">完了</span></td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${l.created_at}</td>
+      </tr>`).join("") + `</table>`;
+    el.querySelectorAll("tr.clickable").forEach(tr => {
+      tr.addEventListener("click", () => showSearchLogDetail(tr.dataset.id));
+    });
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+const SEARCH_LOG_ROW_STATUS_LABELS = { success: "成功", not_found: "会社不明" };
+
+async function showSearchLogDetail(id) {
+  const el = $("searchLogDetailWrap");
+  el.innerHTML = `<div class="empty">読み込み中...</div>`;
+  try {
+    const log = await call(`/api/tenant/search-log/${id}`);
+    el.innerHTML = `<h2>検索ログ詳細 <span>#${id}</span></h2>
+      <div class="card">
+        <div class="row">
+          <div><label>種別</label><div style="padding:9px 0"><span class="pill">${SEARCH_LOG_KIND_LABELS[log.kind] || log.kind}</span></div></div>
+          <div><label>検索条件</label><div style="padding:9px 0">${log.label}</div></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>検索結果</label><div style="padding:9px 0">成功${log.success_count}件
+            ${log.not_found_count ? ` / 会社不明${log.not_found_count}件` : ""}
+            ${log.no_contact_count ? ` / 問い合わせページ不明${log.no_contact_count}件` : ""}</div></div>
+          <div><label>検索日時</label><div style="font-family:var(--mono);font-size:12px;padding:9px 0">${log.created_at}</div></div>
+        </div>
+        <div class="btnrow">
+          <button id="btnSaveSearchLog">📋 リスト保存</button>
+          <button class="ghost" id="btnDownloadSearchLog">📥 ダウンロード</button>
+        </div>
+        <p class="hint" style="margin-top:8px">※ 表示されている会社情報は企業の最新情報に合わせて更新されることがあるため、
+          以前と異なる可能性があります。</p>
+      </div>
+      <h2>検索結果 <span>${(log.companies || []).length + (log.csv_rows || []).filter(r => r.status === "not_found").length}件</span></h2>
+      <div id="searchLogResultTable"></div>`;
+
+    const companyById = {};
+    (log.companies || []).forEach(c => { companyById[c.id] = c; });
+    const rows = log.csv_rows || [];
+    $("searchLogResultTable").innerHTML = !rows.length ? `<div class="empty">結果がありません</div>` :
+      `<table><tr><th>会社名(検索条件)</th><th>ステータス</th><th>所在地</th><th>問い合わせページ</th></tr>` +
+      rows.map(r => {
+        const c = r.company_id ? companyById[r.company_id] : null;
+        const cls = r.status === "not_found" ? " err" : "";
+        return `<tr><td>${r.name || (c && c.name) || "—"}</td>
+          <td><span class="pill${cls}">${SEARCH_LOG_ROW_STATUS_LABELS[r.status] || r.status}</span></td>
+          <td>${(c && c.pref) || "—"}</td>
+          <td style="font-size:12px">${(c && c.contact_url) || "—"}</td></tr>`;
+      }).join("") + `</table>`;
+
+    $("btnSaveSearchLog").addEventListener("click", () => {
+      openSaveListModal("※ 検索結果のうち見つかった会社のみ保存します。", async (name, existingId) => {
+        const body = {};
+        if (existingId) body.existing_list_id = existingId; else body.name = name;
+        return await call(`/api/tenant/search-log/${id}/save-as-list`,
+          { method: "POST", body: JSON.stringify(body) });
+      });
+    });
+    $("btnDownloadSearchLog").addEventListener("click", () => downloadSearchLogCsv(id));
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+async function downloadSearchLogCsv(id) {
+  try {
+    const r = await call(`/api/tenant/search-log/${id}/csv`);
+    const blob = new Blob(["﻿" + r.csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `search_log_${id}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (e) {
+    alert("CSVダウンロードに失敗しました: " + e.message);
+  }
+}
 
 let allLists = [];  // include_deletedの状態に関わらず「既存リストに追加」選択肢は
                      // 常に有効なリストだけから作るため、非削除分を別途覚えておく
@@ -1521,15 +1782,8 @@ async function refreshLists() {
   allLists = includeDeleted ? r.lists.filter(l => !l.deleted_at) : r.lists;
   listsSelected.clear();
   renderListsTable();
-  populateExistingListSelects();
   populateAutosendListSelect();
   updateListsBulkButtons();
-}
-
-function populateExistingListSelects() {
-  const opts = `<option value="">-- 指定なし --</option>` +
-    allLists.map(l => `<option value="${l.id}">${l.name}</option>`).join("");
-  ["fExistingList", "cExistingList"].forEach(id => { if ($(id)) $(id).innerHTML = opts; });
 }
 
 function updateListsBulkButtons() {
@@ -1847,6 +2101,39 @@ $("autosendListSelect").addEventListener("change", () => {
   renderSendForm($("autosendFormWrap"), listId);
 });
 
+document.querySelectorAll('input[name="autosendTab"]').forEach(input => {
+  input.addEventListener("change", () => {
+    const isCsv = document.querySelector('input[name="autosendTab"]:checked').value === "csv";
+    $("autosendListTab").style.display = isCsv ? "none" : "";
+    $("autosendCsvTab").style.display = isCsv ? "" : "none";
+  });
+});
+
+$("btnAutosendCsvUpload").addEventListener("click", async () => {
+  const file = $("autosendCsvFile").files[0];
+  const el = $("autosendCsvResult");
+  if (!file) { el.innerHTML = `<div class="result err">CSVファイルを選択してください</div>`; return; }
+  el.innerHTML = `<div class="result">取り込み中…</div>`;
+  try {
+    const text = await file.text();
+    const now = new Date().toISOString().replace("T", "_").slice(0, 16);
+    const r = await call("/api/tenant/search/csv", { method: "POST",
+      body: JSON.stringify({ csv: text, mode: "name", filename: file.name }) });
+    if (!r.count) {
+      el.innerHTML = `<div class="result err">CSVから会社を特定できませんでした(会社不明${r.skipped_rows}件)</div>`;
+      return;
+    }
+    const saved = await call(`/api/tenant/search-log/${r.search_log_id}/save-as-list`,
+      { method: "POST", body: JSON.stringify({ name: `CSV送信_${now}` }) });
+    el.innerHTML = `<div class="result ok">取り込み完了(${saved.count.toLocaleString()}社)。このまま下で送信文章を入力してください</div>`;
+    await refreshLists();
+    $("autosendListSelect").value = String(saved.list_id);
+    $("autosendListSelect").dispatchEvent(new Event("change"));
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+});
+
 async function renderSendForm(container, id) {
   container.innerHTML = `<div class="empty">読み込み中...</div>`;
   await refreshKillSwitch();
@@ -1860,6 +2147,14 @@ async function renderSendForm(container, id) {
           <select id="sendTemplate">
             <option value="">選択しない(件名・本文を直接入力)</option>
             ${lastTemplates.map(x => `<option value="${x.id}">${x.name}</option>`).join("")}
+          </select>
+        </div>
+        <div style="margin-top:10px">
+          <label>送信元テンプレートから選択(任意。「送信元テンプレート」メニューで登録。
+            選ばないと現在「有効化」中の送信元が使われます)</label>
+          <select id="sendSenderTemplate">
+            <option value="">選択しない(現在有効化中の送信元を使う)</option>
+            ${lastSenderTemplates.map(x => `<option value="${x.id}">${x.name}(${x.sender_name})</option>`).join("")}
           </select>
         </div>
         <div class="row" style="margin-top:10px">
@@ -1951,6 +2246,7 @@ async function renderSendForm(container, id) {
       const body = $("sendBody").value.trim();
       const dryRun = dryRunBox.checked;
       const trackClicks = $("sendTrackClicks").checked;
+      const senderTemplateId = $("sendSenderTemplate").value ? Number($("sendSenderTemplate").value) : null;
       const rEl = $("sendResult");
       if (!subject || !body) { rEl.innerHTML = `<div class="result err">件名と本文を入力してください</div>`; return; }
 
@@ -1971,7 +2267,8 @@ async function renderSendForm(container, id) {
       if (scheduling) {
         rEl.innerHTML = `<div class="result">予約中…</div>`;
         try {
-          const payload = { subject, body, dry_run: dryRun, scheduled_at: scheduledAt, track_clicks: trackClicks };
+          const payload = { subject, body, dry_run: dryRun, scheduled_at: scheduledAt, track_clicks: trackClicks,
+            sender_template_id: senderTemplateId };
           const sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
           rEl.innerHTML = `<div class="result ok">予約しました(${sr.scheduled_at}に開始)</div>`;
           await refreshScheduledSends(id);
@@ -1994,7 +2291,8 @@ async function renderSendForm(container, id) {
 
       let sr = null, err = null;
       try {
-        const payload = { subject, body, dry_run: dryRun, track_clicks: trackClicks };
+        const payload = { subject, body, dry_run: dryRun, track_clicks: trackClicks,
+          sender_template_id: senderTemplateId };
         sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
       } catch (e) {
         err = e;

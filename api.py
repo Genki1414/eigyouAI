@@ -51,15 +51,33 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            existing_list_id(整数)を指定すると、新規リストではなく
                            そのリストへ追加する(MIKOMERUの「リスト保存」モーダルの
                            「既存のリストに追加する」相当)
+  POST /api/tenant/search/filter  {"filters"} → MIKOMERUの「リスト取得」[検索]相当。
+                           結果テーブル用にpreview_filter()より多い件数を返す
+                           (MIKOMERUにもリスト取得側には検索ログが無いため、こちらは
+                           search_logへは記録しない)
+  POST /api/tenant/search/csv     {"csv","mode":"name"|"url","name_col","url_col",
+                           "filename"} → MIKOMERUの「CSV検索」(会社名で検索/URLで検索)
+                           [検索実行]相当。mode="url"はurl_col必須で問い合わせページを
+                           必ず探索する。実行のたびsearch_logへ記録が残る
+  GET  /api/tenant/search-log         自テナントのCSV検索ログ一覧(MIKOMERU同様、
+                           CSV検索(会社名/URL)の実行だけを記録する)
+  GET  /api/tenant/search-log/<id>    検索ログ詳細(該当企業一覧付き)
+  POST /api/tenant/search-log/<id>/save-as-list  {"name" or "existing_list_id"} →
+                           検索結果をリストとして保存(filter型は検索条件を今再実行する)
+  GET  /api/tenant/search-log/<id>/csv  検索ログの内容をCSVでダウンロード
   POST /api/tenant/lists/<id>/outcome  {"company_id","field":"replied"|"deal"|"won",
                            "value","memo"} → 返信・商談化・受注を手動記録(β版。
                            メール自動取得等はしない)
-  POST /api/tenant/lists/<id>/send  {"subject","body","dry_run","scheduled_at"} →
-                           リストへフォーム自動送信。dry_run既定true(=実サイトへは
-                           送らない)。can_contact()・冪等性・ペーシング上限は
-                           send_campaign()経由でそのまま適用される(HANDOFF.mdの
-                           原則を厳守)。scheduled_at(未来のISO日時)を指定すると
-                           即時実行せずscheduled_sendsへ予約登録するだけになる
+  POST /api/tenant/lists/<id>/send  {"subject","body","dry_run","scheduled_at",
+                           "sender_template_id"} → リストへフォーム自動送信。
+                           dry_run既定true(=実サイトへは送らない)。can_contact()・
+                           冪等性・ペーシング上限はsend_campaign()経由でそのまま適用
+                           される(HANDOFF.mdの原則を厳守)。scheduled_at(未来のISO日時)
+                           を指定すると即時実行せずscheduled_sendsへ予約登録するだけに
+                           なる。sender_template_id(整数)を指定すると、テナントの
+                           「有効化」済み送信元の代わりにその送信元テンプレートを
+                           この送信だけに使う(MIKOMERUの自動送信画面「送信元テンプレート
+                           から選択」相当)
   GET  /api/tenant/scheduled-sends?list_id=  予約送信の一覧(自テナント分のみ)
   POST /api/tenant/scheduled-sends/cancel  {"scheduled_id"} → PENDINGの予約を
                            キャンセル(実行済み・キャンセル済みは404)
@@ -163,6 +181,9 @@ _PREVIEW_MSG_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/preview-message$")
 _RENAME_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/rename$")
 _DUPLICATE_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/duplicate$")
 _REMOVE_MEMBERS_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/remove-members$")
+_SEARCH_LOG_DETAIL_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)$")
+_SEARCH_LOG_SAVE_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)/save-as-list$")
+_SEARCH_LOG_CSV_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)/csv$")
 _SCREENSHOT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/screenshot$")
 _AUTOFILL_QUEUE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/autofill-queue$")
 _SEND_LOG_NOTE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/note$")
@@ -356,6 +377,83 @@ def h_tenant_lists_preview(con, tenant_id, data):
     if not isinstance(filters, dict):
         return 400, {"error": "filtersはオブジェクトで指定してください"}
     return 200, TL.preview_filter(con, tenant_id, filters)
+
+
+def h_tenant_search_filter(con, tenant_id, data):
+    """MIKOMERUの「リスト取得」画面の[検索]ボタン相当。プレビューと違い、
+    実行するたびにsearch_logへ記録が残る(検索しただけではリストとして保存されない)。"""
+    filters = data.get("filters") or {}
+    if not isinstance(filters, dict):
+        return 400, {"error": "filtersはオブジェクトで指定してください"}
+    return 200, TL.run_filter_search(con, tenant_id, filters)
+
+
+def h_tenant_search_csv(con, tenant_id, data):
+    """MIKOMERUの「CSV検索」画面の[検索実行]ボタン相当(会社名で検索/URLで検索)。"""
+    csv_text = data.get("csv")
+    if not csv_text:
+        return 400, {"error": "csvは必須です"}
+    if len(csv_text) > 10_000_000:  # 10MB上限(暴走・誤操作の被害抑制)
+        return 400, {"error": "CSVが大きすぎます(上限10MB)"}
+    mode = data.get("mode") or "name"
+    if mode not in ("name", "url"):
+        return 400, {"error": "modeは'name'または'url'を指定してください"}
+    name_col = data.get("name_col")
+    url_col = data.get("url_col")
+    pref_col = data.get("pref_col")
+    if mode == "url" and not url_col:
+        return 400, {"error": "URLで検索する場合はurl_colが必須です"}
+    filename = (data.get("filename") or "").strip() or None
+    res = TL.run_csv_search(con, tenant_id, filename, csv_text, mode=mode,
+                             name_col=name_col, url_col=url_col, pref_col=pref_col)
+    if "error" in res:
+        return 400, res
+    return 200, res
+
+
+def h_tenant_search_log_list(con, tenant_id):
+    return 200, {"logs": TL.list_search_log(con, tenant_id)}
+
+
+def h_tenant_search_log_detail(con, tenant_id, search_log_id):
+    res = TL.get_search_log(con, tenant_id, search_log_id)
+    if not res:
+        return 404, {"error": "検索ログが見つかりません"}
+    return 200, res
+
+
+def h_tenant_search_log_save(con, tenant_id, search_log_id, data):
+    existing_list_id = data.get("existing_list_id")
+    if existing_list_id is not None and not isinstance(existing_list_id, int):
+        return 400, {"error": "existing_list_idは整数で指定してください"}
+    name = (data.get("name") or "").strip()
+    res = TL.save_search_log_as_list(con, tenant_id, search_log_id, name=name,
+                                      existing_list_id=existing_list_id)
+    if "error" in res:
+        return (404 if res["error"] == "検索ログが見つかりません" else 400), res
+    return 200, res
+
+
+def h_tenant_search_log_csv(con, tenant_id, search_log_id):
+    """検索ログの内容をCSVでダウンロードする(MIKOMERUの検索ログ詳細
+    [ダウンロード]ボタン相当)。"""
+    log = TL.get_search_log(con, tenant_id, search_log_id)
+    if not log:
+        return 404, {"error": "検索ログが見つかりません"}
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    if log["kind"] == "filter":
+        w.writerow(["会社名", "都道府県", "業種", "スコアランク"])
+        for c in log["companies"]:
+            w.writerow([c["name"], c.get("pref") or "", c.get("trades") or "", c.get("rank") or ""])
+    else:
+        w.writerow(["会社名(検索条件)", "ステータス", "所在地", "問い合わせページ"])
+        for row in (log["csv_rows"] or []):
+            status_label = {"success": "成功", "not_found": "会社不明"}.get(row["status"], row["status"])
+            company = next((c for c in log["companies"] if c["id"] == row.get("company_id")), None)
+            w.writerow([row.get("name") or "", status_label,
+                        (company or {}).get("pref") or "", (company or {}).get("contact_url") or ""])
+    return 200, {"csv": buf.getvalue()}
 
 
 def h_tenant_lists_create(con, tenant_id, data):
@@ -906,6 +1004,15 @@ def h_tenant_list_send(con, tenant_id, list_id, data):
         dry_run = True
     track_clicks = bool(data.get("track_clicks"))
 
+    sender_template_id = data.get("sender_template_id")
+    if sender_template_id is not None:
+        if not isinstance(sender_template_id, int):
+            return 400, {"error": "sender_template_idは整数で指定してください"}
+        owns = con.execute("SELECT 1 FROM sender_templates WHERE id=? AND tenant_id=?",
+                            (sender_template_id, tenant_id)).fetchone()
+        if not owns:
+            return 404, {"error": "指定された送信元テンプレートが見つかりません"}
+
     scheduled_at = (data.get("scheduled_at") or "").strip()
     if scheduled_at:
         try:
@@ -921,12 +1028,13 @@ def h_tenant_list_send(con, tenant_id, list_id, data):
             return 404, {"error": "リストが見つかりません"}
         sid = db.create_scheduled_send(con, tenant_id, list_id, subject, body, dry_run,
                                         when.isoformat(timespec="seconds"),
-                                        track_clicks=track_clicks)
+                                        track_clicks=track_clicks,
+                                        sender_template_id=sender_template_id)
         return 200, {"scheduled": True, "scheduled_id": sid,
                      "scheduled_at": when.isoformat(timespec="seconds")}
 
     res = TL.send_list(con, tenant_id, list_id, subject, body, dry_run=dry_run,
-                        track_clicks=track_clicks)
+                        track_clicks=track_clicks, sender_template_id=sender_template_id)
     if res is None:
         return 404, {"error": "リストが見つかりません"}
     if "error" in res:
@@ -1089,11 +1197,13 @@ class Handler(BaseHTTPRequestHandler):
         rename_match = _RENAME_PATH_RE.match(path)
         duplicate_match = _DUPLICATE_PATH_RE.match(path)
         remove_members_match = _REMOVE_MEMBERS_PATH_RE.match(path)
+        search_log_save_match = _SEARCH_LOG_SAVE_PATH_RE.match(path)
         if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv",
-                     "/api/tenant/lists/delete", "/api/tenant/lists/restore") \
+                     "/api/tenant/lists/delete", "/api/tenant/lists/restore",
+                     "/api/tenant/search/filter", "/api/tenant/search/csv") \
                 or send_match or outcome_match or autofill_match or note_match \
                 or manual_sent_match or preview_msg_match \
-                or rename_match or duplicate_match or remove_members_match:
+                or rename_match or duplicate_match or remove_members_match or search_log_save_match:
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -1109,6 +1219,13 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_lists_set_deleted(con, tenant["id"], data, True)
                 elif path == "/api/tenant/lists/restore":
                     st, res = h_tenant_lists_set_deleted(con, tenant["id"], data, False)
+                elif path == "/api/tenant/search/filter":
+                    st, res = h_tenant_search_filter(con, tenant["id"], data)
+                elif path == "/api/tenant/search/csv":
+                    st, res = h_tenant_search_csv(con, tenant["id"], data)
+                elif search_log_save_match:
+                    st, res = h_tenant_search_log_save(con, tenant["id"],
+                                                        int(search_log_save_match.group(1)), data)
                 elif send_match:
                     st, res = h_tenant_list_send(con, tenant["id"], int(send_match.group(1)), data)
                 elif outcome_match:
@@ -1273,6 +1390,26 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 return self.wfile.write(body)
+            finally:
+                con.close()
+
+        search_log_csv_match = _SEARCH_LOG_CSV_PATH_RE.match(u.path)
+        search_log_detail_match = _SEARCH_LOG_DETAIL_PATH_RE.match(u.path)
+        if u.path == "/api/tenant/search-log" or search_log_csv_match or search_log_detail_match:
+            con = self._con()
+            try:
+                tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
+                if not tenant:
+                    return self._json(401, {"error": "unauthorized"})
+                if u.path == "/api/tenant/search-log":
+                    st, res = h_tenant_search_log_list(con, tenant["id"])
+                elif search_log_csv_match:
+                    st, res = h_tenant_search_log_csv(con, tenant["id"], int(search_log_csv_match.group(1)))
+                else:
+                    st, res = h_tenant_search_log_detail(con, tenant["id"], int(search_log_detail_match.group(1)))
+                return self._json(st, res)
+            except Exception as e:  # noqa: BLE001
+                return self._json(500, {"error": str(e)[:200]})
             finally:
                 con.close()
 
@@ -1768,6 +1905,68 @@ def self_test(port=8899):
     t("空のcsvは400", st == 400)
     con.execute("DELETE FROM tenant_exclusions WHERE tenant_id=? AND reason='CSV一括テスト'", (tid_a,))
     con.commit()
+
+    print("\n── リスト取得(検索)・CSV検索・CSV検索ログ ──")
+    st, r = post_auth("/api/tenant/search/filter", {"filters": {"prefs": ["東京都"]}}, token=key_a)
+    t("POST /api/tenant/search/filterで検索できる(件数とサンプルが返る)",
+      st == 200 and r.get("count_before_cap", 0) > 0 and len(r.get("sample", [])) > 0)
+    st, r = get_auth("/api/tenant/search-log", token=key_a)
+    t("フィルタ検索はsearch_logに記録されない(MIKOMERUのリスト取得側にはログが無いため)",
+      st == 200 and len(r.get("logs", [])) == 0)
+
+    sc_company = con.execute("""SELECT name, pref FROM companies
+        WHERE dedup_of IS NULL AND owner_tenant_id IS NULL AND pref IS NOT NULL LIMIT 1""").fetchone()
+    # 2行目は会社名列が空(=会社名を特定できない行)なので「会社不明」扱いになる。
+    # 存在しない社名を入れても(AshiBaseの意図的な設計上)非公開企業として新規作成
+    # されてしまい「会社不明」にはならないため、skipped_rowsを狙って再現するには
+    # 会社名そのものを空にする必要がある
+    csv_search_text = f"会社名,都道府県\n{sc_company['name']},{sc_company['pref']}\n,東京都\n"
+    st, r = post_auth("/api/tenant/search/csv",
+                      {"csv": csv_search_text, "mode": "name", "filename": "csvsearch.csv"}, token=key_a)
+    t("POST /api/tenant/search/csv(会社名で検索)で検索できる",
+      st == 200 and r.get("count") == 1 and r.get("skipped_rows") == 1
+      and isinstance(r.get("search_log_id"), int))
+    csv_search_log_id = r.get("search_log_id")
+
+    st, r = post_auth("/api/tenant/search/csv", {"csv": csv_search_text, "mode": "url"}, token=key_a)
+    t("URLで検索する場合はurl_colが必須(400)", st == 400)
+
+    st, r = get_auth("/api/tenant/search-log", token=key_a)
+    t("GET /api/tenant/search-logにCSV検索の実行が記録される",
+      st == 200 and any(l["id"] == csv_search_log_id for l in r.get("logs", [])))
+    st, r = get_auth(f"/api/tenant/search-log/{csv_search_log_id}", token=key_a)
+    t("GET /api/tenant/search-log/<id>で企業一覧・元CSV行付きの詳細が取れる",
+      st == 200 and len(r.get("companies", [])) == 1 and len(r.get("csv_rows", [])) == 2)
+    st, r = get_auth(f"/api/tenant/search-log/{csv_search_log_id}", token=key_b)
+    t("他テナントの検索ログは見えない(404)", st == 404)
+
+    st, r = post_auth(f"/api/tenant/search-log/{csv_search_log_id}/save-as-list",
+                      {"name": "CSV検索ログからの保存テスト"}, token=key_a)
+    t("POST /api/tenant/search-log/<id>/save-as-listでリスト保存できる",
+      st == 200 and r.get("count") == 1 and isinstance(r.get("list_id"), int))
+    search_log_list_id = r.get("list_id")
+    st, r = post_auth(f"/api/tenant/search-log/{csv_search_log_id}/save-as-list", {}, token=key_a)
+    t("nameもexisting_list_idも無いと400", st == 400)
+    st, r = post_auth(f"/api/tenant/search-log/{csv_search_log_id}/save-as-list",
+                      {"name": "乗っ取り"}, token=key_b)
+    t("他テナントの検索ログは保存できない(404)", st == 404)
+
+    st, r = get_auth(f"/api/tenant/search-log/{csv_search_log_id}/csv", token=key_a)
+    t("GET /api/tenant/search-log/<id>/csvでダウンロードできる",
+      st == 200 and "csv" in r and sc_company["name"] in r["csv"])
+
+    con.execute("DELETE FROM target_list_members WHERE list_id=?", (search_log_list_id,))
+    con.execute("DELETE FROM target_lists WHERE id=?", (search_log_list_id,))
+    con.execute("DELETE FROM search_log WHERE tenant_id IN (?,?)", (tid_a, tid_b))
+    con.commit()
+
+    print("\n── 自動送信のsender_template_id(MIKOMERUの「送信元テンプレートから選択」相当) ──")
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "x", "body": "y", "sender_template_id": "not-an-int"}, token=key_a)
+    t("sender_template_idが整数でないと400", st == 400)
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "x", "body": "y", "sender_template_id": 999999999}, token=key_a)
+    t("存在しないsender_template_idは404", st == 404)
 
     print("\n── 送信先リストからの送信(dry_run) ──")
     st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send", {"body": "本文のみ"}, token=key_a)

@@ -464,14 +464,23 @@ def rewrite_tracked_links(con, touch_id, body, base_url):
 
 
 # ── 一括送信 ────────────────────────────────
-def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clicks=False):
+def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clicks=False,
+                   sender_template_id=None):
     """キャンペーンの未送信分を実際に送る。
     campaign.py simulate の本番版がこれ。接触ガードはここでも最終確認する。
     track_clicks=Trueなら、本文中のURLをクリック計測リンクへ置き換える
     (MIKOMERUの「URLアクセスの記録」相当。dry_run時は置き換えない=トークンを
     無駄に発行しない)。この設定はcampaigns/touchesへは保存しない——両者は
     同じリストへの再送で使い回されるため、そこに保存すると別の送信操作の
-    設定が漏れて残ってしまう(呼び出しごとに都度指定する設計)。"""
+    設定が漏れて残ってしまう(呼び出しごとに都度指定する設計)。
+
+    sender_template_idを指定すると、テナントの「有効化」済み送信元(tenants.sender_*)
+    ではなく、その送信元テンプレートの内容をこの送信だけに使う(MIKOMERUの自動送信画面
+    「送信元テンプレートから選択」相当)。track_clicksと同じ理由で、これもDBには
+    保存せず呼び出しごとに都度指定する。所有者テナントの検証はh_tenant_list_send()側の
+    呼び出し元で行うため、ここでは見つからなければ黙って既定の送信元にフォールバックしない
+    ——存在しないIDを渡された場合はテナントの有効な送信元を使う(誤って別テナントの
+    テンプレートを指定してもデータは漏れないが、念のためtenant_idでも絞り込む)。"""
     import db
 
     q = """SELECT t.id tid, t.channel, t.subject, t.body, t.company_id, t.step,
@@ -500,6 +509,17 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
         print("送信対象がありません（文面未生成、または全て送信済み）")
         return stats
 
+    # sender_template_id指定時は、テナントの「有効化」済み送信元の代わりにこのテンプレートを
+    # この送信だけに使う。同じ他テナントのIDを渡されても情報が漏れないようtenant_idでも絞る
+    override_sender_row = None
+    if sender_template_id:
+        override_sender_row = con.execute("""SELECT sender_name, sender_email, sender_address,
+            optout_url, sender_last_name, sender_first_name, sender_last_name_kana,
+            sender_first_name_kana, sender_postal_code, sender_prefecture, sender_city,
+            sender_block, sender_building, sender_phone
+            FROM sender_templates WHERE id=? AND tenant_id=?""",
+            (sender_template_id, rows[0]["tenant_id"])).fetchone()
+
     print(f"送信対象 {len(rows)}件 / {'DRY RUN（実送信しません）' if dry_run else '★本番送信★'}")
     cost = 0
 
@@ -523,18 +543,19 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
                             (f"送信中止: Kill Switch — {stop_reason}", r["tid"]))
                 continue
 
+        s = override_sender_row or r
         sender = Sender(
-            name=r["sname"] or "AshiBase（足場ベース）",
-            email=r["sender_email"] or "info@ashibase.jp",
-            address=r["sender_address"] or "",
-            optout_url=r["optout_url"] or "https://ashibase.jp/optout",
-            last_name=r["sender_last_name"] or "", first_name=r["sender_first_name"] or "",
-            last_name_kana=r["sender_last_name_kana"] or "",
-            first_name_kana=r["sender_first_name_kana"] or "",
-            postal_code=r["sender_postal_code"] or "",
-            prefecture=r["sender_prefecture"] or "", city=r["sender_city"] or "",
-            block=r["sender_block"] or "", building=r["sender_building"] or "",
-            phone=r["sender_phone"] or "")
+            name=(s["sender_name"] if override_sender_row else r["sname"]) or "AshiBase（足場ベース）",
+            email=s["sender_email"] or "info@ashibase.jp",
+            address=s["sender_address"] or "",
+            optout_url=s["optout_url"] or "https://ashibase.jp/optout",
+            last_name=s["sender_last_name"] or "", first_name=s["sender_first_name"] or "",
+            last_name_kana=s["sender_last_name_kana"] or "",
+            first_name_kana=s["sender_first_name_kana"] or "",
+            postal_code=s["sender_postal_code"] or "",
+            prefecture=s["sender_prefecture"] or "", city=s["sender_city"] or "",
+            block=s["sender_block"] or "", building=s["sender_building"] or "",
+            phone=s["sender_phone"] or "")
         to = Recipient(company_id=r["company_id"], name=r["name"], email=r["email"],
                        fax=r["fax"], phone=r["phone"], address=r["address"],
                        contact_url=r["contact_url"])
@@ -752,7 +773,8 @@ if __name__ == "__main__":
             VALUES (999997, 'テスト_送信元情報確認', 'https://example.co.jp/contact/')""")
         con.commit()
 
-        def _capture_values(tenant_id, offer_name, subject="件名", body="本文", track_clicks=False):
+        def _capture_values(tenant_id, offer_name, subject="件名", body="本文", track_clicks=False,
+                             sender_template_id=None):
             offer_id = con.execute("SELECT id FROM offers WHERE tenant_id=?", (tenant_id,)).fetchone()[0]
             cur = con.execute("""INSERT INTO campaigns (name, started_at, target_rule, offer_id)
                 VALUES (?,?,?,?)""",
@@ -769,7 +791,8 @@ if __name__ == "__main__":
                 FN.NavigationResult(status="SUCCESS", reason_code="success_text_matched",
                                     submit_attempted=True))[-1]
             try:
-                send_campaign(con, cid, step=1, dry_run=False, track_clicks=track_clicks)
+                send_campaign(con, cid, step=1, dry_run=False, track_clicks=track_clicks,
+                               sender_template_id=sender_template_id)
                 if track_clicks:
                     # trackingリンクをクリックした体で解決し、その結果もcapturedへ
                     # 詰めて返す(呼び出し側がtouch_idを知らなくても確認できるように)。
@@ -819,6 +842,24 @@ if __name__ == "__main__":
                   f"first_name={v_custom.get('first_name')!r} furigana={v_custom.get('furigana')!r} "
                   f"postal_code={v_custom.get('postal_code')!r}")
             print(f"  {'✓' if ok_custom else '✗'} 設定済みならその値がそのまま使われる")
+
+            print("\n── sender_template_id指定(MIKOMERUの自動送信「送信元テンプレートから選択」相当) ──")
+            override_st_id = db.add_sender_template(
+                con, tid_custom, "この送信だけの送信元", "差し替え送信者", "override@test-a.example.co.jp",
+                last_name="差替姓", first_name="差替名")
+            v_override = _capture_values(tid_custom, "test-sender-override-campaign",
+                                          sender_template_id=override_st_id)
+            ok_override = (v_override.get("last_name") == "差替姓" and v_override.get("first_name") == "差替名")
+            print(f"  sender_template_id指定時: last_name={v_override.get('last_name')!r} "
+                  f"first_name={v_override.get('first_name')!r}")
+            print(f"  {'✓' if ok_override else '✗'} sender_template_id指定時はテナントの有効化済み送信元"
+                  "(中川/太郎)ではなくテンプレート側の値(差替姓/差替名)が使われる")
+            v_no_override = _capture_values(tid_custom, "test-sender-no-override-campaign")
+            ok_no_override = v_no_override.get("last_name") == "中川"
+            print(f"  {'✓' if ok_no_override else '✗'} sender_template_id未指定なら従来通りテナントの"
+                  "有効化済み送信元が使われる(他の呼び出しに影響しない)")
+            con.execute("DELETE FROM sender_templates WHERE id=?", (override_st_id,))
+            con.commit()
         finally:
             db.set_global_kill_switch(con, orig_ks2, reason=orig_ks2_reason, updated_by="test-restore")
             con.execute("DELETE FROM companies WHERE id=999997")

@@ -1066,7 +1066,7 @@ function setConnStatus(text, cls) {
   [$("connStatus"), $("sidebarConn")].forEach(el => { el.textContent = text; el.className = "status " + cls; });
 }
 
-$("btnConnect").addEventListener("click", async () => {
+async function doConnect() {
   API = $("apiBase").value.trim();
   KEY = $("apiKey").value.trim();
   localStorage.setItem("eigyouai_api_base", API);
@@ -1089,7 +1089,14 @@ $("btnConnect").addEventListener("click", async () => {
     connected = false;
     setConnStatus("接続失敗: " + e.message, "off");
   }
-});
+}
+$("btnConnect").addEventListener("click", doConnect);
+// ページを開き直すたびに「接続」を手動で押さないと検索ボタン等が無効のままだった
+// (保存済みAPIキーはフォームに復元されるがconnected=trueにはならないため)。
+// APIキーが保存済みならページ読込時に自動で再接続する。
+if ($("apiKey").value.trim()) {
+  doConnect();
+}
 
 let killSwitchStopped = false;
 async function refreshKillSwitch() {
@@ -2794,7 +2801,6 @@ async function refreshScheduledSends(listId) {
   }
 }
 
-if ($("apiBase").value && $("apiKey").value) $("btnConnect").click();
 </script>
 </body>
 </html>

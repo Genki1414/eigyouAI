@@ -176,6 +176,7 @@ tr.clickable:hover{background:var(--blue-soft)}
       <div class="navsub-label">担当者管理</div>
       <div class="navitem navsub" data-page="staff-list">担当者一覧</div>
       <div class="navitem navsub" data-page="staff-add">担当者登録</div>
+      <div class="navitem navsub" data-page="staff-pending">承認待ち一覧</div>
       <div class="navitem" data-page="news">お知らせ一覧</div>
       <div class="navitem" data-page="otherlog">その他ログ</div>
       <div class="navitem" data-page="manual">マニュアルDL</div>
@@ -472,23 +473,77 @@ tr.clickable:hover{background:var(--blue-soft)}
       <section class="page" data-page="staff-add">
         <h2>担当者管理 | 担当者登録 <span>STAFF</span></h2>
         <div class="card">
-          <p class="hint">担当者ごとに個別のAPIキーを発行できます。退職・異動時は
-            そのキーだけを失効させれば、他の担当者やテナント全体には影響しません。
-            発行したAPIキーはこの画面でしか表示されません(後から確認できないため、
-            必ずその場で控えてください)。</p>
-          <div class="row" style="margin-top:10px">
-            <div>
-              <label>担当者名</label>
-              <input type="text" id="stName" placeholder="例: 山田太郎">
-            </div>
-            <div>
-              <label>メールアドレス(任意)</label>
-              <input type="text" id="stEmail" placeholder="例: yamada@example.co.jp">
-            </div>
+          <div class="chips" id="stTabs" style="margin-top:0">
+            <label class="chip on"><input type="radio" name="stTab" value="login" checked>ログイン登録(推奨)</label>
+            <label class="chip"><input type="radio" name="stTab" value="quick">APIキーのみ簡易追加</label>
           </div>
-          <div class="btnrow"><button id="btnAddStaff">新規登録</button></div>
-          <div id="staffResult"></div>
+
+          <div id="stTabLogin" style="margin-top:14px">
+            <p class="hint">担当者本人がメールアドレス・パスワードでログインできるようにします。
+              登録後、認証用URLが発行されます(現在メール送信基盤が未実装のため、自動では
+              送信されません — 表示されたURLを管理者から担当者へ直接共有してください)。
+              担当者がそのURLを開いて認証を完了すると、ログインできるようになります。</p>
+            <div class="row" style="margin-top:10px">
+              <div>
+                <label>担当者名</label>
+                <input type="text" id="stlName" placeholder="例: 山田太郎">
+              </div>
+              <div>
+                <label>権限</label>
+                <select id="stlRole">
+                  <option value="一般" selected>一般</option>
+                  <option value="管理者">管理者</option>
+                </select>
+              </div>
+            </div>
+            <div class="row" style="margin-top:10px">
+              <div>
+                <label>ログインID(メールアドレス)</label>
+                <input type="text" id="stlEmail" placeholder="例: yamada@example.co.jp">
+              </div>
+            </div>
+            <div class="row" style="margin-top:10px">
+              <div>
+                <label>ログインPW(半角英数記号8〜64文字)</label>
+                <input type="password" id="stlPassword" placeholder="半角英数記号8〜64文字">
+              </div>
+              <div>
+                <label>ログインPW(確認)</label>
+                <input type="password" id="stlPassword2" placeholder="もう一度入力してください">
+              </div>
+            </div>
+            <div class="btnrow"><button id="btnRegisterStaffLogin">登録</button></div>
+            <div id="stlResult"></div>
+          </div>
+
+          <div id="stTabQuick" style="margin-top:14px;display:none">
+            <p class="hint">担当者ごとに個別のAPIキーだけを発行します(ログイン画面は使わず、
+              このAPIキーを「接続設定」に直接貼り付けて使う運用向け)。退職・異動時は
+              そのキーだけを失効させれば、他の担当者やテナント全体には影響しません。
+              発行したAPIキーはこの画面でしか表示されません(後から確認できないため、
+              必ずその場で控えてください)。</p>
+            <div class="row" style="margin-top:10px">
+              <div>
+                <label>担当者名</label>
+                <input type="text" id="stName" placeholder="例: 山田太郎">
+              </div>
+              <div>
+                <label>メールアドレス(任意)</label>
+                <input type="text" id="stEmail" placeholder="例: yamada@example.co.jp">
+              </div>
+            </div>
+            <div class="btnrow"><button id="btnAddStaff">新規登録</button></div>
+            <div id="staffResult"></div>
+          </div>
         </div>
+      </section>
+
+      <section class="page" data-page="staff-pending">
+        <h2>担当者管理 | 承認待ち一覧 <span>PENDING</span></h2>
+        <p class="hint">ログイン登録された担当者のうち、まだメール認証URLを開いていない方が
+          表示されます。認証用URLの有効期限は24時間です。期限切れの場合は「再発行」で
+          新しいURLを発行し、管理者から担当者へ共有してください。</p>
+        <div id="staffPendingWrap" style="margin-top:12px"><div class="empty">接続すると表示されます</div></div>
       </section>
 
       <section class="page" data-page="news">
@@ -750,6 +805,23 @@ tr.clickable:hover{background:var(--blue-soft)}
           </div>
           <p class="hint">APIキーはお客様ごとに発行されます。このブラウザにのみ保存され、サーバには送信内容以外保存されません。</p>
         </div>
+        <div class="card" style="margin-top:14px">
+          <b>メールアドレスでログイン</b>
+          <p class="hint" style="margin-top:6px">担当者管理で「ログイン登録」されたメールアドレス・パスワードで
+            接続します(APIキーを直接入力する必要はありません)。</p>
+          <div class="row" style="margin-top:10px">
+            <div>
+              <label>ログインID(メールアドレス)</label>
+              <input type="text" id="loginEmail" placeholder="例: yamada@example.co.jp">
+            </div>
+            <div>
+              <label>ログインPW</label>
+              <input type="password" id="loginPassword" placeholder="パスワード">
+            </div>
+          </div>
+          <div class="btnrow"><button id="btnLogin">ログイン</button></div>
+          <div id="loginResult"></div>
+        </div>
       </section>
 
     </div>
@@ -810,6 +882,7 @@ const PAGE_TITLES = {
   "exclude-add": "送信除外設定 | 登録", "exclude-list": "送信除外設定 | 一覧",
   filter: "リスト取得", csv: "CSV検索", searchlog: "CSV検索ログ", lists: "保存済みリスト",
   "staff-list": "担当者管理 | 担当者一覧", "staff-add": "担当者管理 | 担当者登録",
+  "staff-pending": "担当者管理 | 承認待ち一覧",
   news: "お知らせ一覧", otherlog: "その他ログ", manual: "マニュアルDL",
   conn: "接続設定",
 };
@@ -826,6 +899,7 @@ function goPage(pageId) {
   if (pageId === "tmpl-body-list") refreshTemplates();
   if (pageId === "tmpl-sender-list") refreshSenderTemplates();
   if (pageId === "staff-list") refreshStaff();
+  if (pageId === "staff-pending") refreshStaffPending();
   if (pageId === "news") refreshAnnouncements();
   if (pageId === "otherlog") refreshOtherLog();
 }
@@ -1467,8 +1541,8 @@ async function refreshStaff() {
   const r = await call("/api/tenant/staff");
   const el = $("staffListWrap");
   if (!r.staff.length) { el.innerHTML = `<div class="empty">登録済みの担当者はいません</div>`; return; }
-  el.innerHTML = `<table><tr><th>名前</th><th>メール</th><th>追加日時</th><th></th></tr>` +
-    r.staff.map(x => `<tr><td>${x.name}</td><td>${x.email || "—"}</td>
+  el.innerHTML = `<table><tr><th>名前</th><th>メール</th><th>権限</th><th>追加日時</th><th></th></tr>` +
+    r.staff.map(x => `<tr><td>${x.name}</td><td>${x.email || "—"}</td><td>${x.role || "—"}</td>
       <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.created_at}</td>
       <td><button class="ghost staffRevokeBtn" data-id="${x.id}">失効</button></td></tr>`).join("") +
     `</table>`;
@@ -1487,6 +1561,47 @@ async function revokeStaff(id) {
   }
 }
 
+document.querySelectorAll('input[name="stTab"]').forEach(input => {
+  input.addEventListener("change", () => {
+    $("stTabLogin").style.display = input.value === "login" ? "" : "none";
+    $("stTabQuick").style.display = input.value === "quick" ? "" : "none";
+  });
+});
+
+function verifyLinkHtml(verifyPath) {
+  const url = API.replace(/\/$/, "") + verifyPath;
+  return `<code style="user-select:all;word-break:break-all">${url}</code>`;
+}
+
+$("btnRegisterStaffLogin").addEventListener("click", async () => {
+  const name = $("stlName").value.trim();
+  const email = $("stlEmail").value.trim();
+  const password = $("stlPassword").value;
+  const password2 = $("stlPassword2").value;
+  const role = $("stlRole").value;
+  const el = $("stlResult");
+  if (!name || !email || !password) {
+    el.innerHTML = `<div class="result err">担当者名・メールアドレス・パスワードは必須です</div>`;
+    return;
+  }
+  if (password !== password2) {
+    el.innerHTML = `<div class="result err">ログインPWとログインPW(確認)が一致しません</div>`;
+    return;
+  }
+  try {
+    const r = await call("/api/tenant/staff/register",
+      { method: "POST", body: JSON.stringify({ name, email, password, role }) });
+    el.innerHTML = `<div class="result ok">登録しました。メール送信基盤が未実装のため、
+      以下の認証用URLを管理者から担当者へ直接共有してください(このURLを開くと認証が
+      完了し、ログインできるようになります):<br>${verifyLinkHtml(r.verify_path)}</div>`;
+    $("stlName").value = ""; $("stlEmail").value = "";
+    $("stlPassword").value = ""; $("stlPassword2").value = "";
+    await refreshStaffPending();
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+});
+
 $("btnAddStaff").addEventListener("click", async () => {
   const name = $("stName").value.trim();
   const email = $("stEmail").value.trim();
@@ -1498,6 +1613,54 @@ $("btnAddStaff").addEventListener("click", async () => {
       <code style="user-select:all">${r.api_key}</code></div>`;
     $("stName").value = ""; $("stEmail").value = "";
     await refreshStaff();
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+});
+
+async function refreshStaffPending() {
+  if (!connected) return;
+  const r = await call("/api/tenant/staff/pending");
+  const el = $("staffPendingWrap");
+  if (!r.pending.length) { el.innerHTML = `<div class="empty">承認待ちの担当者はいません</div>`; return; }
+  el.innerHTML = `<table><tr><th>名前</th><th>メール</th><th>権限</th><th>URL有効期限</th><th></th></tr>` +
+    r.pending.map(x => `<tr><td>${x.name}</td><td>${x.email}</td><td>${x.role || "—"}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.email_verify_expires_at || "—"}</td>
+      <td><button class="ghost staffResendBtn" data-id="${x.id}">再発行</button></td></tr>`).join("") +
+    `</table><div id="staffResendResult"></div>`;
+  el.querySelectorAll(".staffResendBtn").forEach(btn => {
+    btn.addEventListener("click", () => resendStaffVerification(Number(btn.dataset.id)));
+  });
+}
+
+async function resendStaffVerification(id) {
+  const el = $("staffResendResult");
+  try {
+    const r = await call("/api/tenant/staff/resend", { method: "POST", body: JSON.stringify({ staff_id: id }) });
+    el.innerHTML = `<div class="result ok">新しい認証用URLを発行しました。管理者から担当者へ
+      直接共有してください:<br>${verifyLinkHtml(r.verify_path)}</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+$("btnLogin").addEventListener("click", async () => {
+  const email = $("loginEmail").value.trim();
+  const password = $("loginPassword").value;
+  const el = $("loginResult");
+  if (!email || !password) { el.innerHTML = `<div class="result err">メールアドレス・パスワードを入力してください</div>`; return; }
+  const base = $("apiBase").value.trim();
+  if (!base) { el.innerHTML = `<div class="result err">先にAPIサーバURLを入力してください</div>`; return; }
+  try {
+    const res = await fetch(base.replace(/\/$/, "") + "/api/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+    el.innerHTML = `<div class="result ok">ログインしました(${body.tenant_name || ""} / ${body.staff_name || ""})</div>`;
+    $("apiKey").value = body.api_key;
+    $("btnConnect").click();
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }

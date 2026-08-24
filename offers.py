@@ -24,9 +24,10 @@ offers.py — オファーとテナントの分離
                                    # 他社に販売するテナントを追加。api_keyを1回だけ表示する
 """
 import argparse
+import hashlib
 import json
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tenants (
@@ -165,7 +166,12 @@ def resolve_tenant_by_key(con, api_key):
     row = con.execute("SELECT * FROM tenants WHERE api_key=?", (api_key,)).fetchone()
     if row:
         return row
-    staff = con.execute("SELECT tenant_id FROM staff WHERE api_key=?", (api_key,)).fetchone()
+    # password_hashがNULLの担当者(add_staff()経由)は従来通り即使える。
+    # password_hashがある担当者(register_staff()経由)はemail_verified_atが
+    # 立つまでこのapi_keyでは認証を通さない(MIKOMERUの「メール認証が完了しないと
+    # ログインできない」仕様と同じ)。
+    staff = con.execute("""SELECT tenant_id FROM staff WHERE api_key=?
+        AND (password_hash IS NULL OR email_verified_at IS NOT NULL)""", (api_key,)).fetchone()
     if not staff:
         return None
     return con.execute("SELECT * FROM tenants WHERE id=?", (staff["tenant_id"],)).fetchone()
@@ -184,8 +190,11 @@ def add_staff(con, tenant_id, name, email=None):
 
 
 def list_staff(con, tenant_id):
-    rows = con.execute("""SELECT id, name, email, created_at FROM staff
-        WHERE tenant_id=? ORDER BY created_at DESC""", (tenant_id,)).fetchall()
+    """承認待ち(未認証)の担当者は含めない(MIKOMERUの「担当者一覧」も同様。
+    未認証の担当者は「承認待ち一覧」の方で確認する)。"""
+    rows = con.execute("""SELECT id, name, email, role, created_at FROM staff
+        WHERE tenant_id=? AND (password_hash IS NULL OR email_verified_at IS NOT NULL)
+        ORDER BY created_at DESC""", (tenant_id,)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -194,6 +203,113 @@ def revoke_staff(con, tenant_id, staff_id):
     cur = con.execute("DELETE FROM staff WHERE id=? AND tenant_id=?", (staff_id, tenant_id))
     con.commit()
     return cur.rowcount > 0
+
+
+# ── メールアドレス+パスワードでのログイン(MIKOMERU同等)。────────────────
+# 従来のadd_staff()(APIキーのみ即発行、認証不要)とは別の登録経路として共存させる。
+# password_hashがNULLの行(add_staff()経由)は今まで通り無条件でapi_keyが使える。
+# password_hashがある行(register_staff()経由)だけがemail_verified_atを要求される。
+_PBKDF2_ITERATIONS = 260_000
+
+
+def hash_password(password):
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                  bytes.fromhex(salt), _PBKDF2_ITERATIONS).hex()
+    return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(password, stored_hash):
+    try:
+        algo, iterations, salt, digest = stored_hash.split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        check = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                     bytes.fromhex(salt), int(iterations)).hex()
+        return secrets.compare_digest(check, digest)
+    except (ValueError, AttributeError):
+        return False
+
+
+EMAIL_VERIFY_EXPIRY_HOURS = 24  # MIKOMERUマニュアルの「担当者を登録する(2)」に合わせる
+
+
+def register_staff(con, tenant_id, name, email, password, role="一般"):
+    """MIKOMERUの「担当者登録」相当。add_staff()と違い、api_keyはこの時点では
+    まだ使えない(email_verified_atが立つまで。resolve_tenant_by_key()参照)。
+    同じメールアドレスがどのテナントにも既に登録されていれば拒否する
+    (MIKOMERUの「すでにMIKOMERUへ登録済みのメールアドレスはご登録いただけません」と同じ。
+    ログインはテナントを問わずメールアドレス1つで引くため、全テナント横断で一意にする)。"""
+    existing = con.execute("SELECT 1 FROM staff WHERE email=?", (email,)).fetchone()
+    if existing:
+        return {"error": "このメールアドレスは既に登録されています"}
+    now = datetime.now()
+    api_key = generate_api_key()
+    verify_token = secrets.token_urlsafe(24)
+    expires_at = (now + timedelta(hours=EMAIL_VERIFY_EXPIRY_HOURS)).isoformat(timespec="seconds")
+    cur = con.execute("""INSERT INTO staff
+        (tenant_id, name, email, api_key, password_hash, role,
+         email_verify_token, email_verify_expires_at, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)""",
+        (tenant_id, name, email, api_key, hash_password(password), role,
+         verify_token, expires_at, now.isoformat(timespec="seconds")))
+    con.commit()
+    return {"staff_id": cur.lastrowid, "verify_token": verify_token}
+
+
+def verify_staff_email(con, token):
+    """認証メール内のURLを踏んだ時に呼ばれる(MIKOMERUの「担当者を登録する(3)」)。
+    期限切れならFalseを返す(呼び出し側で「再発行」を促す)。"""
+    row = con.execute("""SELECT id, email_verify_expires_at FROM staff
+        WHERE email_verify_token=? AND email_verified_at IS NULL""", (token,)).fetchone()
+    if not row:
+        return False
+    if row["email_verify_expires_at"] and datetime.fromisoformat(row["email_verify_expires_at"]) < datetime.now():
+        return False
+    con.execute("""UPDATE staff SET email_verified_at=?, email_verify_token=NULL,
+        email_verify_expires_at=NULL WHERE id=?""",
+        (datetime.now().isoformat(timespec="seconds"), row["id"]))
+    con.commit()
+    return True
+
+
+def list_pending_staff(con, tenant_id):
+    """MIKOMERUの「承認待ち一覧」相当。password_hashがある(=register_staff()経由)のに
+    まだemail_verified_atが立っていない担当者だけを返す。"""
+    rows = con.execute("""SELECT id, name, email, role, email_verify_expires_at, created_at
+        FROM staff WHERE tenant_id=? AND password_hash IS NOT NULL AND email_verified_at IS NULL
+        ORDER BY created_at DESC""", (tenant_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def resend_staff_verification(con, tenant_id, staff_id):
+    """MIKOMERUの「承認待ち一覧」[再発行]ボタン相当。新しいトークンを発行し直す。"""
+    row = con.execute("""SELECT id FROM staff WHERE id=? AND tenant_id=?
+        AND password_hash IS NOT NULL AND email_verified_at IS NULL""",
+        (staff_id, tenant_id)).fetchone()
+    if not row:
+        return None
+    verify_token = secrets.token_urlsafe(24)
+    expires_at = (datetime.now() + timedelta(hours=EMAIL_VERIFY_EXPIRY_HOURS)).isoformat(timespec="seconds")
+    con.execute("UPDATE staff SET email_verify_token=?, email_verify_expires_at=? WHERE id=?",
+                (verify_token, expires_at, staff_id))
+    con.commit()
+    return verify_token
+
+
+def login_staff(con, email, password):
+    """MIKOMERUのログイン画面相当。メールアドレス+パスワードでapi_keyを引く
+    (ブラウザにセッションを持たせるのではなく、既存のBearer api_key方式と
+    互換性を保つため、ログイン成功時にそのapi_keyを返す設計にしている)。
+    戻り値: (ok, result) — okがFalseの場合resultはエラー理由の文字列。"""
+    row = con.execute("SELECT * FROM staff WHERE email=?", (email,)).fetchone()
+    if not row or not row["password_hash"] or not verify_password(password, row["password_hash"]):
+        return False, "メールアドレスまたはパスワードが正しくありません"
+    if not row["email_verified_at"]:
+        return False, "メール認証が完了していません。届いた認証メールのURLを開いてください"
+    tenant = con.execute("SELECT id, name FROM tenants WHERE id=?", (row["tenant_id"],)).fetchone()
+    return True, {"api_key": row["api_key"], "tenant_name": tenant["name"] if tenant else None,
+                  "staff_name": row["name"]}
 
 
 def listing(con):

@@ -106,10 +106,27 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            送信者情報(tenants.sender_*)へ反映。反映先は
                            senders.send_campaign()が読む列そのものなので、
                            送信ロジック側は変更不要
-  GET  /api/tenant/staff          自テナントの担当者一覧
-  POST /api/tenant/staff               {"name","email"} → 担当者追加。
-                           発行したapi_keyはこの応答でしか返さない
+  GET  /api/tenant/staff          自テナントの担当者一覧(承認待ちは含まない)
+  POST /api/tenant/staff               {"name","email"} → 担当者追加(APIキーのみ、
+                           認証不要で即使える従来方式)。発行したapi_keyは
+                           この応答でしか返さない
   POST /api/tenant/staff/revoke        {"staff_id"} → 担当者のapi_keyを失効
+  POST /api/tenant/staff/register  {"name","email","password","role"} →
+                           MIKOMERUの「担当者登録」相当(メール+パスワード)。
+                           メール認証(GET /verify/staff/<token>)が完了するまで
+                           そのapi_keyは使えない。メール送信基盤は未実装のため、
+                           認証用URLはこの応答のverify_urlにそのまま返す
+                           (送信できたていで隠さない。管理者が手動で担当者へ
+                           共有する運用になる。HANDOFF.md T21参照)
+  GET  /api/tenant/staff/pending  承認待ち(メール未認証)の担当者一覧
+  POST /api/tenant/staff/resend    {"staff_id"} → 認証用URLを再発行
+  GET  /verify/staff/<token>      (認証不要・公開) メール認証リンク。
+                           成功・失敗をHTMLページで表示する(MIKOMERUの
+                           「認証完了」画面相当)
+  POST /api/login    (認証不要・公開) {"email","password"} → ログイン。
+                           成功時、そのままAPIキー方式の認証に使えるapi_keyを
+                           返す(ブラウザにセッションを持たせる方式ではなく、
+                           既存のBearer api_key認証とそのまま互換にするため)
   GET  /api/tenant/announcements  公開中のお知らせ一覧(全テナント共通。
                            投稿はannouncements_cli.py、Web管理画面は作らない)
   GET  /api/tenant/activity-log   自テナントの操作履歴(リスト作成・送信開始を
@@ -188,6 +205,7 @@ _SCREENSHOT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/screenshot$")
 _AUTOFILL_QUEUE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/autofill-queue$")
 _SEND_LOG_NOTE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/note$")
 _SEND_LOG_MANUAL_SENT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/manual-sent$")
+_VERIFY_STAFF_PATH_RE = re.compile(r"^/verify/staff/([A-Za-z0-9_-]+)$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
@@ -940,6 +958,77 @@ def h_tenant_staff_revoke(con, tenant_id, data):
     return 200, {"ok": True}
 
 
+_STAFF_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def h_tenant_staff_register(con, tenant_id, data):
+    """MIKOMERUの「担当者登録」相当。offers.register_staff()の薄いラッパー。
+    メール送信基盤が未実装のため(HANDOFF.md T2)、認証メールの代わりに
+    verify_pathをこの応答へ直接含める(存在しないふりをして黙って失敗させない)。"""
+    name = (data.get("name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    role = (data.get("role") or "一般").strip() or "一般"
+    if not name or not email or not password:
+        return 400, {"error": "name・email・passwordは必須です"}
+    if not _STAFF_EMAIL_RE.match(email):
+        return 400, {"error": "メールアドレスの形式が正しくありません"}
+    if len(password) < 8 or len(password) > 64:
+        return 400, {"error": "パスワードは半角英数記号8〜64文字で指定してください"}
+    res = offers.register_staff(con, tenant_id, name, email, password, role=role)
+    if "error" in res:
+        return 400, res
+    return 200, {"ok": True, "staff_id": res["staff_id"],
+                 "verify_path": f"/verify/staff/{res['verify_token']}"}
+
+
+def h_tenant_staff_pending(con, tenant_id):
+    return 200, {"pending": offers.list_pending_staff(con, tenant_id)}
+
+
+def h_tenant_staff_resend(con, tenant_id, data):
+    staff_id = data.get("staff_id")
+    if not isinstance(staff_id, int):
+        return 400, {"error": "staff_idは必須です"}
+    token = offers.resend_staff_verification(con, tenant_id, staff_id)
+    if not token:
+        return 404, {"error": "承認待ちの担当者が見つかりません"}
+    return 200, {"ok": True, "verify_path": f"/verify/staff/{token}"}
+
+
+def h_verify_staff_email(con, token):
+    """GET /verify/staff/<token>(公開)。MIKOMERUの「認証完了」画面相当のHTMLを返す。"""
+    ok = offers.verify_staff_email(con, token)
+    title = "認証完了" if ok else "認証エラー"
+    message = ("メールによる本登録認証が完了しました。管理者からログイン用の"
+               "メールアドレス・パスワードを受け取り、ログインしてください。") if ok else (
+               "このURLは無効か、24時間の有効期限が切れています。管理者に"
+               "「承認待ち一覧」からの再発行を依頼してください。")
+    return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<title>AshiBase — {title}</title>
+<style>body{{font-family:sans-serif;background:#EFF1F2;display:flex;align-items:center;
+  justify-content:center;height:100vh;margin:0}}
+.card{{background:#fff;border-radius:8px;padding:32px 40px;max-width:420px;text-align:center;
+  box-shadow:0 2px 12px rgba(0,0,0,.08)}}
+h1{{font-size:18px;color:{"#1E7A4D" if ok else "#B4441F"}}}
+p{{font-size:13px;color:#333;line-height:1.7}}</style></head>
+<body><div class="card"><h1>{"✓" if ok else "×"} {title}</h1><p>{message}</p></div></body></html>"""
+
+
+def h_login(con, data):
+    """POST /api/login(公開)。MIKOMERUのメールアドレス+パスワードでの
+    ログイン画面相当。成功時はそのままapi_keyを返し、フロントは既存の
+    接続設定(#apiKey)と同じ経路で以後の全APIを叩く(セッション/Cookieは持たない)。"""
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    if not email or not password:
+        return 400, {"error": "email・passwordは必須です"}
+    ok, res = offers.login_staff(con, email, password)
+    if not ok:
+        return 401, {"error": res}
+    return 200, {"ok": True, **res}
+
+
 def h_tenant_announcements_list(con):
     return 200, {"announcements": db.list_announcements(con, published_only=True)}
 
@@ -1323,7 +1412,8 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
-        if path in ("/api/tenant/staff", "/api/tenant/staff/revoke"):
+        if path in ("/api/tenant/staff", "/api/tenant/staff/revoke",
+                    "/api/tenant/staff/register", "/api/tenant/staff/resend"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -1331,8 +1421,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(401, {"error": "unauthorized"})
                 if path == "/api/tenant/staff":
                     st, res = h_tenant_staff_add(con, tenant["id"], data)
-                else:
+                elif path == "/api/tenant/staff/revoke":
                     st, res = h_tenant_staff_revoke(con, tenant["id"], data)
+                elif path == "/api/tenant/staff/register":
+                    st, res = h_tenant_staff_register(con, tenant["id"], data)
+                else:
+                    st, res = h_tenant_staff_resend(con, tenant["id"], data)
                 return self._json(st, res)
             except Exception as e:  # noqa: BLE001
                 return self._json(500, {"error": str(e)[:200]})
@@ -1349,6 +1443,8 @@ class Handler(BaseHTTPRequestHandler):
                 st, res = h_paid(con, data, self.headers.get("X-Signature"), raw)
             elif path == "/api/optout":
                 st, res = h_optout(con, data)
+            elif path == "/api/login":
+                st, res = h_login(con, data)
             else:
                 st, res = 404, {"error": "not found"}
         except Exception as e:  # noqa: BLE001
@@ -1438,6 +1534,7 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/templates"
                 or u.path == "/api/tenant/sender-templates"
                 or u.path == "/api/tenant/staff"
+                or u.path == "/api/tenant/staff/pending"
                 or u.path == "/api/tenant/announcements"
                 or u.path == "/api/tenant/activity-log"
                 or u.path == "/api/tenant/kill-switch"
@@ -1465,6 +1562,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_sender_templates_list(con, tenant["id"])
                 elif u.path == "/api/tenant/staff":
                     st, res = h_tenant_staff_list(con, tenant["id"])
+                elif u.path == "/api/tenant/staff/pending":
+                    st, res = h_tenant_staff_pending(con, tenant["id"])
                 elif u.path == "/api/tenant/announcements":
                     st, res = h_tenant_announcements_list(con)
                 elif u.path == "/api/tenant/activity-log":
@@ -1512,6 +1611,14 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/optout":
                 st, res = h_optout(con, {k: v[0] for k, v in qs.items()})
                 return self._json(st, res)
+            verify_staff_match = _VERIFY_STAFF_PATH_RE.match(u.path)
+            if verify_staff_match:
+                body = h_verify_staff_email(con, verify_staff_match.group(1)).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                return self.wfile.write(body)
             self._json(404, {"error": "not found"})
         finally:
             con.close()
@@ -2541,6 +2648,95 @@ def self_test(port=8899):
           notify_calls == [tenant_a_sender_email])
     finally:
         _senders_mod.MailSender._deliver = orig_deliver
+
+    print("\n── 担当者登録・メール認証・ログイン(T21, MIKOMERUの「担当者を登録する」相当) ──")
+    st, r = post_auth("/api/tenant/staff/register",
+                      {"email": "t21@test-a.example.co.jp", "password": "pass1234"}, token=key_a)
+    t("nameが無いと400", st == 400)
+    st, r = post_auth("/api/tenant/staff/register",
+                      {"name": "T21太郎", "email": "not-an-email", "password": "pass1234"}, token=key_a)
+    t("メール形式が不正だと400", st == 400)
+    st, r = post_auth("/api/tenant/staff/register",
+                      {"name": "T21太郎", "email": "t21@test-a.example.co.jp", "password": "short"},
+                      token=key_a)
+    t("パスワードが短いと400", st == 400)
+
+    st, r = post_auth("/api/tenant/staff/register",
+                      {"name": "T21太郎", "email": "t21@test-a.example.co.jp",
+                       "password": "pass1234", "role": "管理者"}, token=key_a)
+    t("POST /api/tenant/staff/register で登録でき、verify_pathが返る",
+      st == 200 and bool(r.get("staff_id")) and r.get("verify_path", "").startswith("/verify/staff/"))
+    t21_staff_id = r.get("staff_id")
+    t21_verify_path = r.get("verify_path")
+
+    st, r = post_auth("/api/tenant/staff/register",
+                      {"name": "別名", "email": "t21@test-a.example.co.jp", "password": "pass1234"},
+                      token=key_a)
+    t("同じメールアドレスで再登録するとエラー", st == 400 and "既に登録" in r.get("error", ""))
+
+    st, r = get_auth("/api/tenant/staff/pending", token=key_a)
+    t("承認待ち一覧に出てくる",
+      st == 200 and any(s["id"] == t21_staff_id and s["name"] == "T21太郎" for s in r.get("pending", [])))
+    st, r = get_auth("/api/tenant/staff/pending", token=key_b)
+    t("承認待ち一覧もテナント分離される",
+      st == 200 and all(s["id"] != t21_staff_id for s in r.get("pending", [])))
+
+    st, r = get_auth("/api/tenant/staff", token=key_a)
+    t("未認証の担当者は通常の一覧には出てこない",
+      st == 200 and all(s["id"] != t21_staff_id for s in r.get("staff", [])))
+
+    st, r = post("/api/login", {"email": "t21@test-a.example.co.jp", "password": "pass1234"})
+    t("メール未認証だとログインできない(401)", st == 401 and "メール認証" in r.get("error", ""))
+
+    st, r = post("/api/login", {"email": "t21@test-a.example.co.jp", "password": "wrong-password"})
+    t("パスワードが違うとログインできない(401)", st == 401)
+
+    st, body = get(t21_verify_path)
+    t("GET /verify/staff/<token> で認証完了ページが返る",
+      st == 200 and "認証完了".encode() in body)
+
+    st, r = post("/api/login", {"email": "t21@test-a.example.co.jp", "password": "pass1234"})
+    t("メール認証後はログインできる",
+      st == 200 and r.get("api_key", "").startswith("tk_") and r.get("tenant_name")
+      and r.get("staff_name") == "T21太郎")
+    t21_login_key = r.get("api_key")
+
+    st, r = get_auth("/api/tenant/lists", token=t21_login_key)
+    t("ログインで得たapi_keyでも通常のテナントAPIが使える", st == 200)
+
+    st, r = get_auth("/api/tenant/staff", token=key_a)
+    t("メール認証後は通常の担当者一覧に出てくる",
+      st == 200 and any(s["id"] == t21_staff_id and s.get("role") == "管理者" for s in r.get("staff", [])))
+    st, r = get_auth("/api/tenant/staff/pending", token=key_a)
+    t("認証後は承認待ち一覧から消える", st == 200 and all(s["id"] != t21_staff_id for s in r.get("pending", [])))
+
+    st, body = get(t21_verify_path)
+    t("同じトークンを再度開くと認証エラーになる(使い捨て)",
+      st == 200 and "認証エラー".encode() in body)
+
+    st, r = post_auth("/api/tenant/staff/register",
+                      {"name": "T21花子", "email": "t21b@test-a.example.co.jp", "password": "pass1234"},
+                      token=key_a)
+    t21b_staff_id = r.get("staff_id")
+    st, r = post_auth("/api/tenant/staff/resend", {"staff_id": t21b_staff_id}, token=key_b)
+    t("他テナントは再発行できない(404)", st == 404)
+    st, r = post_auth("/api/tenant/staff/resend", {"staff_id": t21b_staff_id}, token=key_a)
+    t("POST /api/tenant/staff/resend で新しいverify_pathが返る",
+      st == 200 and r.get("verify_path", "").startswith("/verify/staff/"))
+    st, body = get(r.get("verify_path"))
+    t("再発行後のリンクでも認証できる", st == 200 and "認証完了".encode() in body)
+    st, r = post_auth("/api/tenant/staff/resend", {"staff_id": t21b_staff_id}, token=key_a)
+    t("認証済みの担当者を再発行しようとすると404", st == 404)
+
+    st, r = post_auth("/api/tenant/staff",
+                      {"name": "従来方式担当者", "email": "legacy@test-a.example.co.jp"}, token=key_a)
+    t("従来方式(パスワード無し即時追加)は引き続き動く(回帰確認)",
+      st == 200 and r.get("api_key", "").startswith("tk_"))
+    st, r2 = get_auth("/api/tenant/lists", token=r.get("api_key"))
+    t("従来方式で追加したapi_keyは認証不要で即使える(後方互換)", st == 200)
+
+    con.execute("DELETE FROM staff WHERE tenant_id IN (?,?)", (tid_a, tid_b))
+    con.commit()
 
     print("\n── お知らせ ──")
     ann_pub_id = db.add_announcement(con, "テスト告知(公開)", "本文", published=True)

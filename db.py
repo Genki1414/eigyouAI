@@ -423,6 +423,18 @@ def migrate(con):
         # ソフト削除にしているのは、誤削除からの復元をMIKOMERU同様に可能にするため。
         ("target_lists", "updated_at", "TEXT"),
         ("target_lists", "deleted_at", "TEXT"),
+        # MIKOMERU同様のメールアドレス+パスワードでのログイン・メール認証を担当者に
+        # 追加するための列(T21)。password_hashがNULLの行は旧来通りAPIキーのみで
+        # 発行される担当者(認証不要で即使える。既存の運用を壊さないための後方互換)。
+        # password_hashが設定されている担当者だけが、email_verified_atが立つまで
+        # そのapi_keyが使えない(resolve_tenant_by_key()参照)。
+        ("staff", "password_hash", "TEXT"),
+        ("staff", "role", "TEXT DEFAULT '一般'"),
+        ("staff", "email_verify_token", "TEXT"),
+        ("staff", "email_verify_expires_at", "TEXT"),
+        ("staff", "email_verified_at", "TEXT"),
+        ("staff", "password_reset_token", "TEXT"),
+        ("staff", "password_reset_expires_at", "TEXT"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:

@@ -30,6 +30,11 @@ body{background:var(--concrete);color:var(--ink);font-family:'IBM Plex Sans JP',
   border-left:3px solid transparent;user-select:none}
 .navitem:hover{background:rgba(255,255,255,.06);color:#fff}
 .navitem.active{background:rgba(255,255,255,.1);color:#fff;border-left-color:var(--safety);font-weight:700}
+/* MIKOMERUの「送信文章テンプレート ▾ > テンプレート一覧/テンプレート登録」のような
+   親見出し+子ページ2つの構成を、既存のフラットなnavitemリストの中で表現する
+   (アコーディオンの開閉は実装しない。子は常に表示、親はクリック不可の見出しとして扱う) */
+.navsub-label{font-size:12px;color:var(--sidebar-fg-dim);padding:8px 16px 2px;margin-top:2px}
+.navitem.navsub{padding-left:28px;font-size:12px}
 .sidebar .foot{padding:12px 16px;border-top:1px solid rgba(255,255,255,.1);font-size:11px;color:var(--sidebar-fg-dim)}
 
 /* メイン */
@@ -153,16 +158,24 @@ tr.clickable:hover{background:var(--blue-soft)}
       <div class="navgroup-label">フォーム送信</div>
       <div class="navitem" data-page="autosend">自動送信</div>
       <div class="navitem" data-page="sendlog">自動送信ログ</div>
-      <div class="navitem" data-page="tmpl-body">送信文章テンプレート</div>
-      <div class="navitem" data-page="tmpl-sender">送信元テンプレート</div>
-      <div class="navitem" data-page="exclude">送信除外設定</div>
+      <div class="navsub-label">送信文章テンプレート</div>
+      <div class="navitem navsub" data-page="tmpl-body-list">テンプレート一覧</div>
+      <div class="navitem navsub" data-page="tmpl-body-add">テンプレート登録</div>
+      <div class="navsub-label">送信元テンプレート</div>
+      <div class="navitem navsub" data-page="tmpl-sender-list">テンプレート一覧</div>
+      <div class="navitem navsub" data-page="tmpl-sender-add">テンプレート登録</div>
+      <div class="navsub-label">送信除外設定</div>
+      <div class="navitem navsub" data-page="exclude-add">登録</div>
+      <div class="navitem navsub" data-page="exclude-list">一覧</div>
       <div class="navgroup-label">会社情報</div>
       <div class="navitem" data-page="filter">リスト取得</div>
       <div class="navitem" data-page="csv">CSV検索</div>
       <div class="navitem" data-page="searchlog">CSV検索ログ</div>
       <div class="navitem" data-page="lists">保存済みリスト</div>
       <div class="navgroup-label">その他</div>
-      <div class="navitem" data-page="staff">担当者管理</div>
+      <div class="navsub-label">担当者管理</div>
+      <div class="navitem navsub" data-page="staff-list">担当者一覧</div>
+      <div class="navitem navsub" data-page="staff-add">担当者登録</div>
       <div class="navitem" data-page="news">お知らせ一覧</div>
       <div class="navitem" data-page="otherlog">その他ログ</div>
       <div class="navitem" data-page="manual">マニュアルDL</div>
@@ -272,8 +285,14 @@ tr.clickable:hover{background:var(--blue-soft)}
         <div id="sendLogWrap" style="margin-top:12px"><div class="empty">接続すると表示されます</div></div>
       </section>
 
-      <section class="page" data-page="tmpl-body">
-        <h2>送信文章テンプレート <span>MESSAGE TEMPLATES</span></h2>
+      <section class="page" data-page="tmpl-body-list">
+        <h2>送信文章テンプレート | テンプレート一覧 <span>MESSAGE TEMPLATES</span></h2>
+        <div class="btnrow"><button class="ghost" id="btnGoTmplBodyAdd">＋ テンプレート登録</button></div>
+        <div id="tmplListWrap" style="margin-top:12px"><div class="empty">接続すると表示されます</div></div>
+      </section>
+
+      <section class="page" data-page="tmpl-body-add">
+        <h2>送信文章テンプレート | テンプレート登録 <span>MESSAGE TEMPLATES</span></h2>
         <div class="card">
           <p class="hint">よく使う件名・本文をテンプレートとして保存できます。保存済みリストの
             送信画面で選択すると、件名・本文が自動で入力されます。</p>
@@ -294,15 +313,19 @@ tr.clickable:hover{background:var(--blue-soft)}
               と入力すると送信先の会社名に、<code>##FROM_FAMILY_NAME##</code> と入力すると
               上で入力された送信元の姓に置き換えて送信されます。</p>
           </div>
-          <div class="btnrow"><button id="btnSaveTemplate">保存</button></div>
+          <div class="btnrow"><button id="btnSaveTemplate">新規登録</button></div>
           <div id="tmplResult"></div>
         </div>
-        <h2 style="margin-top:20px">保存済みテンプレート <span>SAVED</span></h2>
-        <div id="tmplListWrap"><div class="empty">接続すると表示されます</div></div>
       </section>
 
-      <section class="page" data-page="tmpl-sender">
-        <h2>送信元テンプレート <span>SENDER TEMPLATES</span></h2>
+      <section class="page" data-page="tmpl-sender-list">
+        <h2>送信元テンプレート | テンプレート一覧 <span>SENDER TEMPLATES</span></h2>
+        <div class="btnrow"><button class="ghost" id="btnGoTmplSenderAdd">＋ テンプレート登録</button></div>
+        <div id="sTmplListWrap" style="margin-top:12px"><div class="empty">接続すると表示されます</div></div>
+      </section>
+
+      <section class="page" data-page="tmpl-sender-add">
+        <h2>送信元テンプレート | テンプレート登録 <span>SENDER TEMPLATES</span></h2>
         <div class="card">
           <p class="hint">送信者名・返信先メールアドレス等を複数パターン登録し、
             使い分けられます。「有効にする」を押したテンプレートが、以後の
@@ -388,15 +411,13 @@ tr.clickable:hover{background:var(--blue-soft)}
               <input type="text" id="sPhone" placeholder="例: 03-1234-5678">
             </div>
           </div>
-          <div class="btnrow"><button id="btnSaveSenderTemplate">保存</button></div>
+          <div class="btnrow"><button id="btnSaveSenderTemplate">新規登録</button></div>
           <div id="sTmplResult"></div>
         </div>
-        <h2 style="margin-top:20px">登録済み送信元 <span>SAVED</span></h2>
-        <div id="sTmplListWrap"><div class="empty">接続すると表示されます</div></div>
       </section>
 
-      <section class="page" data-page="exclude">
-        <h2>送信除外設定 <span>EXCLUSION LIST</span></h2>
+      <section class="page" data-page="exclude-add">
+        <h2>送信除外設定 | 登録 <span>EXCLUSION LIST</span></h2>
         <div class="card">
           <p class="hint">競合他社など、御社だけが送信を避けたい企業を個別に除外できます
             (他のお客様の送信には影響しません)。配信停止の申し出があった企業は
@@ -435,12 +456,21 @@ tr.clickable:hover{background:var(--blue-soft)}
             <div id="exCsvResult"></div>
           </div>
         </div>
-        <h2 style="margin-top:20px">除外中の企業 <span>EXCLUDED</span></h2>
+      </section>
+
+      <section class="page" data-page="exclude-list">
+        <h2>送信除外設定 | 一覧 <span>EXCLUDED</span></h2>
         <div id="exListWrap"><div class="empty">接続すると表示されます</div></div>
       </section>
 
-      <section class="page" data-page="staff">
-        <h2>担当者管理 <span>STAFF</span></h2>
+      <section class="page" data-page="staff-list">
+        <h2>担当者管理 | 担当者一覧 <span>STAFF LIST</span></h2>
+        <div class="btnrow"><button class="ghost" id="btnGoStaffAdd">＋ 担当者登録</button></div>
+        <div id="staffListWrap" style="margin-top:12px"><div class="empty">接続すると表示されます</div></div>
+      </section>
+
+      <section class="page" data-page="staff-add">
+        <h2>担当者管理 | 担当者登録 <span>STAFF</span></h2>
         <div class="card">
           <p class="hint">担当者ごとに個別のAPIキーを発行できます。退職・異動時は
             そのキーだけを失効させれば、他の担当者やテナント全体には影響しません。
@@ -456,11 +486,9 @@ tr.clickable:hover{background:var(--blue-soft)}
               <input type="text" id="stEmail" placeholder="例: yamada@example.co.jp">
             </div>
           </div>
-          <div class="btnrow"><button id="btnAddStaff">追加</button></div>
+          <div class="btnrow"><button id="btnAddStaff">新規登録</button></div>
           <div id="staffResult"></div>
         </div>
-        <h2 style="margin-top:20px">担当者一覧 <span>STAFF LIST</span></h2>
-        <div id="staffListWrap"><div class="empty">接続すると表示されます</div></div>
       </section>
 
       <section class="page" data-page="news">
@@ -775,9 +803,14 @@ tr.clickable:hover{background:var(--blue-soft)}
 // ── ナビゲーション(単一ページ内の切替。リロードなし) ──
 const PAGE_TITLES = {
   home: "ホーム", autosend: "自動送信", sendlog: "自動送信ログ",
-  "tmpl-body": "送信文章テンプレート", "tmpl-sender": "送信元テンプレート", exclude: "送信除外設定",
+  "tmpl-body-list": "送信文章テンプレート | テンプレート一覧",
+  "tmpl-body-add": "送信文章テンプレート | テンプレート登録",
+  "tmpl-sender-list": "送信元テンプレート | テンプレート一覧",
+  "tmpl-sender-add": "送信元テンプレート | テンプレート登録",
+  "exclude-add": "送信除外設定 | 登録", "exclude-list": "送信除外設定 | 一覧",
   filter: "リスト取得", csv: "CSV検索", searchlog: "CSV検索ログ", lists: "保存済みリスト",
-  staff: "担当者管理", news: "お知らせ一覧", otherlog: "その他ログ", manual: "マニュアルDL",
+  "staff-list": "担当者管理 | 担当者一覧", "staff-add": "担当者管理 | 担当者登録",
+  news: "お知らせ一覧", otherlog: "その他ログ", manual: "マニュアルDL",
   conn: "接続設定",
 };
 function goPage(pageId) {
@@ -789,13 +822,18 @@ function goPage(pageId) {
   if (pageId === "autosend") populateAutosendListSelect();
   if (pageId === "sendlog") refreshSendLog();
   if (pageId === "searchlog") { $("searchLogDetailWrap").innerHTML = ""; refreshSearchLog(); }
-  if (pageId === "exclude") refreshExclusions();
-  if (pageId === "tmpl-body") refreshTemplates();
-  if (pageId === "tmpl-sender") refreshSenderTemplates();
-  if (pageId === "staff") refreshStaff();
+  if (pageId === "exclude-list") refreshExclusions();
+  if (pageId === "tmpl-body-list") refreshTemplates();
+  if (pageId === "tmpl-sender-list") refreshSenderTemplates();
+  if (pageId === "staff-list") refreshStaff();
   if (pageId === "news") refreshAnnouncements();
   if (pageId === "otherlog") refreshOtherLog();
 }
+["btnGoTmplBodyAdd", "btnGoTmplSenderAdd", "btnGoStaffAdd"].forEach(id => {
+  const target = { btnGoTmplBodyAdd: "tmpl-body-add", btnGoTmplSenderAdd: "tmpl-sender-add",
+                    btnGoStaffAdd: "staff-add" }[id];
+  document.getElementById(id).addEventListener("click", () => goPage(target));
+});
 document.querySelectorAll(".navitem").forEach(item => {
   if (item.id === "navLogout") return; // ログアウトは専用ハンドラ(下)で扱う
   item.addEventListener("click", () => goPage(item.dataset.page));

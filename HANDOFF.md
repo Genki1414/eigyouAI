@@ -1756,7 +1756,9 @@ T27で①会社情報→②送信準備→③自動送信の順に並べたが�
   JSエラーなし。バックエンド変更が無いため`api.py test`等の回帰は対象外
   (`git diff --stat`で`list_builder.html`のみの変更であることを確認)。
 
-### T29. フォーム送信ペーシングを「全テナント合算の単一プール」から「テナント別の公平な取り分」へ再設計(2026-08-25)
+### T30. フォーム送信ペーシングを「全テナント合算の単一プール」から「テナント別の公平な取り分」へ再設計(2026-08-25)
+
+(※採番の都合上T29が重複している。直前の配色変更と本セクションは無関係の別作業)
 
 ユーザーから「100社が同時に使ったらどうなるか」「MIKOMERUは最低ランクでも
 月4,000通送れる」との相談を受け、規模拡大に向けた技術課題の洗い出しを実施
@@ -1806,6 +1808,63 @@ T27で①会社情報→②送信準備→③自動送信の順に並べたが�
 あるが未接続)→③送信処理の並列化(現状は1件ずつ逐次処理。100社×月4,000通の
 基準を1日あたりの処理時間内に収めるには並列ワーカーが必要)→④送信元IPの
 分散(プロキシ)→⑤企業データ母数の拡大、の順で対応予定。
+
+### T31. docker-compose.yml のcaddyサービスをprofiles化(2026-08-25)
+
+ユーザーがサーバーで`docker compose up -d --build`を実行したところ、
+`failed to bind host port 0.0.0.0:80/tcp: address already in use`で
+`eigyouai-caddy`コンテナの起動に失敗した。原因はHANDOFF.md T12以降で
+本番のTLS終端をサーバー既存のnginxへ移行済みにも関わらず、`deploy/
+docker-compose.yml`の`caddy`サービスがprofiles指定無しのまま残っており、
+`docker compose up -d`のたびに(使われていないのに)起動を試みてポート80番で
+既存nginxと衝突していたため。以前は`docker compose stop caddy`を都度
+手動で叩く運用でしのいでいたが、当然ながら忘れると今回のように失敗する。
+
+- `deploy/docker-compose.yml`: `caddy`サービスに`profiles: ["caddy"]`を追加。
+  `docker compose up -d`だけでは起動しなくなる(Caddy運用に戻す場合のみ
+  `docker compose --profile caddy up -d`で明示的に起動する)。YAML構文は
+  `python3 -c "import yaml; yaml.safe_load(...)"`で確認済み(サンドボックスに
+  dockerが無いため`docker compose config`そのものでは検証できていない。
+  次回デプロイ時に実機で最終確認すること)。
+
+### T32. SendGridによるメール送信を実装(2026-08-25)
+
+ユーザーから、デプロイ自動化・パスワードリセット・監視アラート・バックアップ・
+テンプレート編集の5点の要望。このうちパスワードリセットと監視アラートは
+実際にメールを送れる基盤が無いと成立しないため、共通の土台としてまず
+`MailSender._deliver()`(HANDOFF.md T2として長らく`NotImplementedError`の
+ままだった箇所)を実装した。メール送信サービスはユーザーの選択で
+SendGrid(`requirements.txt`に`sendgrid>=6.11`が既に用意されていた)。
+
+- `senders.py`: `MailSender._deliver()`を実装。`SENDGRID_API_KEY`未設定なら
+  従来通り`NotImplementedError`(呼び出し元の`_notify_completion()`等が
+  ログにだけ残して送信処理自体は止めない、という既存の緩衝設計をそのまま
+  活かす)。設定されていれば`sendgrid`パッケージで実送信し、
+  `SendResult.provider_id`にSendGridのMessage-Idを入れる。401/403等の
+  失敗は`python_http_client.exceptions.HTTPError`(`status_code`属性を持つ)
+  としてそのまま送出させ、`resilience.is_retryable()`の既存のステータス
+  コード判定にそのまま乗せた(429/5xxのみ自動再試行、401/403/400は
+  再試行しない)。401/403を`R.Fatal`扱いにして`permanent=True`にはしていない
+  ——自社のAPIキー設定ミスと、宛先企業が本当に配信不能なこと(bounce等)は
+  別物であり、前者を理由に後者の配信停止リストへ誤って入れてしまう事故を
+  防ぐため。
+- この変更だけで`target_lists._notify_completion()`(送信完了通知メール、
+  T22より前から呼び出し配線は完成していたがSendGrid未実装で機能していな
+  かった)が追加のコード変更なしで動き出す。
+- テスト: `senders.py test`に「メール送信(SendGrid実装)」セクションを追加
+  (キー未設定でNotImplementedError/送信成功でMessage-Idがprovider_idになる/
+  401はis_retryable()=False/401はpermanent=Falseで失敗/503はis_retryable()=True、
+  計5項目)。`sendgrid.SendGridAPIClient.send`をモンキーパッチしてSendGrid側の
+  実ネットワーク呼び出しは一切発生させていない。全体回帰確認
+  (senders.py test 47/47、api.py test 285/285、storage.py test 5/5、
+  test_concurrency.py全項目パス)。
+
+**未着手(次のステップ)**: 担当者登録のメール認証(現状は`verify_path`を
+API応答にそのまま返すだけで実際にはメールしていない。HANDOFF.md T21参照)を
+実際にメールで送るよう切り替え→パスワードリセット機能の新規実装→
+監視・アラート(メール通知)→バックアップ構築→デプロイ自動化(GitHub Actions)
+→テンプレート類の編集、の順で対応予定(ユーザーとはメール送信=SendGrid・
+アラート通知先=メールのみ・デプロイ自動化=GitHub Actionsで合意済み)。
 
 ---
 

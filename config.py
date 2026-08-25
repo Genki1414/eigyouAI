@@ -116,9 +116,14 @@ def estimate_ai_cost_yen(model, tokens_input, tokens_output):
     return tokens_input * price["input"] + tokens_output * price["output"]
 
 
-# ── バックアップ(backup.py。T36) ─────────────
+# ── バックアップ(backup.py。T36/T37) ──────────
 BACKUP_DIR = OUT_DIR / "backups"
 BACKUP_RETENTION_DAYS = 14   # これより古いバックアップファイルは自動削除する
 # monitor.pyがこの時間を超えてバックアップが成功していないことを検知したらアラートする
 # (毎日1回の実行前提で、1回分の遅延は許容しつつ2日連続の失敗は見逃さない設定)
 BACKUP_STALE_HOURS = 30
+# オフサイト複製(BACKUP_OFFSITE_TARGET設定時のみ有効)についても同様の考え方。
+# ローカルより長めに取っているのは、rsync先が一時的に落ちていても2回失敗する
+# までは静観したいため(ローカルのバックアップ自体は既に安全に取れているので、
+# オフサイト側はローカルほど緊急性が高くない)。
+BACKUP_OFFSITE_STALE_HOURS = 54

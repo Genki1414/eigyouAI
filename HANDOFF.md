@@ -2044,8 +2044,52 @@ Hetznerサーバー本体のディスク上のみで、ディスク自体の障�
 Storage Box、S3互換オブジェクトストレージ等、複数の選択肢があり、
 いずれもユーザー側の契約・認証情報が必要なため、次回の対話で確認する。
 
-**次のステップ**: (オフサイト保管の方針確認)→デプロイ自動化
-(GitHub Actions)→テンプレート類の編集。
+---
+
+### T37. バックアップのオフサイト複製(rsync/Hetzner Storage Box)を実装(2026-08-25)
+
+T36の「未対応」だったオフサイト保管について、ユーザーに「一番安全で一番
+費用がかからない方法」を確認された。同一Hetznerアカウント内で完結し
+(新規ベンダー契約不要)、最安プランでも月€3.81〜/1TBとDBサイズ
+(現状45MB程度)に対して十分安く、SSH/rsyncにネイティブ対応していて
+S3互換API等の追加実装が不要な**Hetzner Storage Box**を推奨し、合意を得て実装。
+
+- `backup.py`: `sync_offsite(path)`を追加。`BACKUP_OFFSITE_TARGET`
+  (rsyncの宛先。例: `u123456@u123456.your-storagebox.de:backups/`)が
+  未設定なら`(None, None)`を返し何もしない(SendGrid等と同じ「未設定でも
+  運用を止めない」方針)。`run_backup()`はローカルバックアップ成功直後に
+  これを呼び、オフサイト複製が失敗してもローカルバックアップ自体の成否とは
+  分離して扱う(ローカルは既に安全に取れているため、run_backup()全体は
+  成功のまま返す。オフサイト側の失敗はメッセージと専用アラートで別途拾う)。
+  マニフェスト(`last_success.json`)に`offsite_configured`/`offsite_last_ok`/
+  `offsite_at`を追加。`offsite_at`は「オフサイト複製が最後に成功した時刻」を
+  保持し続ける設計(直近の実行が失敗しても前回までの成功実績を上書きで
+  消さない。`_write_manifest()`が既存マニフェストを読んでから更新する)。
+  `last_offsite_success()`を新設し、monitor.pyから
+  `(configured: bool, at: datetime|None)`を引けるようにした。
+- `monitor.py`: `collect_alerts()`に`backup_offsite_stale`チェックを追加
+  (warning。ローカルのbackup_staleとは独立に判定する)。未設定なら対象外
+  (「まだ導入していないだけ」を異常として通知しない)。設定されているのに
+  一度も成功していない、または`BACKUP_OFFSITE_STALE_HOURS=54`時間
+  (config.py。ローカルより長めに取り、rsync先の一時的な不調では騒がない
+  設定)を超えて成功していない場合にアラート。
+- `config.py`: `BACKUP_OFFSITE_STALE_HOURS`を追加。
+- `.env.example`: `BACKUP_OFFSITE_TARGET`/`BACKUP_OFFSITE_SSH_PORT`を追加
+  (併せてOPS_ALERT_EMAILブロックの位置も送信系セクションの外へ整理)。
+  Hetzner Storage Boxの契約・SSH鍵登録手順は`backup.py`冒頭のコメントに記載。
+- テスト: `backup.py test`に5項目追加(未設定時の`last_offsite_success()`、
+  `sync_offsite`をモンキーパッチしての成功時/失敗時の挙動、失敗時に
+  ローカルは成功扱いのまま・オフサイト成功時刻は上書き消去されないこと)。
+  `monitor.py test`に4項目追加(未設定/未成功/直近成功/期限超過の4パターン)。
+  全体回帰確認(api.py test 297/297、test_pipeline.py 44/48=既知の4件のみ、
+  storage.py test 5/5、senders.py test全項目パス、backup.py test 18/18、
+  monitor.py test 28/28)。
+
+`BACKUP_OFFSITE_TARGET`と対応するSSH鍵は未設定(Hetzner Storage Boxの
+契約自体はユーザー側の操作が必要)。設定さえすれば次回の`backup.py run`
+(毎日1時のcron)から自動的に複製が始まる。
+
+**次のステップ**: デプロイ自動化(GitHub Actions)→テンプレート類の編集。
 
 ---
 

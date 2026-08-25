@@ -105,6 +105,22 @@ def collect_alerts(con):
                        f"(最終成功: {hours_ago:.0f}時間前)",
                        f"最後の成功: {last_path}\ncron.logでbackup.py runの失敗理由を確認してください。"))
 
+    offsite_configured, offsite_at = _backup.last_offsite_success()
+    if offsite_configured:
+        if offsite_at is None:
+            alerts.append(("backup_offsite_stale", "warning",
+                           "オフサイト複製(BACKUP_OFFSITE_TARGET)が設定されていますが、"
+                           "一度も成功していません",
+                           "cron.logでbackup.py runのrsyncエラーを確認してください"
+                           "(ローカルのバックアップ自体は別途成功しています)。"))
+        elif datetime.now() - offsite_at > timedelta(hours=_config.BACKUP_OFFSITE_STALE_HOURS):
+            hours_ago = (datetime.now() - offsite_at).total_seconds() / 3600
+            alerts.append(("backup_offsite_stale", "warning",
+                           f"直近{_config.BACKUP_OFFSITE_STALE_HOURS}時間以内にオフサイト複製が"
+                           f"成功していません(最終成功: {hours_ago:.0f}時間前)",
+                           "cron.logでbackup.py runのrsyncエラーを確認してください"
+                           "(ローカルのバックアップ自体は別途成功しています)。"))
+
     return alerts
 
 
@@ -320,6 +336,34 @@ def test():
         b_alert = next((a for a in collect_alerts(con) if a[0] == "backup_stale"), None)
         t(f"最終成功が{_config.BACKUP_STALE_HOURS}時間より前ならcriticalアラートが出る",
           b_alert is not None and b_alert[1] == "critical")
+
+        print("── collect_alerts(): オフサイト複製 ──")
+        (_config.BACKUP_DIR / "last_success.json").write_text(
+            f'{{"at": "{now.isoformat(timespec="seconds")}", "path": "dummy", "size_bytes": 1,'
+            f'"offsite_configured": false}}')
+        t("BACKUP_OFFSITE_TARGET未設定ならbackup_offsite_staleは出ない",
+          "backup_offsite_stale" not in keys(collect_alerts(con)))
+
+        (_config.BACKUP_DIR / "last_success.json").write_text(
+            f'{{"at": "{now.isoformat(timespec="seconds")}", "path": "dummy", "size_bytes": 1,'
+            f'"offsite_configured": true, "offsite_at": null}}')
+        o_alert = next((a for a in collect_alerts(con) if a[0] == "backup_offsite_stale"), None)
+        t("設定はあるのに一度も成功していなければwarningアラートが出る",
+          o_alert is not None and o_alert[1] == "warning")
+
+        (_config.BACKUP_DIR / "last_success.json").write_text(
+            f'{{"at": "{now.isoformat(timespec="seconds")}", "path": "dummy", "size_bytes": 1,'
+            f'"offsite_configured": true, "offsite_at": "{now.isoformat(timespec="seconds")}"}}')
+        t("直近にオフサイト複製が成功していればアラートは出ない",
+          "backup_offsite_stale" not in keys(collect_alerts(con)))
+
+        offsite_stale_at = now - _td(hours=_config.BACKUP_OFFSITE_STALE_HOURS + 1)
+        (_config.BACKUP_DIR / "last_success.json").write_text(
+            f'{{"at": "{now.isoformat(timespec="seconds")}", "path": "dummy", "size_bytes": 1,'
+            f'"offsite_configured": true, "offsite_at": "{offsite_stale_at.isoformat(timespec="seconds")}"}}')
+        o_alert2 = next((a for a in collect_alerts(con) if a[0] == "backup_offsite_stale"), None)
+        t(f"最終成功が{_config.BACKUP_OFFSITE_STALE_HOURS}時間より前ならwarningアラートが出る",
+          o_alert2 is not None and o_alert2[1] == "warning")
     finally:
         import shutil as _shutil
         _shutil.rmtree(_config.BACKUP_DIR, ignore_errors=True)

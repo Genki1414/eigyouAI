@@ -1,5 +1,5 @@
 """
-backup.py — SQLiteの安全なバックアップ(T36)
+backup.py — SQLiteの安全なバックアップ+オフサイト複製(T36/T37)
 
 生ファイルコピー(`cp out/companies.db ...`)は、WALモード運用中に書き込みと
 重なると壊れたスナップショットを作りかねない(-wal/-shmファイルが未反映のまま
@@ -12,8 +12,14 @@ backup.py — SQLiteの安全なバックアップ(T36)
 アラートメールを送る(T35のアラート基盤にそのまま乗せる。バックアップ専用の
 通知経路を新たに作らない)。
 
+オフサイト複製(T37): ローカルディスク上のバックアップだけでは、ディスク障害・
+サーバー消失そのものには対応できない。BACKUP_OFFSITE_TARGET(rsyncの宛先。
+例: Hetzner Storage Boxなら "u123456@u123456.your-storagebox.de:backups/")が
+設定されていれば、ローカルバックアップ成功直後にrsyncで複製する。未設定なら
+何もしない(SENDGRID_API_KEY等と同じ「未設定でも運用を止めない」方針)。
+
 使い方:
-  python3 backup.py run              # バックアップを1つ作成し、整合性確認する
+  python3 backup.py run              # バックアップを1つ作成し、整合性確認+オフサイト複製する
   python3 backup.py list             # 既存バックアップの一覧
   python3 backup.py restore <path>   # 指定したバックアップから復元する(要確認プロンプト)
   python3 backup.py test             # 自己テスト
@@ -21,13 +27,23 @@ backup.py — SQLiteの安全なバックアップ(T36)
 crontab登録例(毎日1時。deploy/crontabに設定済み):
   0 1 * * * cd /app && python3 backup.py run >> /app/out/cron.log 2>&1
 
+Hetzner Storage Boxを使う場合の設定手順(.env.example参照):
+  1. Hetzner ConsoleでStorage Boxを契約する(最安のBX11で足りる)
+  2. サーバー上でSSH鍵を生成し(未生成なら `ssh-keygen -t ed25519`)、
+     公開鍵をStorage Box管理画面の「SSH-Keys」に登録する
+  3. .envに BACKUP_OFFSITE_TARGET=u123456@u123456.your-storagebox.de:backups/
+     を設定する(uXXXXXXはStorage Box契約時に発行されるユーザー名)
+  4. Storage Boxの管理画面で対象ディレクトリ(上の例ではbackups/)を作成しておく
+
 現時点ではSQLiteのみ対応。DATABASE_URL設定時(Postgres)は、pg_dump等への
 切替が必要(storage.pyのバックエンド切替点と同じ考え方。今回は対象外)。
 """
 import argparse
 import json
+import os
 import shutil
 import sqlite3
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -64,9 +80,37 @@ def run_backup():
     if not ok:
         return False, dest, f"バックアップの整合性チェックに失敗しました: {detail}"
 
-    _write_manifest(dest)
+    offsite_ok, offsite_msg = sync_offsite(dest)
+    _write_manifest(dest, offsite_ok, offsite_msg)
     _prune_old_backups()
+    if offsite_ok is False:
+        # オフサイト複製の失敗はローカルバックアップ自体の成否とは分けて扱う。
+        # ローカルは既に安全に取得できているため、run_backup()全体はokのまま返す
+        # (呼び出し元のcronはこれを見て0で終了する)。失敗はmessageで分かるようにし、
+        # 実際の通知はmonitor.pyのbackup_offsite_failedアラート側に任せる。
+        return True, dest, f"ローカルは成功。オフサイト複製に失敗: {offsite_msg}"
     return True, dest, "ok"
+
+
+def sync_offsite(path):
+    """rsyncでオフサイト先(Hetzner Storage Box等)へバックアップを複製する(T37)。
+    BACKUP_OFFSITE_TARGET未設定時は(True, None)を返し「対象外」を表す
+    (False=失敗、と区別するため)。戻り値: (ok: bool|None, message: str|None)。"""
+    target = os.environ.get("BACKUP_OFFSITE_TARGET")
+    if not target:
+        return None, None
+    port = os.environ.get("BACKUP_OFFSITE_SSH_PORT", "23")  # Storage Boxの既定SSHポート
+    cmd = ["rsync", "-az", "-e", f"ssh -p {port} -o StrictHostKeyChecking=accept-new "
+           "-o BatchMode=yes -o ConnectTimeout=15", str(path), target]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+        return True, "ok"
+    except subprocess.CalledProcessError as e:
+        return False, f"rsync失敗(exit={e.returncode}): {e.stderr.decode(errors='ignore')[:300]}"
+    except FileNotFoundError:
+        return False, "rsyncコマンドが見つかりません(サーバーにインストールされているか確認してください)"
+    except subprocess.TimeoutExpired:
+        return False, "rsyncがタイムアウトしました(300秒)"
 
 
 def verify_backup(path):
@@ -84,10 +128,24 @@ def verify_backup(path):
     return (len(rows) == 1 and rows[0][0] == "ok"), detail
 
 
-def _write_manifest(path):
-    manifest = {"at": datetime.now().isoformat(timespec="seconds"),
-                "path": str(path), "size_bytes": path.stat().st_size}
-    _manifest_path().write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+def _write_manifest(path, offsite_ok, offsite_msg):
+    """offsite_atは「オフサイト複製が最後に成功した時刻」を保持し続ける
+    (直近の実行が失敗しても、前回までの成功実績を上書きで消さないため。
+    monitor.pyのbackup_offsite_stale判定はこの時刻の新しさだけを見る)。"""
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    prev = {}
+    p = _manifest_path()
+    if p.exists():
+        try:
+            prev = json.loads(p.read_text())
+        except (ValueError, json.JSONDecodeError):
+            prev = {}
+    manifest = {"at": now_iso, "path": str(path), "size_bytes": path.stat().st_size,
+                "offsite_configured": offsite_ok is not None,
+                "offsite_last_ok": offsite_ok,
+                "offsite_last_message": offsite_msg,
+                "offsite_at": now_iso if offsite_ok else prev.get("offsite_at")}
+    p.write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
 
 
 def _prune_old_backups():
@@ -109,6 +167,24 @@ def last_success():
         return datetime.fromisoformat(data["at"]), data.get("path")
     except (ValueError, KeyError, json.JSONDecodeError):
         return None, None
+
+
+def last_offsite_success():
+    """monitor.pyから使う。(configured: bool, at: datetime|None) を返す。
+    configured=FalseならBACKUP_OFFSITE_TARGET自体が未設定(=まだ導入していない
+    だけなので、アラート対象にはしない)。configured=Trueでat=Noneなら
+    「設定はあるのに一度も成功していない」という異常な状態を表す。"""
+    p = _manifest_path()
+    if not p.exists():
+        return False, None
+    try:
+        data = json.loads(p.read_text())
+        if not data.get("offsite_configured"):
+            return False, None
+        at = data.get("offsite_at")
+        return True, (datetime.fromisoformat(at) if at else None)
+    except (ValueError, KeyError, json.JSONDecodeError):
+        return False, None
 
 
 def list_backups():
@@ -184,6 +260,31 @@ def test():
         row = con2.execute("SELECT v FROM t").fetchone()
         con2.close()
         t("バックアップの中身が元のDBと一致する", row and row[0] == "hello")
+
+        print("── オフサイト複製(T37) ──")
+        t("BACKUP_OFFSITE_TARGET未設定ならlast_offsite_success()は(False, None)",
+          last_offsite_success() == (False, None))
+
+        global sync_offsite
+        orig_sync_offsite = sync_offsite
+        try:
+            sync_offsite = lambda p: (True, "ok")
+            ok2, path2, msg2 = run_backup()
+            t("オフサイト複製成功時もrun_backup()は成功のまま", ok2 and "オフサイト" not in msg2)
+            configured, offsite_at = last_offsite_success()
+            t("オフサイト複製成功時はconfigured=Trueで直近の成功時刻が取れる",
+              configured and offsite_at is not None
+              and (datetime.now() - offsite_at).total_seconds() < 10)
+
+            sync_offsite = lambda p: (False, "test-rsync-failure")
+            ok3, path3, msg3 = run_backup()
+            t("オフサイト複製が失敗してもローカルバックアップ自体は成功扱い",
+              ok3 and "オフサイト複製に失敗" in msg3)
+            configured3, offsite_at3 = last_offsite_success()
+            t("直近が失敗しても、前回までの成功時刻は消えずに残る(offsite_atを上書きしない)",
+              configured3 and offsite_at3 == offsite_at)
+        finally:
+            sync_offsite = orig_sync_offsite
 
         files = list_backups()
         t("list_backups()に作成したファイルが出てくる", path in files)

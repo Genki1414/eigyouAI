@@ -91,6 +91,20 @@ def collect_alerts(con):
                            "対象サイトの仕様変更・ネットワーク障害・送信元IPのブロック等の"
                            "可能性があります。out/form_screenshots/の直近失敗分を確認してください。"))
 
+    import backup as _backup
+    import config as _config
+    last_at, last_path = _backup.last_success()
+    if last_at is None:
+        alerts.append(("backup_stale", "critical",
+                       "バックアップが一度も成功していません(記録がありません)",
+                       "python3 backup.py run を手動実行し、エラーがあれば対処してください。"))
+    elif datetime.now() - last_at > timedelta(hours=_config.BACKUP_STALE_HOURS):
+        hours_ago = (datetime.now() - last_at).total_seconds() / 3600
+        alerts.append(("backup_stale", "critical",
+                       f"直近{_config.BACKUP_STALE_HOURS}時間以内にバックアップが成功していません"
+                       f"(最終成功: {hours_ago:.0f}時間前)",
+                       f"最後の成功: {last_path}\ncron.logでbackup.py runの失敗理由を確認してください。"))
+
     return alerts
 
 
@@ -282,6 +296,34 @@ def test():
     t("失敗率が閾値以下ならアラートは出ない",
       "form_send_failure_rate" not in keys(collect_alerts(con)))
     clear_rows()
+
+    print("── collect_alerts(): バックアップ ──")
+    import backup as _backup
+    import config as _config
+    import tempfile
+    from pathlib import Path as _Path
+
+    orig_backup_dir = _config.BACKUP_DIR
+    _config.BACKUP_DIR = _Path(tempfile.mkdtemp(prefix="ashibase_monitor_test_"))
+    try:
+        t("バックアップの記録が無ければcriticalアラートが出る",
+          "backup_stale" in keys(collect_alerts(con)))
+
+        (_config.BACKUP_DIR / "last_success.json").write_text(
+            f'{{"at": "{now.isoformat(timespec="seconds")}", "path": "dummy", "size_bytes": 1}}')
+        t("直近にバックアップが成功していればアラートは出ない",
+          "backup_stale" not in keys(collect_alerts(con)))
+
+        stale_at = now - _td(hours=_config.BACKUP_STALE_HOURS + 1)
+        (_config.BACKUP_DIR / "last_success.json").write_text(
+            f'{{"at": "{stale_at.isoformat(timespec="seconds")}", "path": "dummy", "size_bytes": 1}}')
+        b_alert = next((a for a in collect_alerts(con) if a[0] == "backup_stale"), None)
+        t(f"最終成功が{_config.BACKUP_STALE_HOURS}時間より前ならcriticalアラートが出る",
+          b_alert is not None and b_alert[1] == "critical")
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(_config.BACKUP_DIR, ignore_errors=True)
+        _config.BACKUP_DIR = orig_backup_dir
 
     print("── クールダウン(_due/_mark_sent) ──")
     con.execute("DELETE FROM alert_state WHERE alert_key='monitor-test-key'")

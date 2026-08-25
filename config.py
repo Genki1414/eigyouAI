@@ -114,3 +114,11 @@ def estimate_ai_cost_yen(model, tokens_input, tokens_output):
     if not price or not (tokens_input or tokens_output):
         return 0.0
     return tokens_input * price["input"] + tokens_output * price["output"]
+
+
+# ── バックアップ(backup.py。T36) ─────────────
+BACKUP_DIR = OUT_DIR / "backups"
+BACKUP_RETENTION_DAYS = 14   # これより古いバックアップファイルは自動削除する
+# monitor.pyがこの時間を超えてバックアップが成功していないことを検知したらアラートする
+# (毎日1回の実行前提で、1回分の遅延は許容しつつ2日連続の失敗は見逃さない設定)
+BACKUP_STALE_HOURS = 30

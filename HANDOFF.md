@@ -1998,6 +1998,57 @@ out/backup_$(date +%u).db`という簡易な日次バックアップ(同一デ�
 
 ---
 
+### T36. バックアップ構築(安全な取得+整合性確認)を実装(2026-08-25)
+
+5点の運用課題の④。従来の`cp out/companies.db ...`という生ファイルコピーは、
+WALモード運用中(`db.py connect()`参照)に書き込みと重なると-wal/-shmが未反映の
+まま本体だけコピーされ、壊れたスナップショットになりかねないという問題が
+あった。SQLite公式の安全な方法に置き換えた。オフサイト保管は本セクションの
+対象外(下記「未対応」参照。ユーザーへの確認が必要なため)。
+
+- `backup.py`(新規): `run_backup()`が`sqlite3.Connection.backup()`(書き込みと
+  衝突しても一貫性のあるスナップショットが取れる標準API)でバックアップを
+  作成し、`PRAGMA integrity_check`で壊れていないか確認してから
+  `out/backups/last_success.json`に成功時刻を記録する。整合性チェックに
+  失敗した場合はマニフェストを更新しない(=「バックアップが成功した」と
+  誤って記録しない)。`BACKUP_RETENTION_DAYS=14`(config.py)を超えた
+  バックアップは自動削除。`restore(path)`は復元前に確認プロンプト
+  (`'yes'`入力必須)を挟み、さらに復元前の状態も`pre_restore_*.db`として
+  退避してから上書きする(誤操作からの二段階の保険。取り消せない操作を
+  スクリプトから自動実行させない設計)。現時点ではSQLiteのみ対応
+  (Postgres移行時はpg_dump等への切替が必要。storage.pyのバックエンド
+  切替点と同じ考え方)。
+- `monitor.py`: `collect_alerts()`に`backup_stale`チェックを追加(T35の
+  アラート基盤にそのまま乗せる。バックアップ専用の通知経路は作らない)。
+  `backup.py`のマニフェストが無い、または`BACKUP_STALE_HOURS=30`
+  (config.py。日次実行前提で1回分の遅延は許容しつつ2日連続の失敗は
+  見逃さない設定)を超えて成功していなければcriticalアラート。
+- `config.py`: `BACKUP_DIR`/`BACKUP_RETENTION_DAYS`/`BACKUP_STALE_HOURS`を追加。
+- `deploy/crontab`: 従来の`cp`コピー行を`python3 backup.py run`に置き換え
+  (実行タイミングは同じ毎日1時)。
+- テスト: `backup.py test`(13項目。一時ディレクトリに隔離した合成DBで検証。
+  正常バックアップの成功/整合性チェック/マニフェスト記録/中身の一致/
+  保持期間超過分の自動削除/壊れたファイルの検知/restore()の確認プロンプト
+  ありなし両方の挙動、を検証)。`monitor.py test`に「バックアップ」
+  セクションを追加(記録無し→critical/直近成功あり→アラート無し/
+  `BACKUP_STALE_HOURS`超過→critical、計3項目、`config.BACKUP_DIR`を
+  一時ディレクトリへ差し替えて検証。実際のバックアップマニフェストには
+  触れない)。実DBに対して`python3 backup.py run`を実行し、45MB弱のDBを
+  約1秒で安全にバックアップできることも確認済み。全体回帰確認
+  (api.py test 297/297、test_pipeline.py 44/48=既知の4件のみ、
+  storage.py test 5/5、senders.py test全項目パス、monitor.py test 24/24)。
+
+**未対応(要ユーザー判断)**: オフサイト保管(同一VPS外への複製)。現状は
+Hetznerサーバー本体のディスク上のみで、ディスク自体の障害・サーバーの
+消失には対応できない。rclone/rsyncでの他サーバーへの複製、Hetzner
+Storage Box、S3互換オブジェクトストレージ等、複数の選択肢があり、
+いずれもユーザー側の契約・認証情報が必要なため、次回の対話で確認する。
+
+**次のステップ**: (オフサイト保管の方針確認)→デプロイ自動化
+(GitHub Actions)→テンプレート類の編集。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

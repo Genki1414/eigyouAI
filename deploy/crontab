@@ -49,5 +49,9 @@ TZ=Asia/Tokyo
 # 休眠プールの再投入判定: 毎週月曜
 0 7 * * 1 cd /app && python3 dormant.py --campaign 1 --revive --dry >> /app/out/cron.log 2>&1
 
-# バックアップ: 毎日。SQLiteの場合はファイルコピーで足りる
-0 1 * * * cd /app && cp out/companies.db out/backup_$(date +\%u).db 2>/dev/null
+# バックアップ: 毎日。sqlite3.Connection.backup()による安全なスナップショット+
+# 整合性チェック+14日分ローテーション(T36)。生ファイルコピーはWAL運用中に
+# 書き込みと重なると壊れたスナップショットを作りかねないため廃止した。
+# 成功時刻はout/backups/last_success.jsonに記録され、monitor.pyがこれを見て
+# 一定時間(config.BACKUP_STALE_HOURS)成功していなければアラートする。
+0 1 * * * cd /app && python3 backup.py run >> /app/out/cron.log 2>&1

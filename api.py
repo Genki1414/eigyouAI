@@ -990,8 +990,11 @@ def h_tenant_exclusions_csv(con, tenant_id, data):
             not_found += 1
             continue
         name_norm = db.normalize_name(raw_name)
+        # 同じname_normで複数社が残っている場合(重複排除しきれていない別法人表記等)、
+        # ORDER BY無しのLIMIT 1だとSQLite/Postgresで返る行が異なりうる。
+        # idの昇順で決定的に選ぶ(バックエンドを問わず常に同じ会社を除外する)。
         c = con.execute("""SELECT id FROM companies WHERE name_norm=? AND dedup_of IS NULL
-            AND (owner_tenant_id IS NULL OR owner_tenant_id=?) LIMIT 1""",
+            AND (owner_tenant_id IS NULL OR owner_tenant_id=?) ORDER BY id LIMIT 1""",
             (name_norm, tenant_id)).fetchone()
         if not c:
             not_found += 1

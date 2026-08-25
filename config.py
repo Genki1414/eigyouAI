@@ -89,6 +89,13 @@ FORM_MAX_PER_TENANT_PER_DAY_DEFAULT = 300    # tenants.daily_send_quota未設定
 FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT = 4000  # tenants.monthly_send_quota未設定時の既定値
                                                # (=最低プランの想定送信数)
 
+# senders.send_campaign()が1回の呼び出し内で同時に処理する件数(T41)。
+# フォーム送信はPlaywrightでの実ブラウザ操作(1件あたり数秒〜十数秒)が
+# ボトルネックのため、DBの読み書きではなくここが並列化の効果が出る箇所。
+# 上げすぎると相手サイト群への同時アクセスが増え、bot判定やこのサーバーの
+# メモリ(Chromiumプロセスを同時分だけ起動する)を圧迫するため小さめに抑える。
+FORM_SEND_CONCURRENCY = 3
+
 # ── 原価計測(1送信あたりのコスト把握。β版・概算値) ──
 # 厳密なクラウド原価配賦ではなく、事業判断に使える推定値を出すのが目的。
 # サーバー月額費用を実行時間で按分する(実行時間ベースの単純な比例配分)。

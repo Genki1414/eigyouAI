@@ -20,8 +20,10 @@ senders.py — 送信アダプタ層
 """
 import json
 import re
+import threading
 import time as _time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
@@ -551,8 +553,23 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
     "department","position","last_name","first_name","last_name_kana","first_name_kana","phone"}
     のうち指定されたキーだけ、sender_template_id/テナント既定より優先する(MIKOMERUの
     自動送信フォームで「テンプレートの内容を送信直前に上書きする」相当。この送信だけの
-    その場限りの値で、sender_templates/tenantsへは一切保存しない)。"""
+    その場限りの値で、sender_templates/tenantsへは一切保存しない)。
+
+    T41: 1件ずつの直列実行だとフォーム送信(Playwrightでの実ブラウザ操作。1件
+    数秒〜十数秒)がボトルネックになるため、config.FORM_SEND_CONCURRENCY件まで
+    並列で処理する(_process_one()参照。各ワーカーは自分専用のDB接続を開く。
+    別スレッド=別コネクションという既存パターン<「二重送信の防止(同時
+    リクエストでの競合)」テスト参照>をそのまま踏襲し、WALモード+冪等キーの
+    UNIQUE制約で安全に共存させる)。
+    唯一の既知のトレードオフ: FormSenderの送信ペーシング上限(_check_quota())は
+    直近のform_send_log件数をその場で数える方式のため、並列実行中は「まだ
+    コミットされていない実行中の件数」を数えに含められず、上限をまたぐ瞬間に
+    最大で並列数-1件分だけ超過し得る。これは相手サイトへの負荷・bot判定回避が
+    目的の緩やかなペーシングであり(グローバルなサーキットブレーカー自体は
+    ゆとりを持たせた値なので実運用では到達しない)、厳密な排他制御を持ち込むより
+    実装のシンプルさを優先した。"""
     import db
+    import config as C
 
     q = """SELECT t.id tid, t.channel, t.subject, t.body, t.company_id, t.step,
                   c.name, c.email, c.fax, c.phone, c.address, c.contact_url,
@@ -601,25 +618,53 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
     print(f"送信対象 {len(rows)}件 / {'DRY RUN（実送信しません）' if dry_run else '★本番送信★'}")
     cost = 0
 
-    for r in rows:
+    # ワーカースレッドごとに専用のDB接続を1本だけ開いて使い回す(行ごとに毎回
+    # db.connect()すると、大量件数<数千件超>のリストで接続オープン自体の
+    # オーバーヘッドがボトルネックになり、直列実行より遅くなる逆効果が実測された。
+    # ThreadPoolExecutorはスレッドを使い回す<max_workers本のスレッドが投入された
+    # タスクを順に消化する>ため、threading.local()でスレッドごとに1本だけ
+    # 保持すれば「別スレッド=別コネクション」は維持したまま接続数を
+    # 並列数と同じ小さい数に抑えられる。
+    # 明示的closeはしない: sqlite3は「作成したスレッドでしか使えない」制約があり、
+    # ここ(メインスレッド)からワーカースレッド側の接続をcloseすると
+    # ProgrammingErrorになる。全ての行で処理後に都度commit()済みなのでデータは
+    # 失われず、ThreadPoolExecutorのwithブロックを抜けてワーカースレッドが
+    # 終了すればthreading.local()の中身への参照も切れ、GCで接続も片付く。
+    _local = threading.local()
+
+    def _con_for_thread():
+        con_t = getattr(_local, "con", None)
+        if con_t is None:
+            con_t = db.connect()
+            _local.con = con_t
+        return con_t
+
+    def _process_one(r):
+        """1件を送る。並列実行されるため、呼び出し元と共有のconは使わず自分の
+        スレッド専用の接続を使う(別スレッド=別コネクション。BaseSender.send()の
+        冪等性チェックはidempotency.keyのUNIQUE制約でスレッド間でも安全)。"""
+        con_t = _con_for_thread()
+
         # 送信直前の最終ガード（作成後に配信停止された可能性がある。テナント別の
         # 送信除外設定(tenant_exclusions)もここで一緒に確認する）
-        allowed, why = db.can_contact(con, r["company_id"], tenant_id=r["tenant_id"])
+        allowed, why = db.can_contact(con_t, r["company_id"], tenant_id=r["tenant_id"])
         if not allowed:
-            stats["blocked"] += 1
-            con.execute("UPDATE touches SET note=? WHERE id=?", (f"送信中止: {why}", r["tid"]))
-            continue
+            con_t.execute("UPDATE touches SET note=? WHERE id=?", (f"送信中止: {why}", r["tid"]))
+            con_t.commit()
+            return {"kind": "blocked"}
 
         # Kill Switch: 異常検知時に管理者が停止していれば実送信はここで止める
         # (dry_runは実サイトへ触れないので対象外。kill_switch_cli.py参照)。
         # ここが全送信経路(手動送信/cron/Stock Factory運用API)の唯一の合流点。
+        # ワーカー内で(dispatch時ではなく)確認するため、実行中にKill Switchが
+        # 押された場合でも、まだ着手していない件はここで止まる。
         if not dry_run:
-            stopped, stop_reason = db.kill_switch_status(con, tenant_id=r["tenant_id"])
+            stopped, stop_reason = db.kill_switch_status(con_t, tenant_id=r["tenant_id"])
             if stopped:
-                stats["stopped"] += 1
-                con.execute("UPDATE touches SET note=? WHERE id=?",
-                            (f"送信中止: Kill Switch — {stop_reason}", r["tid"]))
-                continue
+                con_t.execute("UPDATE touches SET note=? WHERE id=?",
+                              (f"送信中止: Kill Switch — {stop_reason}", r["tid"]))
+                con_t.commit()
+                return {"kind": "stopped"}
 
         s = override_sender_row or r
         sender = Sender(
@@ -644,7 +689,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
                        fax=r["fax"], phone=r["phone"], address=r["address"],
                        contact_url=r["contact_url"])
 
-        adapter = get_sender(r["channel"], con, dry_run=dry_run,
+        adapter = get_sender(r["channel"], con_t, dry_run=dry_run,
                               tenant_id=r["tenant_id"], offer_id=r["offer_id"], list_id=r["list_id"],
                               allow_no_solicit=allow_no_solicit)
         # ドライランと本番送信は別の冪等キー空間を使う。同じキーだとドライランが
@@ -655,27 +700,36 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
         subject = render_merge_tags(r["subject"], to, sender)
         body = render_merge_tags(r["body"], to, sender)
         if track_clicks and not dry_run:
-            import config as C
-            body = rewrite_tracked_links(con, r["tid"], body, C.TRACK_BASE_URL)
+            body = rewrite_tracked_links(con_t, r["tid"], body, C.TRACK_BASE_URL)
         res = adapter.send(to, sender, subject, body, key)
 
         if res.ok:
-            con.execute("""UPDATE touches SET sent_at=?, delivered=1, note=?, unit_cost_yen=?
+            con_t.execute("""UPDATE touches SET sent_at=?, delivered=1, note=?, unit_cost_yen=?
                            WHERE id=?""",
                         (datetime.now().isoformat(timespec="seconds"),
                          f"provider_id={res.provider_id}", res.cost_yen, r["tid"]))
-            stats["sent"] += 1
-            cost += res.cost_yen
+            con_t.commit()
+            return {"kind": "sent", "cost": res.cost_yen}
         else:
-            con.execute("UPDATE touches SET delivered=0, note=? WHERE id=?",
-                        (f"送信失敗: {res.error}", r["tid"]))
-            stats["failed"] += 1
+            con_t.execute("UPDATE touches SET delivered=0, note=? WHERE id=?",
+                          (f"送信失敗: {res.error}", r["tid"]))
             # 恒久エラーは配信停止に入れる（宛先不明への再送は無意味かつ有害）
-            if res.permanent and "未取得" not in (res.error or ""):
-                db.suppress(con, r["company_id"], "bounce_hard", source=adapter.channel,
+            suppressed = res.permanent and "未取得" not in (res.error or "")
+            if suppressed:
+                db.suppress(con_t, r["company_id"], "bounce_hard", source=adapter.channel,
                             note=res.error)
+            con_t.commit()
+            return {"kind": "failed", "suppressed": suppressed}
+
+    with ThreadPoolExecutor(max_workers=min(C.FORM_SEND_CONCURRENCY, len(rows))) as ex:
+        futures = [ex.submit(_process_one, r) for r in rows]
+        for fut in as_completed(futures):
+            outcome = fut.result()
+            stats[outcome["kind"]] += 1
+            if outcome["kind"] == "sent":
+                cost += outcome["cost"]
+            elif outcome.get("suppressed"):
                 stats["suppressed"] += 1
-        con.commit()
 
     con.execute("UPDATE campaigns SET cost_yen = COALESCE(cost_yen,0) + ? WHERE id=?",
                 (cost, campaign_id))

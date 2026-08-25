@@ -100,7 +100,8 @@ def revive(con, cid, dry):
     """, (now,)).fetchall()
 
     # ── 接触ガード: 休眠からの復活もここを必ず通す ──
-    ok_ids, blocked = DBM.contactable_ids(con, [r[0] for r in rows])
+    # tenant_id=1(自社/houseエンジン)を明示する。T43参照(campaign.pyと同じ理由)。
+    ok_ids, blocked = DBM.contactable_ids(con, [r[0] for r in rows], tenant_id=1)
     ok_set = set(ok_ids)
     if blocked:
         print("  除外: " + " / ".join(f"{k} {v}社" for k, v in blocked.items()))

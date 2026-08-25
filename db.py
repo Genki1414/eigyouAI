@@ -539,7 +539,19 @@ def can_contact(con, company_id, tenant_id=None, allow_warm=False):
     tenant_idを渡すと、そのテナントのtenant_exclusions(経営判断の除外。
     suppressionと違い他テナントには影響しない)も合わせて確認する。
     allow_warm=True にすると「反応済み」チェックだけを外す。
-    既存顧客への別オファー案内など、意図的な再接触の時だけ使うこと。"""
+    既存顧客への別オファー案内など、意図的な再接触の時だけ使うこと。
+
+    T43: 反応済み判定・生涯接触上限・最短接触間隔は、tenant_idを渡した場合は
+    「そのテナント自身の接触履歴」だけで判定する(touches→campaigns→offersを
+    辿ってoffers.tenant_idで絞り込む)。共有マスタの企業データを複数テナントが
+    独立に営業する以上、Aテナントの過去の接触・反応がBテナントの接触可否まで
+    塞いでしまうのは正しくない(それぞれ別の商談関係として扱う)。
+    tenant_id未指定の場合のみ、従来通り全テナント合算(company_id一致のみ)で
+    判定する——house エンジン(campaign.py/followup.py/dormant.pyの事前絞込
+    ヘルパーcontactable_ids()がtenant_id無しで呼ばれる経路)との後方互換のため
+    残しているが、実運用の送信経路(senders.send_campaign())は必ずtenant_idを
+    渡すため、この分岐に実際に乗るのはhouseエンジンの事前絞込だけになる。
+    (法令対応のsuppressionは意図的にテナント非依存のまま=全テナント共通)"""
     if con.execute("SELECT 1 FROM suppression WHERE company_id=?", (company_id,)).fetchone():
         return False, "配信停止リスト"
     if tenant_id is not None and con.execute(
@@ -549,12 +561,26 @@ def can_contact(con, company_id, tenant_id=None, allow_warm=False):
     if con.execute("SELECT 1 FROM companies WHERE id=? AND dedup_of IS NOT NULL",
                    (company_id,)).fetchone():
         return False, "重複レコード(代表社へ集約済)"
+
+    if tenant_id is not None:
+        touch_join = """JOIN campaigns cp ON cp.id = touches.campaign_id
+                         JOIN offers o ON o.id = COALESCE(cp.offer_id, 1)"""
+        touch_where = "AND o.tenant_id=?"
+        touch_extra = (tenant_id,)
+    else:
+        touch_join = ""
+        touch_where = ""
+        touch_extra = ()
+
     # 反応済み＝もう営業対象ではなく商談対象。新規の売り込みを重ねない。
     # （campaign.py が反応済みの会社にも新規キャンペーンを組んでいたのをテストが検出）
     if not allow_warm:
-        warm = con.execute("""SELECT responded, paid FROM touches
-                              WHERE company_id=? AND (responded=1 OR paid=1) LIMIT 1""",
-                           (company_id,)).fetchone()
+        warm = con.execute(f"""SELECT touches.responded, touches.paid FROM touches
+                              {touch_join}
+                              WHERE touches.company_id=?
+                                AND (touches.responded=1 OR touches.paid=1) {touch_where}
+                              LIMIT 1""",
+                           (company_id,) + touch_extra).fetchone()
         if warm:
             return False, "反応済み(商談対象)" if not warm[1] else "既存顧客"
 
@@ -562,15 +588,18 @@ def can_contact(con, company_id, tenant_id=None, allow_warm=False):
     # どちらにもカウントしない(sent_atはドライランでも本番と同じ形で立つため、
     # provider_id=mock_で始まるnoteをドライラン分として除外する。他の判定
     # <sync_target_list_member_status()等>と同じ判別方法)。
-    n = con.execute("""SELECT COUNT(*) FROM touches WHERE company_id=? AND sent_at IS NOT NULL
-                       AND COALESCE(note,'') NOT LIKE '%provider_id=mock_%'""",
-                    (company_id,)).fetchone()[0]
+    n = con.execute(f"""SELECT COUNT(*) FROM touches
+                       {touch_join}
+                       WHERE touches.company_id=? AND touches.sent_at IS NOT NULL
+                         AND COALESCE(touches.note,'') NOT LIKE '%provider_id=mock_%' {touch_where}""",
+                    (company_id,) + touch_extra).fetchone()[0]
     if n >= C.MAX_LIFETIME_TOUCHES:
         return False, f"生涯接触上限({C.MAX_LIFETIME_TOUCHES}回)到達"
-    last = con.execute("""SELECT MAX(sent_at) FROM touches
-                          WHERE company_id=? AND sent_at IS NOT NULL
-                          AND COALESCE(note,'') NOT LIKE '%provider_id=mock_%'""",
-                       (company_id,)).fetchone()[0]
+    last = con.execute(f"""SELECT MAX(touches.sent_at) FROM touches
+                          {touch_join}
+                          WHERE touches.company_id=? AND touches.sent_at IS NOT NULL
+                            AND COALESCE(touches.note,'') NOT LIKE '%provider_id=mock_%' {touch_where}""",
+                       (company_id,) + touch_extra).fetchone()[0]
     if last:
         try:
             gap = (datetime.now() - datetime.fromisoformat(last)).days

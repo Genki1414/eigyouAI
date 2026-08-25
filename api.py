@@ -3551,6 +3551,59 @@ def self_test(port=8899):
     else:
         t("can_contact()バイパス防止の検証", False, "テスト用の会社が見つからずスキップ")
 
+    print("\n── can_contact()のテナント別スコープ(T43) ──")
+    # 共有マスタの企業を複数テナントが独立に営業する以上、Aテナントの接触履歴が
+    # Bテナントの接触可否まで塞いではいけない(それぞれ別の商談関係として扱う)。
+    con.execute("DELETE FROM tenants WHERE name LIKE 'test-scope-%'")
+    con.commit()
+    tid_scope_a, _ = OF.add_tenant(con, "test-scope-A", "sa@example.co.jp")
+    tid_scope_b, _ = OF.add_tenant(con, "test-scope-B", "sb@example.co.jp")
+    offer_scope_a = con.execute("SELECT id FROM offers WHERE tenant_id=?", (tid_scope_a,)).fetchone()["id"]
+
+    comp1 = con.execute("""SELECT id FROM companies
+        WHERE id NOT IN (SELECT company_id FROM suppression) AND dedup_of IS NULL
+        LIMIT 1""").fetchone()["id"]
+    cur = con.execute("INSERT INTO campaigns (name, started_at, target_rule, offer_id) VALUES (?,?,?,?)",
+                       ("test-scope-lifetime", datetime.now().isoformat(timespec="seconds"),
+                        "ALL", offer_scope_a))
+    scope_cid = cur.lastrowid
+    now_s = datetime.now().isoformat(timespec="seconds")
+    for step in range(1, 7):  # C.MAX_LIFETIME_TOUCHES=6件、Aテナントの接触として作る
+        con.execute("""INSERT INTO touches (campaign_id, company_id, channel, variant, step,
+                       body, sent_at, note) VALUES (?,?,?,?,?,?,?,?)""",
+                    (scope_cid, comp1, "フォーム", "A", step, "本文", now_s, "provider_id=form_x"))
+    con.commit()
+    allowed_a, why_a = db.can_contact(con, comp1, tenant_id=tid_scope_a)
+    t("Aテナント自身の生涯接触上限には引っかかる", not allowed_a and "生涯接触上限" in why_a, f"{allowed_a}/{why_a}")
+    allowed_b, why_b = db.can_contact(con, comp1, tenant_id=tid_scope_b)
+    t("Aテナントの接触履歴はBテナントには影響しない(Bは送信可のまま)", allowed_b is True, f"{allowed_b}/{why_b}")
+    allowed_global, why_global = db.can_contact(con, comp1)
+    t("tenant_id未指定(houseエンジン)は従来通り全テナント合算で判定する",
+      not allowed_global and "生涯接触上限" in why_global, f"{allowed_global}/{why_global}")
+
+    comp2 = con.execute("""SELECT id FROM companies
+        WHERE id NOT IN (SELECT company_id FROM suppression) AND dedup_of IS NULL AND id<>?
+        LIMIT 1""", (comp1,)).fetchone()["id"]
+    cur2 = con.execute("INSERT INTO campaigns (name, started_at, target_rule, offer_id) VALUES (?,?,?,?)",
+                        ("test-scope-warm", datetime.now().isoformat(timespec="seconds"),
+                         "ALL", offer_scope_a))
+    scope_cid2 = cur2.lastrowid
+    con.execute("""INSERT INTO touches (campaign_id, company_id, channel, variant, step,
+                   body, sent_at, responded, note) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (scope_cid2, comp2, "フォーム", "A", 1, "本文", now_s, 1, "provider_id=form_y"))
+    con.commit()
+    allowed_a2, why_a2 = db.can_contact(con, comp2, tenant_id=tid_scope_a)
+    t("Aテナントへの反応済み(warm)はAテナント自身の接触をブロックする",
+      not allowed_a2 and "反応済み" in why_a2, f"{allowed_a2}/{why_a2}")
+    allowed_b2, why_b2 = db.can_contact(con, comp2, tenant_id=tid_scope_b)
+    t("Aテナントへの反応(商談化)はBテナントの新規接触を妨げない", allowed_b2 is True, f"{allowed_b2}/{why_b2}")
+
+    con.execute("DELETE FROM touches WHERE campaign_id IN (?,?)", (scope_cid, scope_cid2))
+    con.execute("DELETE FROM campaigns WHERE id IN (?,?)", (scope_cid, scope_cid2))
+    con.execute("DELETE FROM offers WHERE tenant_id IN (?,?)", (tid_scope_a, tid_scope_b))
+    con.execute("DELETE FROM tenants WHERE id IN (?,?)", (tid_scope_a, tid_scope_b))
+    con.commit()
+
     print("\n── Kill Switch(異常時の即時送信停止) ──")
     g0 = con.execute("SELECT stopped, reason FROM kill_switch WHERE id=1").fetchone()
     orig_global_stopped = bool(g0["stopped"]) if g0 else True

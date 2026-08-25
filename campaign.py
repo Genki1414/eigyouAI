@@ -80,7 +80,10 @@ def create(con, name, target):
                        f"     ELSE 'メール' END AS channel_hint FROM companies) "
                        f"WHERE {rule}").fetchall()
     # ── 接触ガード: 配信停止・重複・上限・間隔をここで一括除外 ──
-    ok_ids, blocked = DBM.contactable_ids(con, [r[0] for r in rows])
+    # tenant_id=1(自社/houseエンジン)を明示する。send_campaign()側の実際の
+    # 送信ガードもここと同じテナントスコープ(T43)で判定するため、事前絞込と
+    # 実送信時の判定基準を一致させる(自社分の接触は自社のtouchesだけで見る)。
+    ok_ids, blocked = DBM.contactable_ids(con, [r[0] for r in rows], tenant_id=1)
     ok_set = set(ok_ids)
     if blocked:
         print("  除外: " + " / ".join(f"{k} {v}社" for k, v in blocked.items()))

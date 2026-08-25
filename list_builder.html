@@ -400,6 +400,9 @@ tr.clickable:hover{background:var(--accent-soft)}
 
       <section class="page" data-page="tmpl-sender-list">
         <h2>送信元テンプレート | テンプレート一覧 <span>SENDER TEMPLATES</span></h2>
+        <p class="hint">「編集」で登録済みの内容を修正できます。既に「有効にする」済みの
+          テンプレートを編集した場合、その内容をすぐ送信に反映するには編集後に
+          改めて「有効にする」を押してください(編集しただけでは自動反映されません)。</p>
         <div class="btnrow"><button class="ghost" id="btnGoTmplSenderAdd">＋ テンプレート登録</button></div>
         <div id="sTmplListWrap" style="margin-top:12px"><div class="empty">接続すると表示されます</div></div>
       </section>
@@ -1010,7 +1013,15 @@ function goPage(pageId) {
 ["btnGoTmplBodyAdd", "btnGoTmplSenderAdd", "btnGoStaffAdd"].forEach(id => {
   const target = { btnGoTmplBodyAdd: "tmpl-body-add", btnGoTmplSenderAdd: "tmpl-sender-add",
                     btnGoStaffAdd: "staff-add" }[id];
-  document.getElementById(id).addEventListener("click", () => goPage(target));
+  document.getElementById(id).addEventListener("click", () => {
+    // 「＋ テンプレート登録」は常に新規登録として開く。編集モードで離脱した
+    // 場合の入力欄・編集状態の残留をここで確実にリセットする(T26の
+    // memberEditingIdの教訓と同じく、リセットは呼び出し元の意図がはっきりした
+    // ここでだけ行い、ページ遷移の共通処理<goPage()>側には持たせない)
+    if (id === "btnGoTmplBodyAdd") resetTemplateForm();
+    if (id === "btnGoTmplSenderAdd") resetSenderTemplateForm();
+    goPage(target);
+  });
 });
 document.querySelectorAll(".navitem").forEach(item => {
   if (item.id === "navLogout") return; // ログアウトは専用ハンドラ(下)で扱う
@@ -1121,6 +1132,8 @@ document.getElementById("fCapital").addEventListener("change", e => {
 });
 
 let API = "", KEY = "", connected = false, lastLists = [], lastTemplates = [];
+let editingTemplateId = null;        // T39: 編集中の送信文章テンプレートID(null=新規登録)
+let editingSenderTemplateId = null;  // T39: 編集中の送信元テンプレートID(null=新規登録)
 let sendLogExcluded = new Set();   // countpillsでOFFにしたstatus(除外リスト)
 let currentSendLogListId = null;   // 自動送信ログ「詳細」ページが対象にしているリストID
 let currentSendLogListName = "";
@@ -1667,8 +1680,12 @@ async function refreshTemplates() {
   el.innerHTML = `<table><tr><th>名前</th><th>件名</th><th>作成日時</th><th></th></tr>` +
     lastTemplates.map(x => `<tr><td>${x.name}</td><td>${x.subject}</td>
       <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.created_at}</td>
-      <td><button class="ghost tmplDeleteBtn" data-id="${x.id}">削除</button></td></tr>`).join("") +
+      <td><button class="ghost tmplEditBtn" data-id="${x.id}">編集</button>
+      <button class="ghost tmplDeleteBtn" data-id="${x.id}">削除</button></td></tr>`).join("") +
     `</table>`;
+  el.querySelectorAll(".tmplEditBtn").forEach(btn => {
+    btn.addEventListener("click", () => editTemplate(Number(btn.dataset.id)));
+  });
   el.querySelectorAll(".tmplDeleteBtn").forEach(btn => {
     btn.addEventListener("click", () => deleteTemplate(Number(btn.dataset.id)));
   });
@@ -1683,6 +1700,25 @@ async function deleteTemplate(id) {
   }
 }
 
+function resetTemplateForm() {
+  editingTemplateId = null;
+  $("tName").value = ""; $("tSubject").value = ""; $("tBody").value = "";
+  $("btnSaveTemplate").textContent = "新規登録";
+  $("tmplResult").innerHTML = "";
+}
+
+function editTemplate(id) {
+  const tmpl = lastTemplates.find(x => x.id === id);
+  if (!tmpl) return;
+  editingTemplateId = id;
+  $("tName").value = tmpl.name;
+  $("tSubject").value = tmpl.subject;
+  $("tBody").value = tmpl.body;
+  $("btnSaveTemplate").textContent = "更新";
+  $("tmplResult").innerHTML = "";
+  goPage("tmpl-body-add");
+}
+
 $("btnSaveTemplate").addEventListener("click", async () => {
   const name = $("tName").value.trim();
   const subject = $("tSubject").value.trim();
@@ -1690,10 +1726,21 @@ $("btnSaveTemplate").addEventListener("click", async () => {
   const el = $("tmplResult");
   if (!name || !subject || !body) { el.innerHTML = `<div class="result err">名前・件名・本文をすべて入力してください</div>`; return; }
   try {
-    await call("/api/tenant/templates", { method: "POST", body: JSON.stringify({ name, subject, body }) });
-    el.innerHTML = `<div class="result ok">保存しました</div>`;
-    $("tName").value = ""; $("tSubject").value = ""; $("tBody").value = "";
-    await refreshTemplates();
+    if (editingTemplateId) {
+      await call("/api/tenant/templates/update", { method: "POST",
+        body: JSON.stringify({ template_id: editingTemplateId, name, subject, body }) });
+      // 編集完了後は一覧へ戻る(編集は1回限りの操作のため、更新結果をその場で確認できるようにする)
+      editingTemplateId = null;
+      $("btnSaveTemplate").textContent = "新規登録";
+      await refreshTemplates();
+      goPage("tmpl-body-list");
+    } else {
+      await call("/api/tenant/templates", { method: "POST", body: JSON.stringify({ name, subject, body }) });
+      // 新規登録は連続で複数件登録したいことが多いため、その場に留まりフォームだけ空にする(従来通り)
+      el.innerHTML = `<div class="result ok">保存しました</div>`;
+      $("tName").value = ""; $("tSubject").value = ""; $("tBody").value = "";
+      await refreshTemplates();
+    }
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }
@@ -1709,10 +1756,14 @@ async function refreshSenderTemplates() {
   el.innerHTML = `<table><tr><th>名前</th><th>送信者名</th><th>返信先</th><th></th></tr>` +
     r.templates.map(x => `<tr><td>${x.name}</td><td>${x.sender_name}</td><td>${x.sender_email}</td>
       <td><button class="sActivateBtn" data-id="${x.id}">有効にする</button>
+      <button class="ghost sEditBtn" data-id="${x.id}">編集</button>
       <button class="ghost sDeleteBtn" data-id="${x.id}">削除</button></td></tr>`).join("") +
     `</table>`;
   el.querySelectorAll(".sActivateBtn").forEach(btn => {
     btn.addEventListener("click", () => activateSenderTemplate(Number(btn.dataset.id)));
+  });
+  el.querySelectorAll(".sEditBtn").forEach(btn => {
+    btn.addEventListener("click", () => editSenderTemplate(Number(btn.dataset.id)));
   });
   el.querySelectorAll(".sDeleteBtn").forEach(btn => {
     btn.addEventListener("click", () => deleteSenderTemplate(Number(btn.dataset.id)));
@@ -1737,6 +1788,43 @@ async function deleteSenderTemplate(id) {
   }
 }
 
+const _SENDER_TMPL_FIELD_IDS = ["sName", "sSenderName", "sSenderEmail", "sSenderAddress", "sOptoutUrl",
+  "sLastName", "sFirstName", "sLastNameKana", "sFirstNameKana", "sPostalCode",
+  "sPrefecture", "sCity", "sBlock", "sBuilding", "sPhone", "sDepartment", "sPosition"];
+
+function resetSenderTemplateForm() {
+  editingSenderTemplateId = null;
+  _SENDER_TMPL_FIELD_IDS.forEach(id => $(id).value = "");
+  $("btnSaveSenderTemplate").textContent = "新規登録";
+  $("sTmplResult").innerHTML = "";
+}
+
+function editSenderTemplate(id) {
+  const tmpl = lastSenderTemplates.find(x => x.id === id);
+  if (!tmpl) return;
+  editingSenderTemplateId = id;
+  $("sName").value = tmpl.name || "";
+  $("sSenderName").value = tmpl.sender_name || "";
+  $("sSenderEmail").value = tmpl.sender_email || "";
+  $("sSenderAddress").value = tmpl.sender_address || "";
+  $("sOptoutUrl").value = tmpl.optout_url || "";
+  $("sLastName").value = tmpl.sender_last_name || "";
+  $("sFirstName").value = tmpl.sender_first_name || "";
+  $("sLastNameKana").value = tmpl.sender_last_name_kana || "";
+  $("sFirstNameKana").value = tmpl.sender_first_name_kana || "";
+  $("sPostalCode").value = tmpl.sender_postal_code || "";
+  $("sPrefecture").value = tmpl.sender_prefecture || "";
+  $("sCity").value = tmpl.sender_city || "";
+  $("sBlock").value = tmpl.sender_block || "";
+  $("sBuilding").value = tmpl.sender_building || "";
+  $("sPhone").value = tmpl.sender_phone || "";
+  $("sDepartment").value = tmpl.sender_department || "";
+  $("sPosition").value = tmpl.sender_position || "";
+  $("btnSaveSenderTemplate").textContent = "更新";
+  $("sTmplResult").innerHTML = "";
+  goPage("tmpl-sender-add");
+}
+
 $("btnSaveSenderTemplate").addEventListener("click", async () => {
   const name = $("sName").value.trim();
   const sender_name = $("sSenderName").value.trim();
@@ -1757,17 +1845,25 @@ $("btnSaveSenderTemplate").addEventListener("click", async () => {
   const position = $("sPosition").value.trim();
   const el = $("sTmplResult");
   if (!name || !sender_name || !sender_email) { el.innerHTML = `<div class="result err">テンプレート名・送信者名・返信先メールアドレスは必須です</div>`; return; }
-  try {
-    await call("/api/tenant/sender-templates", { method: "POST", body: JSON.stringify({
-      name, sender_name, sender_email, sender_address, optout_url,
+  const payload = { name, sender_name, sender_email, sender_address, optout_url,
       last_name, first_name, last_name_kana, first_name_kana, postal_code,
-      prefecture, city, block, building, phone, department, position }) });
-    el.innerHTML = `<div class="result ok">保存しました</div>`;
-    ["sName", "sSenderName", "sSenderEmail", "sSenderAddress", "sOptoutUrl",
-     "sLastName", "sFirstName", "sLastNameKana", "sFirstNameKana", "sPostalCode",
-     "sPrefecture", "sCity", "sBlock", "sBuilding", "sPhone", "sDepartment", "sPosition"]
-      .forEach(id => $(id).value = "");
-    await refreshSenderTemplates();
+      prefecture, city, block, building, phone, department, position };
+  try {
+    if (editingSenderTemplateId) {
+      await call("/api/tenant/sender-templates/update", { method: "POST",
+        body: JSON.stringify({ template_id: editingSenderTemplateId, ...payload }) });
+      // 編集完了後は一覧へ戻る。既に「有効にする」済みのテンプレートを編集した場合、
+      // その内容はまだtenants側へは反映されていないので一覧側で案内する
+      editingSenderTemplateId = null;
+      $("btnSaveSenderTemplate").textContent = "新規登録";
+      await refreshSenderTemplates();
+      goPage("tmpl-sender-list");
+    } else {
+      await call("/api/tenant/sender-templates", { method: "POST", body: JSON.stringify(payload) });
+      el.innerHTML = `<div class="result ok">保存しました</div>`;
+      _SENDER_TMPL_FIELD_IDS.forEach(id => $(id).value = "");
+      await refreshSenderTemplates();
+    }
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }

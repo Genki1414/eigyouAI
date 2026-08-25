@@ -637,6 +637,16 @@ def delete_message_template(con, tenant_id, template_id):
     return cur.rowcount > 0
 
 
+def update_message_template(con, tenant_id, template_id, name, subject, body):
+    """登録済みテンプレートの内容を編集する(T39。従来は削除して作り直すしか
+    無かった)。他テナントのテンプレートは対象外(id+tenant_idで絞り込む)。
+    戻り値: 更新できたらTrue、対象が無ければFalse。"""
+    cur = con.execute("""UPDATE message_templates SET name=?, subject=?, body=?
+        WHERE id=? AND tenant_id=?""", (name, subject, body, template_id, tenant_id))
+    con.commit()
+    return cur.rowcount > 0
+
+
 # ── 送信元テンプレート(送信者名・返信先等のパターン登録) ──
 def add_sender_template(con, tenant_id, name, sender_name, sender_email,
                          sender_address="", optout_url=None, last_name=None, first_name=None,
@@ -674,6 +684,31 @@ def list_sender_templates(con, tenant_id):
 def delete_sender_template(con, tenant_id, template_id):
     cur = con.execute("DELETE FROM sender_templates WHERE id=? AND tenant_id=?",
                        (template_id, tenant_id))
+    con.commit()
+    return cur.rowcount > 0
+
+
+def update_sender_template(con, tenant_id, template_id, name, sender_name, sender_email,
+                            sender_address="", optout_url=None, last_name=None, first_name=None,
+                            last_name_kana=None, first_name_kana=None, postal_code=None,
+                            prefecture=None, city=None, block=None, building=None, phone=None,
+                            department=None, position=None):
+    """登録済みの送信元テンプレートを編集する(T39。従来は削除して作り直すしか
+    無かった)。注意: activate_sender_template()は呼び出し時点の内容を
+    tenants.sender_*へ1回だけコピーする設計のため、既に「有効化」済みの
+    テンプレートをここで編集しても、その場でtenants側へは反映されない
+    (反映するには編集後に改めて「有効にする」を押す必要がある。
+    list_builder.html側でその旨を案内する)。"""
+    cur = con.execute("""UPDATE sender_templates SET
+        name=?, sender_name=?, sender_email=?, sender_address=?, optout_url=?,
+        sender_last_name=?, sender_first_name=?, sender_last_name_kana=?, sender_first_name_kana=?,
+        sender_postal_code=?, sender_prefecture=?, sender_city=?, sender_block=?, sender_building=?,
+        sender_phone=?, sender_department=?, sender_position=?
+        WHERE id=? AND tenant_id=?""",
+        (name, sender_name, sender_email, sender_address, optout_url,
+         last_name, first_name, last_name_kana, first_name_kana, postal_code,
+         prefecture, city, block, building, phone, department, position,
+         template_id, tenant_id))
     con.commit()
     return cur.rowcount > 0
 

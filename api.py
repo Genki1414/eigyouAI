@@ -120,12 +120,18 @@ CACもチャネル別成績も出せない = 売り物にならない。
   GET  /api/tenant/templates      自テナントの送信文章テンプレート一覧
   POST /api/tenant/templates           {"name","subject","body"} → 保存
   POST /api/tenant/templates/delete    {"template_id"} → 削除
+  POST /api/tenant/templates/update    {"template_id","name","subject","body"} →
+                           編集(T39。従来は削除して作り直すしか無かった)
   GET  /api/tenant/sender-templates    自テナントの送信元テンプレート一覧
   POST /api/tenant/sender-templates    {"name","sender_name","sender_email",
                            "sender_address","optout_url","last_name","first_name",
                            "last_name_kana","first_name_kana","postal_code","prefecture",
                            "city","block","building","phone","department","position"} → 保存
   POST /api/tenant/sender-templates/delete    {"template_id"} → 削除
+  POST /api/tenant/sender-templates/update    {"template_id", ...(addと同じ項目)} →
+                           編集(T39)。既に「有効にする」済みのテンプレートを
+                           編集しても、tenants.sender_*へは自動反映されない
+                           (反映するには編集後に改めて「有効にする」を押す)
   POST /api/tenant/sender-templates/activate  {"template_id"} → このテナントの
                            送信者情報(tenants.sender_*)へ反映。反映先は
                            senders.send_campaign()が読む列そのものなので、
@@ -1012,6 +1018,21 @@ def h_tenant_templates_delete(con, tenant_id, data):
     return 200, {"ok": True}
 
 
+def h_tenant_templates_update(con, tenant_id, data):
+    """登録済みテンプレートの編集(T39。従来は削除して作り直すしか無かった)。"""
+    template_id = data.get("template_id")
+    if not isinstance(template_id, int):
+        return 400, {"error": "template_idは必須です"}
+    name = (data.get("name") or "").strip()
+    subject = (data.get("subject") or "").strip()
+    body = (data.get("body") or "").strip()
+    if not name or not subject or not body:
+        return 400, {"error": "name・subject・bodyはすべて必須です"}
+    if not db.update_message_template(con, tenant_id, template_id, name, subject, body):
+        return 404, {"error": "テンプレートが見つかりません"}
+    return 200, {"ok": True}
+
+
 def h_tenant_sender_templates_list(con, tenant_id):
     return 200, {"templates": db.list_sender_templates(con, tenant_id)}
 
@@ -1045,6 +1066,38 @@ def h_tenant_sender_templates_delete(con, tenant_id, data):
     if not isinstance(template_id, int):
         return 400, {"error": "template_idは必須です"}
     if not db.delete_sender_template(con, tenant_id, template_id):
+        return 404, {"error": "テンプレートが見つかりません"}
+    return 200, {"ok": True}
+
+
+def h_tenant_sender_templates_update(con, tenant_id, data):
+    """登録済みの送信元テンプレートの編集(T39)。既に「有効にする」済みの
+    テンプレートを編集しても、tenants.sender_*へは自動反映されない
+    (activate_sender_template()参照)。反映するには編集後に改めて
+    「有効にする」を押す必要がある。"""
+    template_id = data.get("template_id")
+    if not isinstance(template_id, int):
+        return 400, {"error": "template_idは必須です"}
+    name = (data.get("name") or "").strip()
+    sender_name = (data.get("sender_name") or "").strip()
+    sender_email = (data.get("sender_email") or "").strip()
+    if not name or not sender_name or not sender_email:
+        return 400, {"error": "name・sender_name・sender_emailは必須です"}
+
+    def opt(key):
+        return (data.get(key) or "").strip() or None
+    ok = db.update_sender_template(con, tenant_id, template_id, name, sender_name, sender_email,
+                                    sender_address=(data.get("sender_address") or "").strip(),
+                                    optout_url=opt("optout_url"),
+                                    last_name=opt("last_name"), first_name=opt("first_name"),
+                                    last_name_kana=opt("last_name_kana"),
+                                    first_name_kana=opt("first_name_kana"),
+                                    postal_code=opt("postal_code"),
+                                    prefecture=opt("prefecture"), city=opt("city"),
+                                    block=opt("block"), building=opt("building"),
+                                    phone=opt("phone"), department=opt("department"),
+                                    position=opt("position"))
+    if not ok:
         return 404, {"error": "テンプレートが見つかりません"}
     return 200, {"ok": True}
 
@@ -1720,7 +1773,8 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
-        if path in ("/api/tenant/templates", "/api/tenant/templates/delete"):
+        if path in ("/api/tenant/templates", "/api/tenant/templates/delete",
+                    "/api/tenant/templates/update"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -1728,8 +1782,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(401, {"error": "unauthorized"})
                 if path == "/api/tenant/templates":
                     st, res = h_tenant_templates_add(con, tenant["id"], data)
-                else:
+                elif path == "/api/tenant/templates/delete":
                     st, res = h_tenant_templates_delete(con, tenant["id"], data)
+                else:
+                    st, res = h_tenant_templates_update(con, tenant["id"], data)
                 return self._json(st, res)
             except Exception as e:  # noqa: BLE001
                 return self._json(500, {"error": str(e)[:200]})
@@ -1737,7 +1793,7 @@ class Handler(BaseHTTPRequestHandler):
                 con.close()
 
         if path in ("/api/tenant/sender-templates", "/api/tenant/sender-templates/delete",
-                    "/api/tenant/sender-templates/activate"):
+                    "/api/tenant/sender-templates/activate", "/api/tenant/sender-templates/update"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -1747,6 +1803,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_sender_templates_add(con, tenant["id"], data)
                 elif path == "/api/tenant/sender-templates/delete":
                     st, res = h_tenant_sender_templates_delete(con, tenant["id"], data)
+                elif path == "/api/tenant/sender-templates/update":
+                    st, res = h_tenant_sender_templates_update(con, tenant["id"], data)
                 else:
                     st, res = h_tenant_sender_templates_activate(con, tenant["id"], data)
                 return self._json(st, res)
@@ -3062,6 +3120,23 @@ def self_test(port=8899):
     t("他テナントのテンプレートは見えない(テナント分離)",
       st == 200 and all(x["id"] != tmpl_id for x in r.get("templates", [])))
 
+    st, r = post_auth("/api/tenant/templates/update",
+                      {"template_id": tmpl_id, "name": "初回案内", "subject": "件名(編集後)",
+                       "body": "本文(編集後)"}, token=key_b)
+    t("他テナントのテンプレートは編集できない(404)", st == 404)
+    st, r = post_auth("/api/tenant/templates/update",
+                      {"template_id": tmpl_id, "name": "初回案内", "subject": "件名(編集後)",
+                       "body": "本文(編集後)"}, token=key_a)
+    t("POST /api/tenant/templates/update で編集できる(T39。従来は削除して作り直すしか無かった)",
+      st == 200 and r.get("ok"))
+    st, r = get_auth("/api/tenant/templates", token=key_a)
+    t("編集後の内容がGETで返る",
+      st == 200 and any(x["id"] == tmpl_id and x["subject"] == "件名(編集後)"
+                         and x["body"] == "本文(編集後)" for x in r.get("templates", [])))
+    st, r = post_auth("/api/tenant/templates/update",
+                      {"template_id": tmpl_id, "name": "", "subject": "x", "body": "y"}, token=key_a)
+    t("nameが空だと400", st == 400)
+
     st, r = post_auth("/api/tenant/templates/delete", {"template_id": tmpl_id}, token=key_b)
     t("他テナントのテンプレートは削除できない(404)", st == 404)
     st, r = post_auth("/api/tenant/templates/delete", {"template_id": tmpl_id}, token=key_a)
@@ -3130,6 +3205,39 @@ def self_test(port=8899):
       tenant_row["sender_name"] == "テスト株式会社 営業部"
       and tenant_row["sender_email"] == "sales@test-a.example.co.jp"
       and tenant_row["sender_address"] == "東京都千代田区1-1-1")
+
+    st, r = post_auth("/api/tenant/sender-templates/update",
+                      {"template_id": stmpl_id, "name": "本社(編集後)",
+                       "sender_name": "テスト株式会社 編集後部署",
+                       "sender_email": "sales@test-a.example.co.jp"}, token=key_b)
+    t("他テナントの送信元テンプレートは編集できない(404)", st == 404)
+    st, r = post_auth("/api/tenant/sender-templates/update",
+                      {"template_id": stmpl_id, "name": "本社(編集後)",
+                       "sender_name": "テスト株式会社 編集後部署",
+                       "sender_email": "sales@test-a.example.co.jp",
+                       "sender_address": "東京都千代田区9-9-9"}, token=key_a)
+    t("POST /api/tenant/sender-templates/update で編集できる(T39)", st == 200 and r.get("ok"))
+    st, r = get_auth("/api/tenant/sender-templates", token=key_a)
+    edited = next((x for x in r.get("templates", []) if x["id"] == stmpl_id), None)
+    t("編集後の内容がGETで返る",
+      edited is not None and edited["name"] == "本社(編集後)"
+      and edited["sender_name"] == "テスト株式会社 編集後部署"
+      and edited["sender_address"] == "東京都千代田区9-9-9")
+
+    tenant_row_after_edit = con.execute("SELECT sender_name FROM tenants WHERE id=?", (tid_a,)).fetchone()
+    t("既に有効化済みのテンプレートを編集しても、tenants側へは自動反映されない"
+      "(activate_sender_template()は1回だけのコピーのため)",
+      tenant_row_after_edit["sender_name"] != "テスト株式会社 編集後部署")
+
+    st, r = post_auth("/api/tenant/sender-templates/activate", {"template_id": stmpl_id}, token=key_a)
+    tenant_row_reactivated = con.execute("SELECT sender_name FROM tenants WHERE id=?", (tid_a,)).fetchone()
+    t("編集後に改めて有効化すると、編集後の内容が反映される",
+      st == 200 and tenant_row_reactivated["sender_name"] == "テスト株式会社 編集後部署")
+
+    st, r = post_auth("/api/tenant/sender-templates/update",
+                      {"template_id": stmpl_id, "name": "", "sender_name": "x",
+                       "sender_email": "y@example.co.jp"}, token=key_a)
+    t("nameが空だと400", st == 400)
 
     st, r = post_auth("/api/tenant/sender-templates/delete", {"template_id": stmpl_id}, token=key_b)
     t("他テナントのテンプレートは削除できない(404)", st == 404)

@@ -1,0 +1,84 @@
+name: CI & Deploy
+
+# claude/project-handoff-0ubqc1 が現状唯一の開発・本番反映用ブランチ
+# (本番サーバーがこのブランチをpullして動いている。HANDOFF.md T38参照)。
+#
+# 事前にGitHub側(Settings → Secrets and variables → Actions)へ以下を
+# 登録すること(いずれもRepository secrets):
+#   DEPLOY_HOST      本番サーバーのホスト名/IP
+#   DEPLOY_USER      SSHログインユーザー名(例: root, deploy等)
+#   DEPLOY_PATH      サーバー上のリポジトリのパス(例: /opt/eigyouai)
+#   DEPLOY_SSH_KEY   デプロイ専用のSSH秘密鍵(ed25519推奨)。対応する公開鍵を
+#                    サーバー側の ~DEPLOY_USER/.ssh/authorized_keys に
+#                    登録しておくこと(ssh-keygen -t ed25519 -f deploy_key で
+#                    生成し、秘密鍵の中身をそのままこのsecretへ貼り付ける)
+#   DEPLOY_SSH_PORT  (任意)SSHポート番号。未設定なら22
+on:
+  push:
+    branches: [claude/project-handoff-0ubqc1]
+  workflow_dispatch:  # 手動再デプロイ用(コード変更なしでもデプロイし直したい時)
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ここで実行するのは、既存の会社データを前提とせず単体で完結するテスト
+      # スイートのみ(storage.py/senders.py/monitor.py/backup.py。それぞれ
+      # 自分でテスト用データを作って後片付けする設計)。api.py test /
+      # test_pipeline.pyは`run.py all --demo`で投入した実データを前提にしており
+      # (未投入だと「テスト対象の接触がありません」で即失敗)、現状そのdemo
+      # 投入パス自体に潜在バグがあることが判明したため(HANDOFF.md T38参照)、
+      # 直すまでは他の3スイートと同列にCIへは組み込まない。
+      - name: Run self-contained test suites
+        run: |
+          fail=0
+          for suite in "storage.py test" "senders.py test" "monitor.py test" "backup.py test"; do
+            echo "::group::python3 $suite"
+            python3 $suite 2>&1 | tee /tmp/suite_out.log
+            if grep -q "✗" /tmp/suite_out.log; then
+              echo "::error::$suite に失敗した項目があります"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $fail
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/claude/project-handoff-0ubqc1'
+    runs-on: ubuntu-latest
+    env:
+      # secretsをshellスクリプトへ文字列展開で埋め込む(${{ secrets.X }}を
+      # run:内に直接書く)のは避け、env:経由の環境変数参照にする
+      # (GitHub公式の推奨パターン。シェルのクォート崩れや意図しない
+      # コマンド展開を防ぐ)。
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+    steps:
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy over SSH (git pull + docker compose up -d --build)
+        run: |
+          REMOTE_CMD='set -e
+            cd "'"$DEPLOY_PATH"'"
+            git fetch origin
+            git checkout claude/project-handoff-0ubqc1
+            git reset --hard origin/claude/project-handoff-0ubqc1
+            docker compose -f deploy/docker-compose.yml up -d --build'
+          ssh -i ~/.ssh/id_ed25519 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$REMOTE_CMD"

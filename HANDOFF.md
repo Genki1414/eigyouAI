@@ -2093,6 +2093,55 @@ S3互換API等の追加実装が不要な**Hetzner Storage Box**を推奨し、�
 
 ---
 
+### T38. デプロイ自動化(GitHub Actions)を実装(2026-08-25)
+
+5点の運用課題の⑤(最後の1点)。従来は毎回SSHして手動で`git pull` +
+`docker compose up -d --build`していた作業を、ユーザーの希望
+(「俺の作業が不要になる方法」)通りGitHub Actionsで完全自動化した。
+
+- `.github/workflows/deploy.yml`(新規): `claude/project-handoff-0ubqc1`
+  ブランチへのpush(または手動の`workflow_dispatch`)をトリガーに、
+  `test`ジョブ→(通過したら)`deploy`ジョブの順で実行する。
+  - `test`: `storage.py test`/`senders.py test`/`monitor.py test`/
+    `backup.py test`を実行し、出力に`✗`が1つでもあれば失敗させる
+    (これらのテストの出力ログ全文を見て判定する。理由は下記「発見した
+    既知の問題」参照)。
+  - `deploy`: `test`ジョブが通った場合のみ、SSHで本番サーバーへ接続し
+    `git fetch && git reset --hard origin/<branch> && docker compose -f
+    deploy/docker-compose.yml up -d --build`を実行する(手動でやっていた
+    コマンドと同一)。secretsを`run:`スクリプトの文字列展開に直接埋め込む
+    (`${{ secrets.X }}`をrun:内に書く)のは、クォート崩れや意図しない
+    シェル展開の温床になるため避け、`env:`ブロック経由で環境変数として
+    受け渡す設計にした(GitHub公式の推奨パターン)。
+  - 必要な設定(GitHub リポジトリの Settings → Secrets and variables →
+    Actions へユーザー側で登録が必要。ワークフローファイル冒頭にも記載):
+    `DEPLOY_HOST`/`DEPLOY_USER`/`DEPLOY_PATH`(例: `/opt/eigyouai`)/
+    `DEPLOY_SSH_KEY`(デプロイ専用のSSH秘密鍵。対応する公開鍵をサーバー側の
+    authorized_keysへ登録)/`DEPLOY_SSH_PORT`(任意・既定22)。
+
+**発見した既知の問題(未修正)**: デプロイ自動化のCIジョブ設計にあたり、
+真っさらな(=`out/companies.db`が存在しない)環境で`api.py test`/
+`test_pipeline.py`を動かせるか検証する過程で、`python3 run.py all --demo`
+(このプロジェクト自身のオンボーディング手順)がクリーンな状態からは
+「オファー id=1 が見つかりません」で`compose`ステップから先へ進めない
+ことが判明した。この2つのテストスイートは、これまで常に本セッションが
+使い続けてきた「実データが投入済みの共有dev DB」の上でしか動かしたことが
+無く、まっさらな状態で通した実績が無かったため、これまで気づかれていな
+かったバグと考えられる。原因調査(おそらく`offers.py init`が発行する
+オファーIDが必ずしも1から始まらない、または`campaign.py`/`compose.py`側が
+オファーID=1を決め打ちしている)はスコープ外として今回は手を付けず、
+CI(`deploy.yml`)には`api.py test`/`test_pipeline.py`を含めなかった
+(含めると`run.py all --demo`のこのバグでCIが恒常的に失敗してしまうため)。
+本番環境は実際の国交省データを`ingest.py`で投入する運用であり
+`run.py all --demo`は使わないため、本番デプロイ自体への影響は無い。
+
+**次のステップ**: テンプレート類の編集(5点の運用課題、完了)。その後は
+元の技術ロードマップ(②Postgres移行→③送信処理の並列化→④送信元IPの分散
+→⑤企業データ母数の拡大)へ戻る。余力があれば`run.py all --demo`の
+上記バグ調査も候補。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

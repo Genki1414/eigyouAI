@@ -14,11 +14,17 @@ services:
     depends_on: { postgres: { condition: service_healthy } }
     networks: [default, stockfactory-shared]
 
-  # HTTPS終端。EIGYOUAI_DOMAINへのアクセスをapiコンテナへ転送する。
-  # 証明書はLet's Encryptから自動取得(Caddy標準機能)。
+  # HTTPS終端(未使用)。当初はCaddyでLet's Encrypt証明書を自動取得する想定
+  # だったが、本番はサーバー既存のnginx(他のStock Factory系サービスと共有)が
+  # 80/443番を使ってTLS終端している(HANDOFF.md T12以降参照)。このcaddyサービスを
+  # profiles無しで定義したままだと`docker compose up -d`のたびに毎回ポート80番の
+  # 奪い合いで起動失敗する(2026-08-25に実際に発生)。profilesで明示的に
+  # 除外し、`docker compose up -d`だけでは決して起動しないようにする
+  # (万一Caddy運用に戻す場合のみ `docker compose --profile caddy up -d`)。
   caddy:
     image: caddy:2-alpine
     container_name: eigyouai-caddy
+    profiles: ["caddy"]
     env_file: [../.env]
     ports: ["80:80", "443:443"]
     volumes:

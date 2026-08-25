@@ -317,11 +317,22 @@ class FormSender(BaseSender):
         self._attempt_count = 0  # このインスタンス(=1社への1回のsend())での試行回数。
                                   # R.retry()が_deliver()を再試行するたびに増える。
                                   # retry_countとしてform_send_logに残す(原価計測用)
+        self._tenant_quota = None  # (monthly_quota, daily_quota)。_check_quota()が
+                                    # 初回呼び出し時に1回だけtenantsを読んでキャッシュする
+                                    # (1回の一括送信中に何百回も呼ばれるため)
 
     def _check_quota(self):
-        """cron/API呼び出し1回あたり・直近1時間・直近24時間・テナット別の上限を見る。
-        件数は成否を問わず試行数でカウントする(失敗でも相手サイトへの負荷は発生するため)。
-        上限に達したら(False, 理由)を返し、Playwrightは一切起動しない。"""
+        """グローバル(全テナント合算)のサーキットブレーカーと、テナントごとの
+        公平な取り分の両方を見る。件数は成否を問わず試行数でカウントする
+        (失敗でも相手サイトへの負荷は発生するため)。上限に達したら(False, 理由)を
+        返し、Playwrightは一切起動しない。
+
+        T29で「全テナント合算の単一プール」から「テナントごとの取り分」へ再設計。
+        以前はFORM_MAX_PER_DAY(既定100件)を全テナントで奪い合う作りで、契約社数が
+        増えるほど1社あたりの実質的な取り分が目減りしていた。今はグローバル上限は
+        バグ・異常時の被害を止める最終防波堤(通常運用では到達しない水準)として残し、
+        契約プランに応じた枠は tenants.monthly_send_quota/daily_send_quota
+        (NULLならconfig.pyの_DEFAULT値=最低プラン相当)で個別に守る。"""
         import config as C
 
         self._run_count += 1
@@ -331,23 +342,49 @@ class FormSender(BaseSender):
         now = datetime.now()
         hour_ago = (now - timedelta(hours=1)).isoformat(timespec="seconds")
         day_ago = (now - timedelta(hours=24)).isoformat(timespec="seconds")
+        month_ago = (now - timedelta(days=30)).isoformat(timespec="seconds")
 
         n_hour = self.con.execute(
             "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ?", (hour_ago,)).fetchone()[0]
         if n_hour >= C.FORM_MAX_PER_HOUR:
-            return False, f"直近1時間の上限({C.FORM_MAX_PER_HOUR}件)に到達"
+            return False, f"全体・直近1時間の上限({C.FORM_MAX_PER_HOUR}件)に到達"
 
         n_day = self.con.execute(
             "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ?", (day_ago,)).fetchone()[0]
         if n_day >= C.FORM_MAX_PER_DAY:
-            return False, f"直近24時間の上限({C.FORM_MAX_PER_DAY}件)に到達"
+            return False, f"全体・直近24時間の上限({C.FORM_MAX_PER_DAY}件)に到達"
 
-        if self.tenant_id is not None:
-            n_tenant = self.con.execute(
-                "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
-                (day_ago, self.tenant_id)).fetchone()[0]
-            if n_tenant >= C.FORM_MAX_PER_TENANT_PER_DAY:
-                return False, f"テナント別・直近24時間の上限({C.FORM_MAX_PER_TENANT_PER_DAY}件)に到達"
+        if self.tenant_id is None:
+            return True, None
+
+        if self._tenant_quota is None:
+            row = self.con.execute(
+                "SELECT monthly_send_quota, daily_send_quota FROM tenants WHERE id=?",
+                (self.tenant_id,)).fetchone()
+            monthly_q = (row["monthly_send_quota"] if row and row["monthly_send_quota"]
+                         else C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT)
+            daily_q = (row["daily_send_quota"] if row and row["daily_send_quota"]
+                       else C.FORM_MAX_PER_TENANT_PER_DAY_DEFAULT)
+            self._tenant_quota = (monthly_q, daily_q)
+        monthly_quota, daily_quota = self._tenant_quota
+
+        n_tenant_hour = self.con.execute(
+            "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
+            (hour_ago, self.tenant_id)).fetchone()[0]
+        if n_tenant_hour >= C.FORM_MAX_PER_TENANT_PER_HOUR:
+            return False, f"テナント別・直近1時間の上限({C.FORM_MAX_PER_TENANT_PER_HOUR}件)に到達"
+
+        n_tenant_day = self.con.execute(
+            "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
+            (day_ago, self.tenant_id)).fetchone()[0]
+        if n_tenant_day >= daily_quota:
+            return False, f"テナント別・直近24時間の上限({daily_quota}件)に到達"
+
+        n_tenant_month = self.con.execute(
+            "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
+            (month_ago, self.tenant_id)).fetchone()[0]
+        if n_tenant_month >= monthly_quota:
+            return False, f"テナント別・直近30日間の月間クォータ({monthly_quota}件)に到達"
 
         return True, None
 
@@ -1037,6 +1074,86 @@ if __name__ == "__main__":
                   f"3回目:{r3[0]}(上限{C.FORM_MAX_PER_RUN}のため False が正しい)")
         finally:
             C.FORM_MAX_PER_RUN = orig_max_per_run
+
+        print("\n── テナント別クォータ(T29: 全テナント合算の単一プールから公平な取り分へ再設計) ──")
+        con.execute("DELETE FROM companies WHERE id=999990")
+        con.execute("""INSERT INTO companies (id, name, contact_url) VALUES
+            (999990, 'テスト_クォータ確認企業', 'https://example.co.jp/contact/')""")
+        for name in ("test-quota-A", "test-quota-B", "test-quota-C"):
+            for row in con.execute("SELECT id FROM tenants WHERE name=?", (name,)).fetchall():
+                con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (row["id"],))
+                con.execute("DELETE FROM offers WHERE tenant_id=?", (row["id"],))
+                con.execute("DELETE FROM tenants WHERE id=?", (row["id"],))
+        con.commit()
+        tid_qa, _ = OF.add_tenant(con, "test-quota-A", "qa@example.co.jp")
+        tid_qb, _ = OF.add_tenant(con, "test-quota-B", "qb@example.co.jp")
+        con.commit()
+        now_q = datetime.now()
+
+        orig_tenant_hour = C.FORM_MAX_PER_TENANT_PER_HOUR
+        try:
+            C.FORM_MAX_PER_TENANT_PER_HOUR = 2
+            for _ in range(2):
+                con.execute("""INSERT INTO form_send_log (company_id, tenant_id, started_at, status)
+                    VALUES (999990, ?, ?, 'SUCCESS')""",
+                    (tid_qa, (now_q - timedelta(minutes=10)).isoformat(timespec="seconds")))
+            con.commit()
+
+            fa = FormSender(con, dry_run=False, tenant_id=tid_qa)
+            ra = fa._check_quota()
+            ok_a = (not ra[0]) and "1時間" in (ra[1] or "")
+            print(f"  {'✓' if ok_a else '✗'} テナント別・直近1時間の上限(={C.FORM_MAX_PER_TENANT_PER_HOUR})"
+                  f"に達すると止まる: {ra}")
+
+            fb = FormSender(con, dry_run=False, tenant_id=tid_qb)
+            rb = fb._check_quota()
+            print(f"  {'✓' if rb[0] else '✗'} 他テナント(未使用)は影響を受けない"
+                  f"(単一プールの奪い合いではなく、テナントごとに独立した取り分)")
+        finally:
+            C.FORM_MAX_PER_TENANT_PER_HOUR = orig_tenant_hour
+
+        con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (tid_qa,))
+        con.execute("UPDATE tenants SET daily_send_quota=3 WHERE id=?", (tid_qa,))
+        for _ in range(3):
+            con.execute("""INSERT INTO form_send_log (company_id, tenant_id, started_at, status)
+                VALUES (999990, ?, ?, 'SUCCESS')""",
+                (tid_qa, (now_q - timedelta(hours=5)).isoformat(timespec="seconds")))
+        con.commit()
+        fa2 = FormSender(con, dry_run=False, tenant_id=tid_qa)
+        ra2 = fa2._check_quota()
+        ok_day = (not ra2[0]) and "24時間" in (ra2[1] or "")
+        print(f"  {'✓' if ok_day else '✗'} tenants.daily_send_quota(=3、契約プランごとの上書き)"
+              f"に達すると止まる: {ra2}")
+
+        con.execute("UPDATE tenants SET monthly_send_quota=2 WHERE id=?", (tid_qb,))
+        for _ in range(2):
+            con.execute("""INSERT INTO form_send_log (company_id, tenant_id, started_at, status)
+                VALUES (999990, ?, ?, 'SUCCESS')""",
+                (tid_qb, (now_q - timedelta(days=20)).isoformat(timespec="seconds")))
+        con.commit()
+        fb2 = FormSender(con, dry_run=False, tenant_id=tid_qb)
+        rb2 = fb2._check_quota()
+        ok_month = (not rb2[0]) and "月間クォータ" in (rb2[1] or "")
+        print(f"  {'✓' if ok_month else '✗'} tenants.monthly_send_quota(=2、直近30日)"
+              f"に達すると止まる: {rb2}")
+
+        tid_qc, _ = OF.add_tenant(con, "test-quota-C", "qc@example.co.jp")
+        con.commit()
+        fc = FormSender(con, dry_run=False, tenant_id=tid_qc)
+        fc._check_quota()
+        ok_default = fc._tenant_quota == (C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT,
+                                           C.FORM_MAX_PER_TENANT_PER_DAY_DEFAULT)
+        print(f"  {'✓' if ok_default else '✗'} monthly/daily_send_quota未設定なら既定値"
+              f"(月{C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT}/日{C.FORM_MAX_PER_TENANT_PER_DAY_DEFAULT}"
+              f"=最低プラン相当)が使われる: {fc._tenant_quota}")
+
+        for name in ("test-quota-A", "test-quota-B", "test-quota-C"):
+            for row in con.execute("SELECT id FROM tenants WHERE name=?", (name,)).fetchall():
+                con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (row["id"],))
+                con.execute("DELETE FROM offers WHERE tenant_id=?", (row["id"],))
+                con.execute("DELETE FROM tenants WHERE id=?", (row["id"],))
+        con.execute("DELETE FROM companies WHERE id=999990")
+        con.commit()
     else:
         cid = int(sys.argv[1]) if len(sys.argv) > 1 else 1
         step = int(sys.argv[2]) if len(sys.argv) > 2 else 1

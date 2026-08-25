@@ -462,6 +462,12 @@ def migrate(con):
         ("scheduled_sends", "allow_no_solicit", "INTEGER DEFAULT 0"),
         ("scheduled_sends", "cancel_recent_days", "INTEGER"),
         ("scheduled_sends", "sender_override_json", "TEXT"),
+        # T29: フォーム送信のペーシングを「全テナント合算の単一プール」から
+        # 「テナントごとの公平な取り分」へ再設計。NULL=config.pyの
+        # FORM_MAX_PER_TENANT_PER_*_DEFAULTを使う(=契約プラン未設定の
+        # テナントは最低プラン相当の枠になる)。senders.py._check_quota()参照。
+        ("tenants", "monthly_send_quota", "INTEGER"),
+        ("tenants", "daily_send_quota", "INTEGER"),
     ]:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:

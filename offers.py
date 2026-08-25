@@ -307,6 +307,43 @@ def resend_staff_verification(con, tenant_id, staff_id):
     return verify_token
 
 
+PASSWORD_RESET_EXPIRY_HOURS = 1  # 認証メールの24時間より短命にする(悪用機会を減らす)
+
+
+def request_password_reset(con, email):
+    """MIKOMERUの「パスワードをお忘れの方」相当(T34)。メールアドレス列挙攻撃を
+    防ぐため、該当アカウントが無い/未認証の場合もエラーにせずNoneを返すだけに
+    とどめる(呼び出し元のAPIハンドラは、戻り値にかかわらず常に同じ成功応答を
+    返すこと)。email_verified_atが立っていない(=そもそもパスワードでログイン
+    できない)アカウントも対象外にする。
+    戻り値: (staff_id, name, reset_token) または None。"""
+    row = con.execute("""SELECT id, name FROM staff WHERE email=?
+        AND password_hash IS NOT NULL AND email_verified_at IS NOT NULL""", (email,)).fetchone()
+    if not row:
+        return None
+    reset_token = secrets.token_urlsafe(24)
+    expires_at = (datetime.now() + timedelta(hours=PASSWORD_RESET_EXPIRY_HOURS)).isoformat(timespec="seconds")
+    con.execute("UPDATE staff SET password_reset_token=?, password_reset_expires_at=? WHERE id=?",
+                (reset_token, expires_at, row["id"]))
+    con.commit()
+    return row["id"], row["name"], reset_token
+
+
+def confirm_password_reset(con, token, new_password):
+    """リセットURL経由での新パスワード確定。無効・期限切れトークンはFalseを返す。
+    成功時はトークンを使い捨てる(再利用不可)。"""
+    row = con.execute("SELECT id, password_reset_expires_at FROM staff WHERE password_reset_token=?",
+                       (token,)).fetchone()
+    if not row:
+        return False
+    if row["password_reset_expires_at"] and datetime.fromisoformat(row["password_reset_expires_at"]) < datetime.now():
+        return False
+    con.execute("""UPDATE staff SET password_hash=?, password_reset_token=NULL,
+        password_reset_expires_at=NULL WHERE id=?""", (hash_password(new_password), row["id"]))
+    con.commit()
+    return True
+
+
 def login_staff(con, email, password):
     """MIKOMERUのログイン画面相当。メールアドレス+パスワードでapi_keyを引く
     (ブラウザにセッションを持たせるのではなく、既存のBearer api_key方式と

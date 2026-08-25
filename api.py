@@ -154,6 +154,18 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            成功時、そのままAPIキー方式の認証に使えるapi_keyを
                            返す(ブラウザにセッションを持たせる方式ではなく、
                            既存のBearer api_key認証とそのまま互換にするため)
+  POST /api/password-reset/request  (認証不要・公開・T34) {"email"} →
+                           該当アカウントがあればパスワード再設定メールを送る。
+                           メールアドレス列挙攻撃を防ぐため、該当有無に関わらず
+                           常に同じ成功応答を返す(リセットURLは応答に含めない。
+                           T33のverify_pathフォールバックとは違い、ここは匿名の
+                           誰でも呼べるエンドポイントのため)
+  POST /api/password-reset/confirm  (認証不要・公開・T34) {"token","new_password"}
+                           → 新しいパスワードを確定する
+  GET  /reset-password/<token>  (認証不要・公開・T34) 新しいパスワードを入力する
+                           フォームページ。list_builder.htmlを経由せず、
+                           このページ単体でPOST /api/password-reset/confirmまで
+                           完結する(GET /verify/staff/<token>と同じ設計)
   GET  /api/tenant/announcements  公開中のお知らせ一覧(全テナント共通。
                            投稿はannouncements_cli.py、Web管理画面は作らない)
   GET  /api/tenant/activity-log   自テナントの操作履歴(リスト作成・送信開始を
@@ -238,6 +250,7 @@ _SEND_LOG_NOTE_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/note$")
 _SEND_LOG_MANUAL_SENT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/manual-sent$")
 _SEND_LOG_EXEC_NOTE_PATH_RE = re.compile(r"^/api/tenant/send-log/executions/(\d+)/note$")
 _VERIFY_STAFF_PATH_RE = re.compile(r"^/verify/staff/([A-Za-z0-9_-]+)$")
+_RESET_PASSWORD_PATH_RE = re.compile(r"^/reset-password/([A-Za-z0-9_-]+)$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
@@ -1162,6 +1175,124 @@ p{{font-size:13px;color:#333;line-height:1.7}}</style></head>
 <body><div class="card"><h1>{"✓" if ok else "×"} {title}</h1><p>{message}</p></div></body></html>"""
 
 
+def _send_password_reset_email(con, name, email, reset_token):
+    """パスワード再設定メールを実際にSendGrid経由で送る(T34)。呼び出し元に
+    例外を伝播させない(_send_staff_verification_emailと同じ「ログにだけ残す」
+    方針)。ここは戻り値を使わない — 呼び出し元(h_password_reset_request)は
+    メール列挙攻撃を防ぐため送信成否に関わらず常に同じ応答を返すため。"""
+    import senders
+    reset_url = f"{API_PUBLIC_URL}/reset-password/{reset_token}"
+    subject = "【AshiBase】パスワード再設定のご案内"
+    body = (f"{name} 様\n\n"
+            f"パスワード再設定のリクエストを受け付けました。以下のURLから新しい"
+            f"パスワードを設定してください"
+            f"(有効期限: 発行から{offers.PASSWORD_RESET_EXPIRY_HOURS}時間)。\n\n"
+            f"{reset_url}\n\n"
+            f"心当たりがない場合は、このメールを破棄してください"
+            f"(このメールを開くだけでパスワードが変更されることはありません)。")
+    default_sender = senders.Sender(name="AshiBase（足場ベース）", email="info@ashibase.jp",
+                                     address="", optout_url="https://ashibase.jp/optout")
+    mailer = senders.MailSender(con, dry_run=False)
+    try:
+        mailer._deliver(senders.Recipient(company_id=0, name=name, email=email),
+                        default_sender, subject, body)
+    except NotImplementedError:
+        print(f"  [パスワード再設定メール] メール送信基盤が未設定のため送信できません(宛先: {email})")
+    except Exception as e:  # noqa: BLE001
+        print(f"  [パスワード再設定メール] 送信に失敗しました(宛先: {email}): {e}")
+
+
+def h_password_reset_request(con, data):
+    """POST /api/password-reset/request(公開・認証不要)。{"email"} →
+    パスワード再設定メールを送る。メールアドレス列挙攻撃(このAPIの応答差から
+    「どのメールアドレスが登録済みか」を第三者が探れてしまう)を防ぐため、
+    該当アカウントの有無に関わらず常に同じ成功応答を返す。verify_pathの
+    フォールバック(T33)とは異なり、ここは公開・匿名で誰でも呼べるエンドポイント
+    なのでリセットURLを応答へ含めることは絶対にしない(含めてしまうと、他人の
+    メールアドレスを入力するだけでアカウント乗っ取りが成立してしまう)。"""
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return 400, {"error": "emailは必須です"}
+    res = offers.request_password_reset(con, email)
+    if res:
+        staff_id, name, reset_token = res
+        _send_password_reset_email(con, name, email, reset_token)
+    return 200, {"ok": True,
+                 "message": "ご入力のメールアドレスが登録済みであれば、パスワード再設定用のメールを送信しました"}
+
+
+def h_password_reset_confirm(con, data):
+    """POST /api/password-reset/confirm(公開・認証不要)。
+    {"token","new_password"} → 新しいパスワードを確定する。"""
+    token = (data.get("token") or "").strip()
+    new_password = data.get("new_password") or ""
+    if not token:
+        return 400, {"error": "tokenは必須です"}
+    if len(new_password) < 8 or len(new_password) > 64:
+        return 400, {"error": "パスワードは半角英数記号8〜64文字で指定してください"}
+    if not offers.confirm_password_reset(con, token, new_password):
+        return 400, {"error": "このURLは無効か、有効期限が切れています。再度パスワード再設定をお申し込みください"}
+    return 200, {"ok": True}
+
+
+def h_reset_password_page(token):
+    """GET /reset-password/<token>(公開)。MIKOMERUの「新しいパスワードを設定する」
+    画面相当。新パスワード入力→そのままこのページからJSで
+    POST /api/password-reset/confirmを叩く(list_builder.htmlを経由しなくても
+    リンクを開くだけで完結させるため、h_verify_staff_emailと同じ設計)。"""
+    return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<title>AshiBase — パスワード再設定</title>
+<style>body{{font-family:sans-serif;background:#EFF1F2;display:flex;align-items:center;
+  justify-content:center;min-height:100vh;margin:0}}
+.card{{background:#fff;border-radius:8px;padding:32px 40px;max-width:420px;width:100%;
+  box-shadow:0 2px 12px rgba(0,0,0,.08);box-sizing:border-box}}
+h1{{font-size:18px;color:#333;text-align:center;margin-top:0}}
+label{{display:block;font-size:12px;color:#555;margin:14px 0 4px}}
+input{{width:100%;box-sizing:border-box;padding:8px;font-size:14px;border:1px solid #ccc;
+  border-radius:4px}}
+button{{width:100%;margin-top:18px;padding:10px;font-size:14px;background:#4F8FEF;color:#fff;
+  border:none;border-radius:4px;cursor:pointer}}
+button:disabled{{background:#aaa;cursor:default}}
+.msg{{font-size:13px;line-height:1.7;margin-top:14px;text-align:center}}
+.msg.ok{{color:#1E7A4D}} .msg.err{{color:#B4441F}}</style></head>
+<body><div class="card">
+  <h1>新しいパスワードを設定</h1>
+  <label>新しいパスワード(半角英数記号8〜64文字)</label>
+  <input type="password" id="pw1">
+  <label>新しいパスワード(確認)</label>
+  <input type="password" id="pw2">
+  <button id="btn">パスワードを変更する</button>
+  <div id="msg" class="msg"></div>
+</div>
+<script>
+document.getElementById("btn").addEventListener("click", async () => {{
+  const pw1 = document.getElementById("pw1").value;
+  const pw2 = document.getElementById("pw2").value;
+  const msg = document.getElementById("msg");
+  const btn = document.getElementById("btn");
+  if (pw1 !== pw2) {{ msg.className = "msg err"; msg.textContent = "パスワードが一致しません"; return; }}
+  if (pw1.length < 8 || pw1.length > 64) {{
+    msg.className = "msg err"; msg.textContent = "パスワードは半角英数記号8〜64文字で指定してください"; return;
+  }}
+  btn.disabled = true;
+  try {{
+    const res = await fetch("/api/password-reset/confirm", {{
+      method: "POST", headers: {{"Content-Type": "application/json"}},
+      body: JSON.stringify({{token: {json.dumps(token)}, new_password: pw1}}),
+    }});
+    const body = await res.json().catch(() => ({{}}));
+    if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+    msg.className = "msg ok";
+    msg.textContent = "パスワードを変更しました。ログイン画面から新しいパスワードでログインしてください。";
+    btn.disabled = true;
+  }} catch (e) {{
+    msg.className = "msg err"; msg.textContent = e.message; btn.disabled = false;
+  }}
+}});
+</script>
+</body></html>"""
+
+
 def h_login(con, data):
     """POST /api/login(公開)。MIKOMERUのメールアドレス+パスワードでの
     ログイン画面相当。成功時はそのままapi_keyを返し、フロントは既存の
@@ -1657,6 +1788,10 @@ class Handler(BaseHTTPRequestHandler):
                 st, res = h_optout(con, data)
             elif path == "/api/login":
                 st, res = h_login(con, data)
+            elif path == "/api/password-reset/request":
+                st, res = h_password_reset_request(con, data)
+            elif path == "/api/password-reset/confirm":
+                st, res = h_password_reset_confirm(con, data)
             else:
                 st, res = 404, {"error": "not found"}
         except Exception as e:  # noqa: BLE001
@@ -1829,6 +1964,14 @@ class Handler(BaseHTTPRequestHandler):
             verify_staff_match = _VERIFY_STAFF_PATH_RE.match(u.path)
             if verify_staff_match:
                 body = h_verify_staff_email(con, verify_staff_match.group(1)).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                return self.wfile.write(body)
+            reset_password_match = _RESET_PASSWORD_PATH_RE.match(u.path)
+            if reset_password_match:
+                body = h_reset_password_page(reset_password_match.group(1)).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -3170,6 +3313,53 @@ def self_test(port=8899):
     t("再発行後のリンクでも認証できる", st == 200 and "認証完了".encode() in body)
     st, r = post_auth("/api/tenant/staff/resend", {"staff_id": t21b_staff_id}, token=key_a)
     t("認証済みの担当者を再発行しようとすると404", st == 404)
+
+    print("\n── パスワードリセット(T34, MIKOMERUの「パスワードをお忘れの方」相当) ──")
+    st, r = post("/api/password-reset/request", {"email": "not-registered@test-a.example.co.jp"})
+    t("未登録のメールアドレスでも200で汎用メッセージが返る(メールアドレス列挙攻撃対策)",
+      st == 200 and r.get("ok") is True and "verify_path" not in r and "reset_path" not in r
+      and "token" not in json.dumps(r))
+
+    t34_captured = []
+
+    def _fake_reset_deliver(self, to, sender, subject, body):
+        t34_captured.append((to.email, body))
+        return _senders_mod.SendResult(ok=True, provider_id="fake-msg")
+
+    _senders_mod.MailSender._deliver = _fake_reset_deliver
+    try:
+        st, r = post("/api/password-reset/request", {"email": "t21@test-a.example.co.jp"})
+        t("登録済み・認証済みのメールアドレスなら同じ200応答で、実際にメールが送られる",
+          st == 200 and r.get("ok") is True and "reset_path" not in r
+          and len(t34_captured) == 1 and t34_captured[0][0] == "t21@test-a.example.co.jp")
+        reset_body = t34_captured[0][1]
+        t34_reset_match = re.search(r"/reset-password/([A-Za-z0-9_-]+)", reset_body)
+        t("メール本文にパスワード再設定URLが含まれる", bool(t34_reset_match))
+        t34_reset_token = t34_reset_match.group(1)
+    finally:
+        _senders_mod.MailSender._deliver = orig_deliver
+
+    st, body = get(f"/reset-password/{t34_reset_token}")
+    t("GET /reset-password/<token> でフォームページが返る",
+      st == 200 and "新しいパスワード".encode() in body)
+
+    st, r = post("/api/password-reset/confirm", {"token": "no-such-token", "new_password": "newpass123"})
+    t("無効なトークンでの確定は400", st == 400)
+
+    st, r = post("/api/password-reset/confirm", {"token": t34_reset_token, "new_password": "short"})
+    t("短すぎる新パスワードは400", st == 400)
+
+    st, r = post("/api/password-reset/confirm", {"token": t34_reset_token, "new_password": "newpass123"})
+    t("有効なトークン+新パスワードで確定できる", st == 200 and r.get("ok") is True)
+
+    st, r = post("/api/login", {"email": "t21@test-a.example.co.jp", "password": "pass1234"})
+    t("リセット後は旧パスワードでログインできなくなる", st == 401)
+    st, r = post("/api/login", {"email": "t21@test-a.example.co.jp", "password": "newpass123"})
+    t("リセット後は新パスワードでログインできる",
+      st == 200 and r.get("api_key", "").startswith("tk_"))
+
+    st, r = post("/api/password-reset/confirm", {"token": t34_reset_token, "new_password": "anotherpass1"})
+    t("使用済みのトークンは再利用できない(使い捨て)", st == 400)
 
     st, r = post_auth("/api/tenant/staff",
                       {"name": "従来方式担当者", "email": "legacy@test-a.example.co.jp"}, token=key_a)

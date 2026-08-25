@@ -913,6 +913,15 @@ tr.clickable:hover{background:var(--accent-soft)}
           </div>
           <div class="btnrow"><button id="btnLogin">ログイン</button></div>
           <div id="loginResult"></div>
+          <p class="hint" style="margin-top:10px">
+            <a href="#" id="linkForgotPassword">パスワードをお忘れですか？</a>
+          </p>
+          <div id="forgotPasswordBox" style="display:none;margin-top:10px">
+            <label>登録済みのメールアドレス</label>
+            <input type="text" id="forgotEmail" placeholder="例: yamada@example.co.jp">
+            <div class="btnrow"><button id="btnForgotPassword">パスワード再設定メールを送る</button></div>
+            <div id="forgotPasswordResult"></div>
+          </div>
         </div>
       </section>
 
@@ -1894,6 +1903,31 @@ $("btnLogin").addEventListener("click", async () => {
     el.innerHTML = `<div class="result ok">ログインしました(${body.tenant_name || ""} / ${body.staff_name || ""})</div>`;
     $("apiKey").value = body.api_key;
     $("btnConnect").click();
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+});
+
+$("linkForgotPassword").addEventListener("click", (e) => {
+  e.preventDefault();
+  const box = $("forgotPasswordBox");
+  box.style.display = box.style.display === "none" ? "" : "none";
+});
+
+$("btnForgotPassword").addEventListener("click", async () => {
+  const email = $("forgotEmail").value.trim();
+  const el = $("forgotPasswordResult");
+  if (!email) { el.innerHTML = `<div class="result err">メールアドレスを入力してください</div>`; return; }
+  const base = $("apiBase").value.trim();
+  if (!base) { el.innerHTML = `<div class="result err">先にAPIサーバURLを入力してください</div>`; return; }
+  try {
+    const res = await fetch(base.replace(/\/$/, "") + "/api/password-reset/request", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+    el.innerHTML = `<div class="result ok">${body.message}</div>`;
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }

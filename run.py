@@ -12,6 +12,7 @@ import argparse, subprocess, sys
 from datetime import datetime
 
 import db
+import storage
 
 PY = sys.executable
 
@@ -85,8 +86,7 @@ STEPS = [
     dict(key="offers", desc="オファー/テナント定義",
          pre=lambda con: (True, ""),
          run=lambda con, demo: sh(["offers.py", "init"]),
-         done=lambda con: con.execute(
-             "SELECT COUNT(*) c FROM sqlite_master WHERE name='offers'").fetchone()["c"] == 1
+         done=lambda con: storage.table_exists(con, "offers")
              and con.execute("SELECT COUNT(*) c FROM offers").fetchone()["c"] > 0),
 
     dict(key="scoring", desc="スコアリング V1",
@@ -166,6 +166,11 @@ def status(con):
         try:
             done = s["done"](con)
         except Exception:
+            # Postgresは失敗した文があるとロールバックするまで同じトランザクション上の
+            # 以後の文をすべて拒否する(SQLiteには無い挙動)。doneチェックの失敗を
+            # ここで「未完了」として握り潰す以上、次のステップのdoneチェックに
+            # 影響しないよう明示的に巻き戻す。
+            con.rollback()
             done = False
         mark = "✓ 完了" if done else "・未"
         print(f"  {s['key']:<10} {s['desc']:<22} {mark}")
@@ -180,6 +185,10 @@ def status_dict(con):
         try:
             steps[s["key"]] = bool(s["done"](con))
         except Exception:
+            # status()と同じ理由でロールバックする(下のby_rank/active_campaigns
+            # クエリがこの関数内で連続して実行されるため、ここで巻き戻さないと
+            # それらまで巻き添えで失敗する)。
+            con.rollback()
             steps[s["key"]] = False
     by_rank = {r: 0 for r in ["S", "A", "B", "C"]}
     for row in con.execute(
@@ -187,9 +196,8 @@ def status_dict(con):
         if row["rank"] in by_rank:
             by_rank[row["rank"]] = row["c"]
     # campaignsテーブルにactive/inactiveの区別がないため、全キャンペーン数を暫定値とする
-    active_campaigns = con.execute(
-        "SELECT COUNT(*) c FROM sqlite_master WHERE name='campaigns'").fetchone()["c"] and \
-        con.execute("SELECT COUNT(*) c FROM campaigns").fetchone()["c"] or 0
+    active_campaigns = (con.execute("SELECT COUNT(*) c FROM campaigns").fetchone()["c"]
+                         if storage.table_exists(con, "campaigns") else 0)
     last_run_at = con.execute("SELECT MAX(finished_at) m FROM run_log").fetchone()["m"]
     return {
         "companies_total": n_companies(con),

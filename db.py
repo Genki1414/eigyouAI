@@ -304,7 +304,7 @@ def migrate(con):
     # 耐障害化・マルチオファー・送信先リストのテーブルも常に作る(実行順序に依存させない)。
     # 下のALTER列(tenants.api_key等)より前に置くこと — でないと対象テーブルが
     # まだ存在せずALTERが失敗する
-    import resilience, offers as _offers, target_lists as _tl, monitor as _monitor
+    import resilience, offers as _offers, target_lists as _tl, monitor as _monitor, storage
     con.executescript(resilience.SCHEMA)
     con.executescript(_offers.SCHEMA)
     con.executescript(_tl.SCHEMA)
@@ -470,7 +470,7 @@ def migrate(con):
         ("tenants", "monthly_send_quota", "INTEGER"),
         ("tenants", "daily_send_quota", "INTEGER"),
     ]:
-        cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        cols = storage.table_columns(con, table)
         if col not in cols:
             con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
     con.execute("UPDATE target_lists SET updated_at=created_at WHERE updated_at IS NULL")
@@ -512,7 +512,7 @@ def dedup(con):
     dupes = con.execute("""
         SELECT MIN(id) keep, COUNT(*) n, name_norm, pref FROM companies
         WHERE dedup_of IS NULL AND name_norm IS NOT NULL
-        GROUP BY name_norm, pref HAVING n > 1""").fetchall()
+        GROUP BY name_norm, pref HAVING COUNT(*) > 1""").fetchall()
     merged = 0
     for d in dupes:
         con.execute("""UPDATE companies SET dedup_of=? WHERE name_norm=? AND pref=? AND id<>?""",
@@ -563,13 +563,13 @@ def can_contact(con, company_id, tenant_id=None, allow_warm=False):
     # provider_id=mock_で始まるnoteをドライラン分として除外する。他の判定
     # <sync_target_list_member_status()等>と同じ判別方法)。
     n = con.execute("""SELECT COUNT(*) FROM touches WHERE company_id=? AND sent_at IS NOT NULL
-                       AND instr(COALESCE(note,''), 'provider_id=mock_') = 0""",
+                       AND COALESCE(note,'') NOT LIKE '%provider_id=mock_%'""",
                     (company_id,)).fetchone()[0]
     if n >= C.MAX_LIFETIME_TOUCHES:
         return False, f"生涯接触上限({C.MAX_LIFETIME_TOUCHES}回)到達"
     last = con.execute("""SELECT MAX(sent_at) FROM touches
                           WHERE company_id=? AND sent_at IS NOT NULL
-                          AND instr(COALESCE(note,''), 'provider_id=mock_') = 0""",
+                          AND COALESCE(note,'') NOT LIKE '%provider_id=mock_%'""",
                        (company_id,)).fetchone()[0]
     if last:
         try:

@@ -696,7 +696,7 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
         recently_sent = {row["company_id"] for row in con.execute(
             f"""SELECT DISTINCT company_id FROM touches
                 WHERE company_id IN ({placeholders}) AND sent_at IS NOT NULL AND sent_at>=?
-                  AND instr(COALESCE(note,''), 'provider_id=mock_')=0""",
+                  AND COALESCE(note,'') NOT LIKE '%provider_id=mock_%'""",
             member_ids + [cutoff]).fetchall()}
         if recently_sent:
             cancelled_recent = len(recently_sent)
@@ -750,7 +750,7 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
             VALUES (?,?,'フォーム','A',1,?,?)
             ON CONFLICT(campaign_id, company_id, step) DO UPDATE SET
                 subject=excluded.subject, body=excluded.body
-            WHERE touches.sent_at IS NULL OR instr(touches.note, 'provider_id=mock_') > 0""",
+            WHERE touches.sent_at IS NULL OR touches.note LIKE '%provider_id=mock_%'""",
             (campaign_id, m["id"], subject, body))
     if not dry_run:
         # 実送信の直前に「処理中」を記録しておく。サーバー再起動等で送信が

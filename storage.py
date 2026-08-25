@@ -32,6 +32,16 @@ import sys
 
 import config as C
 
+# 一意制約違反(=想定内の重複。冪等性チェック等がexcept節で捕まえる)を、
+# バックエンドを問わず同じ書き方で検出できるようにする。
+# psycopgはPostgres移行時のみ必須(requirements.txt参照)なので、未インストール
+# 環境(SQLiteのみで動かしている場合)でもstorage.py自体のimportは壊さない。
+try:
+    import psycopg as _psycopg
+    IntegrityError = (sqlite3.IntegrityError, _psycopg.errors.IntegrityError)
+except ImportError:
+    IntegrityError = (sqlite3.IntegrityError,)
+
 
 def backend():
     url = os.environ.get("DATABASE_URL", "")
@@ -62,10 +72,17 @@ def to_pg_sql(sql: str) -> str:
         raise ValueError("INSERT OR REPLACE は Postgres 非対応。"
                          "ON CONFLICT (key) DO UPDATE を明示してください: " + s[:80])
     s = re.sub(r"\bdatetime\('now'\)", "now()", s, flags=re.I)
-    # プレースホルダ ? → %s（文字列リテラル内の ? は変換しない）
+    # プレースホルダ ? → %s（文字列リテラル内の ? は変換しない）。
+    # psycopgはpyformat方式("%s")でパラメータを渡すため、クエリ文字列中の
+    # リテラルな"%"(LIKE 'provider_id=mock_%'のような)もすべて"%%"に
+    # エスケープしないと、'%p'のような並びをプレースホルダと誤認して
+    # ProgrammingErrorになる(SQLの文字列リテラルの中かどうかは無関係に、
+    # psycopg側は生のテキストとして%記法をスキャンするため)。
     out, in_str, quote = [], False, ""
     for ch in s:
-        if in_str:
+        if ch == "%":
+            out.append("%%")
+        elif in_str:
             out.append(ch)
             if ch == quote:
                 in_str = False
@@ -76,7 +93,113 @@ def to_pg_sql(sql: str) -> str:
             out.append("%s")
         else:
             out.append(ch)
-    return "".join(out)
+    s = "".join(out)
+    # プレースホルダ単体のIS NULL判定(例: `pref=? OR ? IS NULL`)は、その値が
+    # 他の場所で列と比較されず型のヒントが無いため、psycopgが
+    # 「IndeterminateDatatype」で型を推論できずエラーになる。IS NULLは
+    # 値そのものの型を問わない(Noneかどうかしか見ない)ので、textへ明示
+    # キャストしても意味は変わらない——ここで一律キャストして解決する。
+    s = re.sub(r"%s(\s+IS(?:\s+NOT)?\s+NULL)", r"%s::text\1", s, flags=re.I)
+    return s
+
+
+_INSERT_INTO_RE = re.compile(r"^\s*INSERT\s+INTO\s+(\w+)", re.I)
+
+
+class _PgRow:
+    """psycopgの1行分の結果を、sqlite3.Row(row_factory=sqlite3.Row)と同じ感覚で
+    使えるようにする(位置アクセスrow[0]・列名アクセスrow["col"]・dict(row)への
+    変換、の3通りすべてに対応する)。psycopg標準のrow_factoryは
+    tuple_row(位置のみ)かdict_row(列名のみ)のどちらか一方しか満たさず、
+    このコードベースはsqlite3時代からの書き方でその両方を使っているため、
+    どちらのアクセス方法で書かれた既存コードも変更せずに動かすには
+    このハイブリッド型が要る。"""
+    __slots__ = ("_values", "_index")
+
+    def __init__(self, values, index):
+        self._values = values
+        self._index = index
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return self._values[self._index[key]]
+        return self._values[key]
+
+    def keys(self):
+        return self._index.keys()
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+    def __eq__(self, other):
+        if isinstance(other, _PgRow):
+            return self._values == other._values and self._index == other._index
+        return NotImplemented
+
+    def __repr__(self):
+        return repr(dict(zip(self._index, self._values)))
+
+
+def _hybrid_row_factory(cursor):
+    """psycopgのrow_factoryプロトコル。cursor.descriptionが確定した時点
+    (実行直後)で1回呼ばれ、以後1行受け取るたびにここで返した関数が呼ばれる。"""
+    index = {d.name: i for i, d in enumerate(cursor.description)} if cursor.description else {}
+
+    def make_row(values):
+        return _PgRow(values, index)
+    return make_row
+
+
+# id列がSERIAL(SQLite側はINTEGER PRIMARY KEY AUTOINCREMENT)のテーブル一覧。
+# execute()がRETURNING idを自動で足せる/足してよい対象を安全に絞り込むために使う
+# (このコードベースの主キー名は"id"で統一されていないテーブルが複数ある。
+# 例: suppression/dormantはcompany_id、idempotency/alert_stateはkey、
+# tenant_kill_switch/autofill_queueはtenant_id、target_list_members/checkpoints/
+# tenant_exclusionsは複合キー。それらに無条件で"RETURNING id"を足すとPostgres側で
+# 「column "id" does not exist」エラーになるため、決め打ちのホワイトリストにする)。
+# migrate_to_postgres.pyのシーケンス再設定対象とも同じ集合なので、そちらからも
+# この定数を参照する。
+SERIAL_ID_TABLES = {
+    "companies", "campaigns", "touches", "message_templates", "sender_templates",
+    "announcements", "scheduled_sends", "run_log", "form_send_log",
+    "tenants", "offers", "staff", "target_lists", "search_log",
+}
+
+
+class _PgCursorWrapper:
+    """psycopg.Cursorをsqlite3.Cursorと同じ形で使えるようにする薄いラッパ。
+    最大の差分はcur.lastrowid: sqlite3は標準で持つがpsycopgには無い
+    (Postgresの流儀はRETURNINGで返り値を取ること)。db.py/api.py等が
+    「cur = con.execute('INSERT ...'); id = cur.lastrowid」という書き方を
+    多用しているため、ここでSQLに自動でRETURNING idを足し、結果を
+    lastrowidとして先読みしておくことで、呼び出し側を一切変えずに動かす。"""
+
+    def __init__(self, cur, lastrowid=None):
+        self._cur = cur
+        self.lastrowid = lastrowid
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    def fetchmany(self, size=None):
+        return self._cur.fetchmany(size) if size is not None else self._cur.fetchmany()
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    @property
+    def description(self):
+        return self._cur.description
+
+    def __iter__(self):
+        return iter(self._cur)
 
 
 class PgConnection:
@@ -85,13 +208,35 @@ class PgConnection:
 
     def __init__(self, dsn):
         import psycopg
-        from psycopg.rows import dict_row
-        self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=False)
+        self._conn = psycopg.connect(dsn, row_factory=_hybrid_row_factory, autocommit=False)
 
     def execute(self, sql, params=()):
+        pg_sql = to_pg_sql(sql)
         cur = self._conn.cursor()
-        cur.execute(to_pg_sql(sql), tuple(params) if params else None)
-        return cur
+        # SERIAL_ID_TABLES(=id列を持つテーブル)への単純なINSERT(RETURNING未指定・
+        # ON CONFLICT無し)にはRETURNING idを自動で足し、cur.lastrowidとして
+        # 先読みする(呼び出し側の29箇所がこれに依存している)。それ以外の
+        # テーブル(meta/idempotency/suppression等、主キー列名が"id"でない、
+        # または複合主キー)は対象外——無条件に足すとPostgres側で
+        # 「column "id" does not exist」エラーになる。
+        m = _INSERT_INTO_RE.match(pg_sql)
+        target_table = m.group(1) if m else None
+        wants_returning = (target_table in SERIAL_ID_TABLES
+                           and "RETURNING" not in pg_sql.upper()
+                           and "ON CONFLICT" not in pg_sql.upper())
+        if wants_returning:
+            pg_sql = pg_sql.rstrip().rstrip(";") + " RETURNING id"
+        cur.execute(pg_sql, tuple(params) if params else None)
+        lastrowid = None
+        if wants_returning:
+            row = cur.fetchone()
+            lastrowid = row["id"] if row else None
+        return _PgCursorWrapper(cur, lastrowid=lastrowid)
+
+    def executemany(self, sql, params_seq):
+        cur = self._conn.cursor()
+        cur.executemany(to_pg_sql(sql), [tuple(p) for p in params_seq])
+        return _PgCursorWrapper(cur)
 
     def executescript(self, script):
         cur = self._conn.cursor()
@@ -110,6 +255,25 @@ class PgConnection:
 
     def cursor(self):
         return self._conn.cursor()
+
+
+def table_columns(con, table):
+    """テーブルの列名集合を返す(バックエンド差分をここで吸収する)。
+    db.migrate()の「無ければ列を足す」ロジック(PRAGMA table_info相当)が
+    両バックエンドで動くようにするために存在する。"""
+    if backend() == "postgres":
+        rows = con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name=?",
+            (table,)).fetchall()
+        return {r["column_name"] for r in rows}
+    rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+    return {r["name"] for r in rows}
+
+
+def table_exists(con, table):
+    """テーブルの存在確認(sqlite_master/information_schemaの差分をここで吸収する)。
+    run.pyのSTEPS完了判定など「テーブルが作られたか」を見たい箇所向け。"""
+    return bool(table_columns(con, table))
 
 
 def connect(timeout=30.0):
@@ -169,8 +333,11 @@ if __name__ == "__main__":
         cases = [
             ("INSERT OR IGNORE INTO t (a,b) VALUES (?,?)",
              "INSERT INTO t (a,b) VALUES (%s,%s) ON CONFLICT DO NOTHING"),
+            # psycopgはpyformat("%s")でパラメータを渡すため、SQL文中のリテラルな
+            # "%"(LIKEパターン等)は"%%"にエスケープしないとプレースホルダと
+            # 誤認される。'?'は文字列リテラル内なのでプレースホルダ変換対象外のまま。
             ("SELECT * FROM t WHERE a=? AND b LIKE '%?%'",
-             "SELECT * FROM t WHERE a=%s AND b LIKE '%?%'"),
+             "SELECT * FROM t WHERE a=%s AND b LIKE '%%?%%'"),
             ("UPDATE t SET x=datetime('now') WHERE id=?",
              "UPDATE t SET x=now() WHERE id=%s"),
         ]

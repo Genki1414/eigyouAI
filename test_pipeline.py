@@ -102,14 +102,25 @@ def main():
               for ch, cost in C.UNIT_COST_YEN.items()))
 
     print("\n── 耐障害性 ──")
-    check("WALモードが有効（読み書きが互いをブロックしない）",
-          con.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal")
-    check("busy_timeoutが設定されている",
-          con.execute("PRAGMA busy_timeout").fetchone()[0] >= 10000)
-    check("チェックポイント表が存在（中断から再開できる）",
-          q("SELECT COUNT(*) FROM sqlite_master WHERE name='checkpoints'") == 1)
-    check("冪等キー表が存在（二重送信を防げる）",
-          q("SELECT COUNT(*) FROM sqlite_master WHERE name='idempotency'") == 1)
+    import storage
+    if storage.backend() == "sqlite":
+        check("WALモードが有効（読み書きが互いをブロックしない）",
+              con.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal")
+        check("busy_timeoutが設定されている",
+              con.execute("PRAGMA busy_timeout").fetchone()[0] >= 10000)
+        check("チェックポイント表が存在（中断から再開できる）",
+              q("SELECT COUNT(*) FROM sqlite_master WHERE name='checkpoints'") == 1)
+        check("冪等キー表が存在（二重送信を防げる）",
+              q("SELECT COUNT(*) FROM sqlite_master WHERE name='idempotency'") == 1)
+    else:
+        # PostgresはWAL+MVCCが既定で常時有効なため、SQLite同様のPRAGMA相当の
+        # 確認は不要(storage.py PgConnectionのdocstring/notes()参照)。
+        # テーブル存在確認はinformation_schemaで同じ意味の検証を行う
+        print("  · WALモード・busy_timeout: PostgresはMVCCで並列書き込み可のため対象外")
+        check("チェックポイント表が存在（中断から再開できる）",
+              q("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='checkpoints'") == 1)
+        check("冪等キー表が存在（二重送信を防げる）",
+              q("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='idempotency'") == 1)
     import resilience as R
     check("レートリミッターがサービス別に定義されている",
           all(k in R.LIMITS for k in ["anthropic", "sendgrid", "fax_api", "sms"]))

@@ -2189,9 +2189,102 @@ CI(`deploy.yml`)には`api.py test`/`test_pipeline.py`を含めなかった
 これで5点の運用課題(①デプロイ自動化・②パスワードリセット・③監視アラート
 ・④バックアップ構築・⑤テンプレート編集)がすべて完了した。
 
-**次のステップ**: 元の技術ロードマップへ戻る。②Postgres移行→③送信処理の
-並列化→④送信元IPの分散(プロキシ)→⑤企業データ母数の拡大、の順で対応予定
-(T30時点の合意通り)。余力があれば`run.py all --demo`のバグ調査(T38参照)も候補。
+### T40. Postgresバックエンド対応(②Postgres移行)(2026-08-25)
+
+元の技術ロードマップ(T30時点の合意)の②。`storage.py`にはPostgres用の
+dialect変換コード(`to_pg_ddl()`/`to_pg_sql()`/`PgConnection`)が以前から
+存在していたが、実際のPostgresサーバーに一度も接続して検証されたことが
+無い「机上のコード」だった。今回、ローカルにPostgres 16を立てて実際に
+`db.migrate()`・`api.py test`(307項目)・`test_pipeline.py`・データ移行を
+すべて実行し、見つかった不具合をすべて修正した。**本番のDATABASE_URLは
+まだ切り替えていない**(切替は別途ユーザー判断)。
+
+見つけて直した不具合(すべて実機のPostgresで再現・修正確認済み):
+
+- **`PRAGMA table_info`はPostgresに無い**: `db.migrate()`の「列が無ければ
+  追加する」ロジックが使っていた。`storage.table_columns()`/
+  `storage.table_exists()`を新設し、バックエンドに応じて
+  `information_schema.columns`と切り替えるようにした。同じ理由で
+  `run.py`の2箇所にあった`sqlite_master`への直接クエリ(ステップ完了判定・
+  `active_campaigns`集計)も`storage.table_exists()`経由に置き換えた。
+- **`cur.lastrowid`がpsycopgに無い**: 29箇所が依存していた。
+  `PgConnection.execute()`で、`id`列を持つ既知のテーブル
+  (`storage.SERIAL_ID_TABLES`で明示的に列挙。`meta`/`idempotency`等の
+  `id`以外が主キーのテーブルは対象外)への単純なINSERTにだけ
+  `RETURNING id`を自動追加し、`_PgCursorWrapper.lastrowid`として先読みする
+  ようにした。
+- **`dict_row`だと`row[0]`の位置アクセスができない**: 56箇所以上が
+  `sqlite3.Row`と同じ感覚で位置アクセス・列名アクセス・`dict(row)`変換の
+  3通りを使っていたため、その全部に対応する`_PgRow`/`_hybrid_row_factory`
+  を実装して差し替えた。
+- **`con.executemany()`がPgConnectionに無かった**: `target_lists.py`等が
+  使用しており未実装だと`AttributeError`になるところだった。追加した。
+- **`_once()`(冪等性チェック)の例外クラスがSQLite専用だった**:
+  `except sqlite3.IntegrityError`はPostgres下では発生した
+  `psycopg.errors.IntegrityError`を捕まえられず、しかもPostgresは
+  失敗した文があるとロールバックするまで同じトランザクション上の以後の
+  文をすべて拒否する(SQLiteには無い挙動)ため、直後の正常なクエリまで
+  連鎖して失敗していた。`storage.IntegrityError`(バックエンド非依存の
+  例外タプル)を新設し、`api.py`の`_once()`で`except storage.IntegrityError`
+  + `con.rollback()`に変更。同じ理由で`run.py`の`status()`/`status_dict()`の
+  broad `except Exception:`にも防御的に`con.rollback()`を追加した(将来
+  ここで別の想定外エラーが起きても、以後のクエリを巻き添えにしないため)。
+- **`? IS NULL`単体のプレースホルダで型推論エラー**
+  (`psycopg.errors.IndeterminateDatatype`): `pref=? OR ? IS NULL`のような
+  「列と比較されない単独のプレースホルダ」はpsycopgが型を推論できない。
+  IS NULLは値の型を問わないため実害無くtextへキャストできる。
+  `to_pg_sql()`で`%s IS NULL`/`%s IS NOT NULL`を機械的に`%s::text IS NULL`
+  等へ変換するようにした。
+- **クエリ文字列中のリテラルな`%`がプレースホルダと誤認される**
+  (`psycopg.ProgrammingError: only '%s'...`): `LIKE '%foo%'`のような
+  リテラルの`%`を、psycopgはSQL文字列リテラルの中かどうかに関係なく
+  生テキストとしてスキャンしてしまう。`to_pg_sql()`で全ての`%`を`%%`に
+  エスケープしてから`?`→`%s`変換するよう修正(`storage.py test`の期待値も
+  この正しい挙動に合わせて更新)。
+- **`HAVING n > 1`(SELECT別名をHAVINGで参照)はPostgresでは不可**:
+  `db.dedup()`が使っていた。標準SQLとしても本来非対応の書き方だったため、
+  `HAVING COUNT(*) > 1`という両バックエンドで動く書き方に修正
+  (SQLite側も含め、これはPostgres専用の分岐ではなく単なるSQL修正)。
+- **`instr()`はSQLite専用関数**: `db.py`/`target_lists.py`/`senders.py`の
+  計5箇所が「ドライラン分の送信履歴を除外する」判定に使っていた
+  (`instr(note, 'provider_id=mock_') = 0`等)。Postgresの`position()`へ
+  分岐させる案もあったが、判定の意味は「部分文字列を含むか」だけなので、
+  両バックエンドで動く`LIKE '%provider_id=mock_%'`に統一した(これも
+  Postgres専用分岐ではなく単なるSQL修正)。
+- **(テスト自体のバグ)`LIMIT 1`(ORDER BY無し)で拾う行がSQLiteとPostgresで
+  異なった**: `api.py test`の自動入力テストが「リストの先頭の1社」を
+  `ORDER BY`無しの`LIMIT 1`で拾っていたが、実際に送信されたのはリストの
+  一部の企業のみ(送信上限のガードで残りは送られない)だったため、
+  たまたまSQLiteのデフォルト行順序では「送信済みの企業」が返り、
+  Postgresでは「未送信の企業」が返っていた。`touches`とJOINして
+  「実際にそのキャンペーンで送信された1社」を確実に拾うよう修正。
+
+新規作成: **`migrate_to_postgres.py`**——既存のSQLite(`out/companies.db`)の
+データをPostgresへコピーする移行スクリプト。外部キー依存順に26テーブルを
+バッチ転送し(`executemany`、2000件区切り)、`id`列がSERIALなテーブルは
+コピー後に`setval(pg_get_serial_sequence(...), MAX(id))`でシーケンスを
+合わせる。`--verify`で件数突合のみ実行可能。ローカルのテスト用Postgresへ
+実データ(companies 38,324件など計125,656件・26テーブル)を移行し、
+件数100%一致を確認済み。本番切替の手順はスクリプト冒頭のdocstringに記載
+(バックアップ取得→送信停止→移行→件数確認→`DATABASE_URL`設定→再起動→
+疎通確認→送信再開、の順)。
+
+検証結果: ローカルPostgres16に対して`api.py test`(307/307成功)・
+`test_pipeline.py`(42/48成功。残り4件は`test_pipeline.py`のセクションで
+以前から既知のデータドリフト起因の失敗であり、SQLite側でも同じ4件が
+同じ理由で失敗する。Postgres固有の問題ではない)を確認。加えて、上記の
+変更がSQLite側を壊していないことを`api.py test`(307/307)・
+`senders.py test`・`storage.py test`(5/5)・`monitor.py test`・
+`backup.py test`・`test_concurrency.py`をSQLiteバックエンドで再実行して
+確認済み。
+
+**本番切替はまだ行っていない**(`DATABASE_URL`は本番サーバーで未設定の
+まま=引き続きSQLiteで稼働中)。切替は不可逆性の高い判断のため、ユーザーの
+明示的な合意を得てから別途実施する。
+
+**次のステップ**: ③送信処理の並列化→④送信元IPの分散(プロキシ)→
+⑤企業データ母数の拡大、の順で対応予定(T30時点の合意通り)。余力があれば
+`run.py all --demo`のバグ調査(T38参照)も候補。
 
 ---
 

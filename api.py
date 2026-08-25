@@ -225,6 +225,7 @@ import db
 import metrics
 import offers
 import run as R
+import storage
 import target_lists as TL
 
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "dev-secret-change-me")
@@ -273,7 +274,12 @@ def _once(con, key):
                     (key, datetime.now().isoformat(timespec="seconds")))
         con.commit()
         return True
-    except sqlite3.IntegrityError:
+    except storage.IntegrityError:
+        # Postgresは失敗した文があるとロールバックするまで同じトランザクション上の
+        # 以後の文をすべて拒否する(SQLiteには無い挙動)。ここで一意制約違反を
+        # 「想定内の重複」として握り潰す以上、そのまま続けられるよう明示的に
+        # 巻き戻す(sqlite3.Connection.rollback()は何も無くても安全に呼べる)。
+        con.rollback()
         return False
 
 
@@ -2984,10 +2990,15 @@ def self_test(port=8899):
     t("存在しないログIDは404", st == 404)
 
     print("\n── 自動入力(手動送信サポート機能) ──")
-    # list_a_idは既にdry_run送信済み(subject=テスト件名/body=テスト本文がtouchesに
-    # 入っている)。その中の1社について、自動送信が失敗した想定のログを1件作る
+    # list_a_idは既にdry_run送信済みだが、送信上限等により全社が送信対象になるとは
+    # 限らないため、実際にtouchesが入っている(=文面を復元できる)会社を選ぶ
+    # (ORDER BY無しのLIMIT 1はSQLiteとPostgresで返る行が異なりうるため、
+    # touchesとJOINして「送信済みの1社」を確実に選ぶ)
     af_company = con.execute("""SELECT c.id FROM target_list_members m
-        JOIN companies c ON c.id=m.company_id WHERE m.list_id=? LIMIT 1""", (list_a_id,)).fetchone()
+        JOIN companies c ON c.id=m.company_id
+        JOIN touches t ON t.company_id=c.id AND t.campaign_id=(
+            SELECT campaign_id FROM target_lists WHERE id=?)
+        WHERE m.list_id=? LIMIT 1""", (list_a_id, list_a_id)).fetchone()
     con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url,
         started_at, status, reason_code)
         VALUES (?, ?, ?, 'https://example.co.jp/autofill-test', ?, 'FAILED_UNSUPPORTED',

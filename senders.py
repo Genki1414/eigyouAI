@@ -569,7 +569,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
            LEFT JOIN tenants tn ON tn.id = o.tenant_id
            LEFT JOIN target_lists tl ON tl.campaign_id = t.campaign_id
            WHERE t.campaign_id=? AND t.step=?
-             AND (t.sent_at IS NULL OR instr(t.note, 'provider_id=mock_') > 0)
+             AND (t.sent_at IS NULL OR t.note LIKE '%provider_id=mock_%')
              AND t.body IS NOT NULL AND t.body != ''"""
     p = [campaign_id, step]
     if limit:

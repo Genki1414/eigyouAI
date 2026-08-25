@@ -1,7 +1,8 @@
 """
 db.py — スキーマ / マイグレーション / 接触ガード
 これまで各スクリプトがバラバラにテーブルを作っていたのを一本化する。
-特に重要なのが can_contact(): 配信停止・接触上限・間隔を一箇所で判定する関門。
+特に重要なのが can_contact(): 配信停止・除外設定・重複を一箇所で判定する関門
+(接触上限・間隔・反応済み判定はT44でユーザーの判断により撤廃済み)。
 どのスクリプトからも必ずここを通す設計にして、「うっかり送ってしまった」を構造的に防ぐ。
 """
 import json
@@ -538,20 +539,20 @@ def can_contact(con, company_id, tenant_id=None, allow_warm=False):
 
     tenant_idを渡すと、そのテナントのtenant_exclusions(経営判断の除外。
     suppressionと違い他テナントには影響しない)も合わせて確認する。
-    allow_warm=True にすると「反応済み」チェックだけを外す。
-    既存顧客への別オファー案内など、意図的な再接触の時だけ使うこと。
+    allow_warmは後方互換のため引数として残しているが、T44以降は判定に使わない
+    (下記参照)。
 
-    T43: 反応済み判定・生涯接触上限・最短接触間隔は、tenant_idを渡した場合は
-    「そのテナント自身の接触履歴」だけで判定する(touches→campaigns→offersを
-    辿ってoffers.tenant_idで絞り込む)。共有マスタの企業データを複数テナントが
-    独立に営業する以上、Aテナントの過去の接触・反応がBテナントの接触可否まで
-    塞いでしまうのは正しくない(それぞれ別の商談関係として扱う)。
-    tenant_id未指定の場合のみ、従来通り全テナント合算(company_id一致のみ)で
-    判定する——house エンジン(campaign.py/followup.py/dormant.pyの事前絞込
-    ヘルパーcontactable_ids()がtenant_id無しで呼ばれる経路)との後方互換のため
-    残しているが、実運用の送信経路(senders.send_campaign())は必ずtenant_idを
-    渡すため、この分岐に実際に乗るのはhouseエンジンの事前絞込だけになる。
-    (法令対応のsuppressionは意図的にテナント非依存のまま=全テナント共通)"""
+    T44(2026-08-25): 生涯接触上限(旧MAX_LIFETIME_TOUCHES)・最短接触間隔
+    (旧MIN_TOUCH_INTERVAL_DAYS)・反応済み(warm)判定は、100社×月4,000通規模へ
+    向けた再検討の結果、ユーザーの判断で撤廃した(config.pyから該当の定数も
+    削除済み)。共有マスタの企業データ数に対して積極的な送信量を優先する方針。
+    残っているのは以下の3点のみ:
+      - suppression(配信停止/オプトアウト): 特定電子メール法上の法的義務
+        であり、テナント非依存(全テナント共通)で維持する。
+      - tenant_exclusions(テナントごとの経営判断の除外)
+      - 重複レコード(dedup_of。代表社へ統合済みの行には送らない)
+    T43で入れたtenant_idスコープの分岐(touches→campaigns→offersのJOIN)は、
+    頻度系の判定自体が無くなったことで不要になったため、あわせて削除した。"""
     if con.execute("SELECT 1 FROM suppression WHERE company_id=?", (company_id,)).fetchone():
         return False, "配信停止リスト"
     if tenant_id is not None and con.execute(
@@ -561,52 +562,6 @@ def can_contact(con, company_id, tenant_id=None, allow_warm=False):
     if con.execute("SELECT 1 FROM companies WHERE id=? AND dedup_of IS NOT NULL",
                    (company_id,)).fetchone():
         return False, "重複レコード(代表社へ集約済)"
-
-    if tenant_id is not None:
-        touch_join = """JOIN campaigns cp ON cp.id = touches.campaign_id
-                         JOIN offers o ON o.id = COALESCE(cp.offer_id, 1)"""
-        touch_where = "AND o.tenant_id=?"
-        touch_extra = (tenant_id,)
-    else:
-        touch_join = ""
-        touch_where = ""
-        touch_extra = ()
-
-    # 反応済み＝もう営業対象ではなく商談対象。新規の売り込みを重ねない。
-    # （campaign.py が反応済みの会社にも新規キャンペーンを組んでいたのをテストが検出）
-    if not allow_warm:
-        warm = con.execute(f"""SELECT touches.responded, touches.paid FROM touches
-                              {touch_join}
-                              WHERE touches.company_id=?
-                                AND (touches.responded=1 OR touches.paid=1) {touch_where}
-                              LIMIT 1""",
-                           (company_id,) + touch_extra).fetchone()
-        if warm:
-            return False, "反応済み(商談対象)" if not warm[1] else "既存顧客"
-
-    # ドライラン(dry_run)は実サイトへ何も送っていないため、生涯接触上限・最短間隔の
-    # どちらにもカウントしない(sent_atはドライランでも本番と同じ形で立つため、
-    # provider_id=mock_で始まるnoteをドライラン分として除外する。他の判定
-    # <sync_target_list_member_status()等>と同じ判別方法)。
-    n = con.execute(f"""SELECT COUNT(*) FROM touches
-                       {touch_join}
-                       WHERE touches.company_id=? AND touches.sent_at IS NOT NULL
-                         AND COALESCE(touches.note,'') NOT LIKE '%provider_id=mock_%' {touch_where}""",
-                    (company_id,) + touch_extra).fetchone()[0]
-    if n >= C.MAX_LIFETIME_TOUCHES:
-        return False, f"生涯接触上限({C.MAX_LIFETIME_TOUCHES}回)到達"
-    last = con.execute(f"""SELECT MAX(touches.sent_at) FROM touches
-                          {touch_join}
-                          WHERE touches.company_id=? AND touches.sent_at IS NOT NULL
-                            AND COALESCE(touches.note,'') NOT LIKE '%provider_id=mock_%' {touch_where}""",
-                       (company_id,) + touch_extra).fetchone()[0]
-    if last:
-        try:
-            gap = (datetime.now() - datetime.fromisoformat(last)).days
-            if gap < C.MIN_TOUCH_INTERVAL_DAYS:
-                return False, f"最短間隔未満(前回{gap}日前 / 下限{C.MIN_TOUCH_INTERVAL_DAYS}日)"
-        except ValueError:
-            pass
     return True, "OK"
 
 

@@ -60,10 +60,10 @@ SENDER_INFO = {
     "email": "info@ashibase.jp",
     "optout_url": "https://ashibase.jp/optout",
 }
-# 1社あたりの生涯接触上限。これを超えたら以後どの巡目でも送らない。
-MAX_LIFETIME_TOUCHES = 6
-# 同一社への最短再接触間隔（日）
-MIN_TOUCH_INTERVAL_DAYS = 10
+# T44(2026-08-25): 1社あたりの生涯接触上限(旧MAX_LIFETIME_TOUCHES=6)・
+# 最短再接触間隔(旧MIN_TOUCH_INTERVAL_DAYS=10日)は、100社×月4,000通規模へ
+# 向けた再検討の結果、ユーザーの判断で撤廃した(db.can_contact()参照)。
+# 削除の経緯・判断根拠はHANDOFF.md T44を参照。
 
 # ── フォーム自動送信のペーシング ─────────────
 # T29(2026-08-24)でテナント公平型に再設計。それまでは「全テナント合算で

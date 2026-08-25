@@ -71,9 +71,9 @@ def main():
                AND EXISTS(SELECT 1 FROM touches t1 WHERE t1.company_id=t2.company_id
                AND t1.campaign_id=t2.campaign_id AND t1.step=1 AND t1.responded=1
                AND t1.responded_at IS NOT NULL AND t1.responded_at < t2.sent_at)""") == 0)
-    check(f"1社あたりの接触が上限{C.MAX_LIFETIME_TOUCHES}回以内",
-          q(f"""SELECT COUNT(*) FROM (SELECT company_id FROM touches WHERE sent_at IS NOT NULL
-               GROUP BY company_id HAVING COUNT(*) > {C.MAX_LIFETIME_TOUCHES})""") == 0)
+    # T44: 1社あたりの生涯接触上限はユーザーの判断で撤廃した(config.py参照)。
+    # 以前はここで上限超過が無いことを確認していたが、その制約自体が
+    # 無くなったため検証対象からも外した。
     check("同一キャンペーン・同一社・同一ステップの重複がない",
           q("""SELECT COUNT(*) FROM (SELECT campaign_id, company_id, step FROM touches
                GROUP BY 1,2,3 HAVING COUNT(*) > 1)""") == 0)

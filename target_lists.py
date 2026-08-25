@@ -566,11 +566,15 @@ _MEMBER_STATUS_FILTERS = {
 }
 
 
-def get_list(con, tenant_id, list_id, limit=200, offset=0, status_filter=None):
+def get_list(con, tenant_id, list_id, limit=200, offset=0, status_filter=None, q=None):
     """テナント境界を必ずここで確認する。list_idだけを信じてtenant_id一致を
     省略すると、他テナントがIDを推測して中身を覗けてしまう。
     status_filterは_MEMBER_STATUS_FILTERSのキーのみ受け付ける(SQLインジェクション
-    防止のため、フリーテキストでの絞込条件は組み立てない)。"""
+    防止のため、フリーテキストでの絞込条件は組み立てない)。
+    qを指定すると会社名の部分一致(大文字小文字を区別しない)で絞り込む。
+    各企業にeditable(bool)を含める(=owner_tenant_id==自テナント。フロント側が
+    「編集」ボタンを出すかどうかの判定に使う。他テナントのidを漏らさないよう
+    owner_tenant_id自体は返さずbool化する)。"""
     lst = con.execute("SELECT * FROM target_lists WHERE id=? AND tenant_id=?",
                        (list_id, tenant_id)).fetchone()
     if not lst:
@@ -579,15 +583,65 @@ def get_list(con, tenant_id, list_id, limit=200, offset=0, status_filter=None):
     params = [list_id]
     if status_filter in _MEMBER_STATUS_FILTERS:
         where += " AND " + _MEMBER_STATUS_FILTERS[status_filter]
+    if q:
+        where += " AND c.name LIKE ? ESCAPE '\\'"
+        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params.append(f"%{escaped}%")
     members = con.execute(f"""SELECT c.id, c.name, c.pref, c.rank, c.trades, c.phone, c.email,
-            c.website_url, c.contact_url,
+            c.website_url, c.contact_url, c.owner_tenant_id,
             m.send_status, m.reason_code, m.retry_count, m.last_error, m.latest_result,
             m.started_at, m.completed_at, m.contacted_at,
             m.replied, m.replied_at, m.deal, m.deal_at, m.won, m.won_at, m.memo
         FROM target_list_members m JOIN companies c ON c.id=m.company_id
         WHERE {where} ORDER BY m.company_id LIMIT ? OFFSET ?""",
         params + [limit, offset]).fetchall()
-    return {"list": dict(lst), "members": [dict(r) for r in members]}
+    out_members = []
+    for r in members:
+        d = dict(r)
+        d["editable"] = d.pop("owner_tenant_id") == tenant_id
+        out_members.append(d)
+    return {"list": dict(lst), "members": out_members}
+
+
+_EDITABLE_COMPANY_FIELDS = {"name", "contact_url", "phone", "email"}
+
+
+def update_member_company(con, tenant_id, list_id, company_id, fields):
+    """リスト内の企業情報(会社名・問い合わせURL・電話番号・メールアドレス)を編集する。
+    companies.owner_tenant_id=自テナントの非公開データ(CSV取込等で自社のみに
+    追加した企業)のみ編集可能にする。owner_tenant_id IS NULLの全社共有マスタは
+    他テナントのリストにも同じ行が使われているため、ここでの編集は許可しない
+    (誤って他社のデータまで書き換えてしまう事故を防ぐ)。"""
+    import db
+    owns_list = con.execute("SELECT 1 FROM target_lists WHERE id=? AND tenant_id=?",
+                             (list_id, tenant_id)).fetchone()
+    if not owns_list:
+        return None
+    is_member = con.execute("SELECT 1 FROM target_list_members WHERE list_id=? AND company_id=?",
+                             (list_id, company_id)).fetchone()
+    if not is_member:
+        return {"error": "対象の企業がこのリストに含まれていません"}
+    company = con.execute("SELECT owner_tenant_id FROM companies WHERE id=?", (company_id,)).fetchone()
+    if not company or company["owner_tenant_id"] != tenant_id:
+        return {"error": "このデータは全テナント共有のマスタのため編集できません"
+                          "(自社でCSV等から追加した企業のみ編集できます)"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k not in _EDITABLE_COMPANY_FIELDS:
+            continue
+        sets.append(f"{k}=?")
+        params.append(v)
+        if k == "name":
+            sets.append("name_norm=?")
+            params.append(db.normalize_name(v) if v else None)
+    if not sets:
+        return {"error": "更新する項目がありません"}
+    params.append(company_id)
+    con.execute(f"UPDATE companies SET {', '.join(sets)} WHERE id=?", params)
+    con.commit()
+    row = con.execute("""SELECT id, name, pref, phone, email, website_url, contact_url
+        FROM companies WHERE id=?""", (company_id,)).fetchone()
+    return {"ok": True, "company": dict(row)}
 
 
 def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks=False,

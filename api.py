@@ -39,11 +39,17 @@ CACもチャネル別成績も出せない = 売り物にならない。
   GET  /api/tenant/lists/<id>     リスト詳細(自テナントのものだけ。他社分は404)。
                            ?status=success|failed|skip|pending|replied|deal|wonで
                            企業ごとの送信状態で絞り込める(1社ごとのsend_status等を
-                           含む。実送信結果はdry_run=falseの送信後に反映される)
+                           含む。実送信結果はdry_run=falseの送信後に反映される)。
+                           ?q=で会社名の部分一致検索ができる。各企業にeditable
+                           (bool)を含む(自社がCSV等で追加した非公開データのみtrue。
+                           全社共有マスタはfalseで、/members/<id>での編集不可)
   POST /api/tenant/lists/<id>/rename  {"name"} → リスト名変更(MIKOMERU「編集」相当)
   POST /api/tenant/lists/<id>/duplicate  {"name"} → リストの複製(MIKOMERU「複製」相当)
   POST /api/tenant/lists/<id>/remove-members  {"company_ids":[...]} →
                            リストから企業を個別に除外(MIKOMERU「個別削除」相当)
+  POST /api/tenant/lists/<id>/members/<company_id>  {"name","contact_url","phone",
+                           "email"} → リスト内の企業情報を編集(自社がCSV等で
+                           追加した非公開データのみ。全社共有マスタは編集不可で400)
   POST /api/tenant/lists/delete   {"list_ids":[...]} → ソフト削除(一括)
   POST /api/tenant/lists/restore  {"list_ids":[...]} → 復元(一括)。
                            物理削除はしない(送信履歴の追跡を残すため)
@@ -216,6 +222,7 @@ _PREVIEW_MSG_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/preview-message$")
 _RENAME_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/rename$")
 _DUPLICATE_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/duplicate$")
 _REMOVE_MEMBERS_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/remove-members$")
+_MEMBER_UPDATE_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/members/(\d+)$")
 _SEARCH_LOG_DETAIL_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)$")
 _SEARCH_LOG_SAVE_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)/save-as-list$")
 _SEARCH_LOG_CSV_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)/csv$")
@@ -595,10 +602,38 @@ def h_tenant_list_detail(con, tenant_id, list_id, qs):
     limit = min(int(qs.get("limit", ["200"])[0]), 1000)
     offset = int(qs.get("offset", ["0"])[0])
     status_filter = qs.get("status", [None])[0]
-    res = TL.get_list(con, tenant_id, list_id, limit=limit, offset=offset, status_filter=status_filter)
+    q = (qs.get("q", [""])[0] or "").strip() or None
+    res = TL.get_list(con, tenant_id, list_id, limit=limit, offset=offset, status_filter=status_filter, q=q)
     if not res:
         return 404, {"error": "リストが見つかりません"}
     return 200, res
+
+
+_MEMBER_EDITABLE_FIELDS = {"name", "contact_url", "phone", "email"}
+
+
+def h_tenant_list_member_update(con, tenant_id, list_id, company_id, data):
+    """リスト詳細画面の企業行を編集する(会社名・問い合わせURL・電話番号・メール
+    アドレスのみ)。自社がCSV等で追加した非公開データのみ編集可(共有マスタは不可。
+    詳しくはtarget_lists.update_member_company()参照)。"""
+    fields = {}
+    for k in _MEMBER_EDITABLE_FIELDS:
+        if k not in data:
+            continue
+        v = data.get(k)
+        if v is not None and not isinstance(v, str):
+            return 400, {"error": f"{k}は文字列で指定してください"}
+        fields[k] = (v or "").strip() or None
+    if "name" in fields and not fields["name"]:
+        return 400, {"error": "会社名は空にできません"}
+    if not fields:
+        return 400, {"error": "更新する項目がありません"}
+    result = TL.update_member_company(con, tenant_id, list_id, company_id, fields)
+    if result is None:
+        return 404, {"error": "リストが見つかりません"}
+    if "error" in result:
+        return 400, result
+    return 200, result
 
 
 def h_tenant_list_member_outcome(con, tenant_id, list_id, data):
@@ -1409,13 +1444,15 @@ class Handler(BaseHTTPRequestHandler):
         rename_match = _RENAME_PATH_RE.match(path)
         duplicate_match = _DUPLICATE_PATH_RE.match(path)
         remove_members_match = _REMOVE_MEMBERS_PATH_RE.match(path)
+        member_update_match = _MEMBER_UPDATE_PATH_RE.match(path)
         search_log_save_match = _SEARCH_LOG_SAVE_PATH_RE.match(path)
         if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv",
                      "/api/tenant/lists/delete", "/api/tenant/lists/restore",
                      "/api/tenant/search/filter", "/api/tenant/search/csv") \
                 or send_match or outcome_match or autofill_match or note_match \
                 or manual_sent_match or exec_note_match or preview_msg_match \
-                or rename_match or duplicate_match or remove_members_match or search_log_save_match:
+                or rename_match or duplicate_match or remove_members_match \
+                or member_update_match or search_log_save_match:
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -1463,6 +1500,10 @@ class Handler(BaseHTTPRequestHandler):
                 elif remove_members_match:
                     st, res = h_tenant_list_remove_members(con, tenant["id"],
                                                             int(remove_members_match.group(1)), data)
+                elif member_update_match:
+                    st, res = h_tenant_list_member_update(
+                        con, tenant["id"], int(member_update_match.group(1)),
+                        int(member_update_match.group(2)), data)
                 else:
                     st, res = h_tenant_send_log_autofill_queue(con, tenant["id"],
                                                                 int(autofill_match.group(1)))
@@ -2100,6 +2141,53 @@ def self_test(port=8899):
     st, r = post_auth(f"/api/tenant/lists/{list_c_id}/remove-members",
                       {"company_ids": [some_company_id]}, token=key_b)
     t("他テナントのリストからは除外できない(removed=0)", st == 200 and r.get("removed") == 0)
+
+    print("\n── リスト内の会社名検索・企業情報の編集(T26) ──")
+    st, r = get_auth(f"/api/tenant/lists/{list_c_id}", token=key_a)
+    shared_master_company_id = r["members"][0]["id"]
+    q_target_name = r["members"][0]["name"]
+    t("全社共有マスタの企業はeditable=false", r["members"][0]["editable"] is False)
+    st, r = get_auth(f"/api/tenant/lists/{list_c_id}?q=" + urllib.parse.quote(q_target_name[:4]), token=key_a)
+    t("GET .../lists/<id>?q=で会社名の部分一致検索ができる",
+      st == 200 and any(m["id"] == shared_master_company_id for m in r["members"]))
+    st, r = get_auth(f"/api/tenant/lists/{list_c_id}?q=" + urllib.parse.quote("絶対に一致しない架空の社名XYZ"),
+                     token=key_a)
+    t("該当しないqだと0件になる", st == 200 and len(r["members"]) == 0)
+
+    st, r = post_auth(f"/api/tenant/lists/{list_c_id}/members/{shared_master_company_id}",
+                      {"contact_url": "https://hijack.example.com/"}, token=key_a)
+    t("全社共有マスタの企業は編集できない(400)", st == 400)
+
+    csv_text_own = "会社名,URL\nT26編集テスト株式会社,https://t26-before.example.co.jp/\n"
+    st, r = post_auth("/api/tenant/lists/csv",
+                      {"name": "T26編集テスト用リスト", "csv": csv_text_own}, token=key_a)
+    t("編集テスト用に自社の非公開企業をCSVで1件追加", st == 200 and r.get("new_companies") == 1)
+    own_list_id = r["list_id"]
+    st, r = get_auth(f"/api/tenant/lists/{own_list_id}", token=key_a)
+    own_company_id = r["members"][0]["id"]
+    t("追加した企業はeditable=true(自テナントの非公開データ)", r["members"][0]["editable"] is True)
+
+    st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{own_company_id}",
+                      {"name": "", "contact_url": "https://t26-after.example.co.jp/"}, token=key_a)
+    t("会社名を空にしようとすると400", st == 400)
+    st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{own_company_id}", {}, token=key_a)
+    t("更新項目が無いと400", st == 400)
+    st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{own_company_id}",
+                      {"contact_url": "https://t26-after.example.co.jp/", "phone": "03-9999-0000"},
+                      token=key_a)
+    t("自社の非公開企業は編集できる",
+      st == 200 and r["company"]["contact_url"] == "https://t26-after.example.co.jp/"
+      and r["company"]["phone"] == "03-9999-0000")
+    st, r = get_auth(f"/api/tenant/lists/{own_list_id}", token=key_a)
+    t("編集内容がリスト表示にも反映される",
+      st == 200 and r["members"][0]["contact_url"] == "https://t26-after.example.co.jp/")
+    st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{own_company_id}",
+                      {"contact_url": "https://hijack.example.com/"}, token=key_b)
+    t("他テナントは編集できない(404)", st == 404)
+    con.execute("DELETE FROM target_list_members WHERE list_id=?", (own_list_id,))
+    con.execute("DELETE FROM target_lists WHERE id=?", (own_list_id,))
+    con.execute("DELETE FROM companies WHERE id=?", (own_company_id,))
+    con.commit()
 
     st, r = post_auth("/api/tenant/lists/delete", {"list_ids": [dup_list_id]}, token=key_a)
     t("POST /api/tenant/lists/deleteでソフト削除できる", st == 200 and r.get("changed") == 1)

@@ -763,6 +763,9 @@ tr.clickable:hover{background:var(--blue-soft)}
             <label class="chip on"><input type="radio" name="csvTab" value="name" checked>会社名で検索</label>
             <label class="chip"><input type="radio" name="csvTab" value="url">URLで検索</label>
           </div>
+          <div class="btnrow" style="margin-top:8px">
+            <button class="ghost" id="btnDownloadCsvTemplate" type="button">📥 CSVテンプレートをダウンロード</button>
+          </div>
 
           <div style="margin-top:12px">
             <label>(1) CSVファイルを選択してください</label>
@@ -1900,6 +1903,24 @@ async function runFilterSearch() {
 }
 $("btnRunFilterSearch").addEventListener("click", runFilterSearch);
 
+$("btnDownloadCsvTemplate").addEventListener("click", () => {
+  const tab = document.querySelector('input[name="csvTab"]:checked')?.value || "name";
+  const rows = tab === "url"
+    ? [["会社名", "URL", "都道府県"], ["サンプル建設株式会社", "https://example.co.jp/", "東京都"]]
+    : [["会社名", "都道府県", "電話番号", "メールアドレス"],
+       ["サンプル建設株式会社", "東京都", "03-1234-5678", "info@example.co.jp"]];
+  const csvBody = rows.map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+  const blob = new Blob(["\uFEFF" + csvBody], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = tab === "url" ? "ashibase_csv_template_url.csv" : "ashibase_csv_template_name.csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+
 $("btnOpenSaveFilterModal").addEventListener("click", () => {
   if (!lastFilterSearch) return;
   openSaveListModal("※ 保存する会社数によっては時間がかかる場合があります", async (name, existingId) => {
@@ -2234,52 +2255,92 @@ const LOG_STATUS_CLASS = {
 
 function bindMemberFilter(listId) {
   document.querySelectorAll('input[name="memberFilter"]').forEach(input => {
-    input.addEventListener("change", () => renderMemberTable(listId, input.value));
+    input.addEventListener("change", () => {
+      memberEditingId = null;
+      renderMemberTable(listId, input.value, currentMemberQuery);
+    });
   });
 }
 
 const memberSelected = new Set();  // リストから除外する候補として選んだcompany_id
+let currentMemberQuery = "";   // リスト詳細画面の会社名検索欄の現在値(状態フィルタ切替時も維持する)
+let memberEditingId = null;    // 現在インライン編集中のcompany_id(同時に1件のみ)
 
-async function renderMemberTable(listId, statusFilter) {
+async function renderMemberTable(listId, statusFilter, q) {
+  // memberEditingIdはここではリセットしない(編集ボタン押下時もこの関数を呼んで
+  // 編集行を描画し直す仕組みのため、ここで消すと編集モードに入れなくなる)。
+  // 編集モードを抜けるのは保存/キャンセル操作、または検索語・状態フィルタの
+  // 変更時(呼び出し側で明示的にnullを設定する)。
+  currentMemberQuery = q || "";
   const wrap = $("memberTableWrap");
   wrap.innerHTML = `<div class="empty">読み込み中...</div>`;
   memberSelected.clear();
   updateRemoveMembersButton();
   try {
-    const qs = statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : "";
+    let qs = statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : "";
+    if (currentMemberQuery) qs += `&q=${encodeURIComponent(currentMemberQuery)}`;
     const r = await call(`/api/tenant/lists/${listId}?limit=200${qs}`);
     if (!r.members.length) { wrap.innerHTML = `<div class="empty">該当する企業がありません</div>`; return; }
     wrap.innerHTML = `<table><tr>
       <th style="width:24px"><input type="checkbox" id="memberSelectAll" style="width:auto"></th>
-      <th>会社名</th><th>都道府県</th><th>状態</th><th>詳細</th>
-      <th>返信</th><th>商談</th><th>受注</th></tr>` +
-      r.members.map(m => {
-        const cls = SEND_STATUS_CLASS[m.send_status] || "";
-        return `<tr>
-          <td><input type="checkbox" class="memberChk" data-id="${m.id}" style="width:auto"></td>
-          <td><a href="#" class="memberHistoryLink" data-id="${m.id}">${m.name}</a></td>
-          <td>${m.pref || "—"}</td>
-          <td><span class="pill${cls ? " " + cls : ""}">${SEND_STATUS_LABELS[m.send_status] || m.send_status}</span></td>
-          <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${m.reason_code || m.last_error || "—"}</td>
-          <td><input type="checkbox" class="outcomeBox" data-id="${m.id}" data-field="replied" ${m.replied ? "checked" : ""}></td>
-          <td><input type="checkbox" class="outcomeBox" data-id="${m.id}" data-field="deal" ${m.deal ? "checked" : ""}></td>
-          <td><input type="checkbox" class="outcomeBox" data-id="${m.id}" data-field="won" ${m.won ? "checked" : ""}></td>
-        </tr>`;
-      }).join("") + `</table>`;
-    wrap.querySelectorAll(".memberHistoryLink").forEach(a => {
-      a.addEventListener("click", (e) => { e.preventDefault(); showMemberHistory(Number(a.dataset.id)); });
+      <th>会社名</th><th>都道府県</th><th>問い合わせURL</th><th>状態</th><th>詳細</th>
+      <th>返信</th><th>商談</th><th>受注</th><th>編集</th></tr>` +
+      r.members.map(m => renderMemberRow(m)).join("") + `</table>`;
+    bindMemberRowEvents(listId, wrap);
+  } catch (e) {
+    wrap.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+function renderMemberRow(m) {
+  const cls = SEND_STATUS_CLASS[m.send_status] || "";
+  if (m.id === memberEditingId) {
+    return `<tr data-id="${m.id}">
+      <td></td>
+      <td><input type="text" class="editNameInput" value="${(m.name || "").replace(/"/g, "&quot;")}" style="width:140px"></td>
+      <td>${m.pref || "—"}</td>
+      <td><input type="text" class="editUrlInput" value="${(m.contact_url || "").replace(/"/g, "&quot;")}"
+        placeholder="https://..." style="width:180px"></td>
+      <td colspan="4" class="hint">編集中(会社名・問い合わせURLのみ変更できます)</td>
+      <td style="white-space:nowrap">
+        <button class="ghost memberEditSave" data-id="${m.id}" style="padding:4px 8px;font-size:11px">✓ 保存</button>
+        <button class="ghost memberEditCancel" style="padding:4px 8px;font-size:11px">✕</button>
+      </td>
+    </tr>`;
+  }
+  return `<tr data-id="${m.id}">
+    <td><input type="checkbox" class="memberChk" data-id="${m.id}" style="width:auto"></td>
+    <td><a href="#" class="memberHistoryLink" data-id="${m.id}">${m.name}</a></td>
+    <td>${m.pref || "—"}</td>
+    <td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+      title="${(m.contact_url || "").replace(/"/g, "&quot;")}">${m.contact_url || "—"}</td>
+    <td><span class="pill${cls ? " " + cls : ""}">${SEND_STATUS_LABELS[m.send_status] || m.send_status}</span></td>
+    <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${m.reason_code || m.last_error || "—"}</td>
+    <td><input type="checkbox" class="outcomeBox" data-id="${m.id}" data-field="replied" ${m.replied ? "checked" : ""}></td>
+    <td><input type="checkbox" class="outcomeBox" data-id="${m.id}" data-field="deal" ${m.deal ? "checked" : ""}></td>
+    <td><input type="checkbox" class="outcomeBox" data-id="${m.id}" data-field="won" ${m.won ? "checked" : ""}></td>
+    <td>${m.editable
+      ? `<button class="ghost memberEditStart" data-id="${m.id}" style="padding:4px 8px;font-size:11px">✎ 編集</button>`
+      : `<span class="hint" title="全社共有のデータのため編集できません(自社でCSV等から追加した企業のみ編集できます)">🔒</span>`}</td>
+  </tr>`;
+}
+
+function bindMemberRowEvents(listId, wrap) {
+  wrap.querySelectorAll(".memberHistoryLink").forEach(a => {
+    a.addEventListener("click", (e) => { e.preventDefault(); showMemberHistory(Number(a.dataset.id)); });
+  });
+  wrap.querySelectorAll(".outcomeBox").forEach(cb => {
+    cb.addEventListener("change", () => recordOutcome(listId, Number(cb.dataset.id), cb.dataset.field, cb.checked));
+  });
+  wrap.querySelectorAll(".memberChk").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const cid = Number(cb.dataset.id);
+      cb.checked ? memberSelected.add(cid) : memberSelected.delete(cid);
+      updateRemoveMembersButton();
     });
-    wrap.querySelectorAll(".outcomeBox").forEach(cb => {
-      cb.addEventListener("change", () => recordOutcome(listId, Number(cb.dataset.id), cb.dataset.field, cb.checked));
-    });
-    wrap.querySelectorAll(".memberChk").forEach(cb => {
-      cb.addEventListener("change", () => {
-        const cid = Number(cb.dataset.id);
-        cb.checked ? memberSelected.add(cid) : memberSelected.delete(cid);
-        updateRemoveMembersButton();
-      });
-    });
-    const selectAll = $("memberSelectAll");
+  });
+  const selectAll = $("memberSelectAll");
+  if (selectAll) {
     selectAll.addEventListener("change", () => {
       wrap.querySelectorAll(".memberChk").forEach(cb => {
         cb.checked = selectAll.checked;
@@ -2287,9 +2348,41 @@ async function renderMemberTable(listId, statusFilter) {
       });
       updateRemoveMembersButton();
     });
-  } catch (e) {
-    wrap.innerHTML = `<div class="result err">${e.message}</div>`;
   }
+  wrap.querySelectorAll(".memberEditStart").forEach(btn => {
+    btn.addEventListener("click", () => {
+      memberEditingId = Number(btn.dataset.id);
+      const statusFilter = document.querySelector('input[name="memberFilter"]:checked')?.value || "";
+      renderMemberTable(listId, statusFilter, currentMemberQuery);
+    });
+  });
+  wrap.querySelectorAll(".memberEditCancel").forEach(btn => {
+    btn.addEventListener("click", () => {
+      memberEditingId = null;
+      const statusFilter = document.querySelector('input[name="memberFilter"]:checked')?.value || "";
+      renderMemberTable(listId, statusFilter, currentMemberQuery);
+    });
+  });
+  wrap.querySelectorAll(".memberEditSave").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const companyId = Number(btn.dataset.id);
+      const row = wrap.querySelector(`tr[data-id="${companyId}"]`);
+      const name = row.querySelector(".editNameInput").value.trim();
+      const contactUrl = row.querySelector(".editUrlInput").value.trim();
+      if (!name) { alert("会社名は空にできません"); return; }
+      btn.disabled = true;
+      try {
+        await call(`/api/tenant/lists/${listId}/members/${companyId}`,
+          { method: "POST", body: JSON.stringify({ name, contact_url: contactUrl }) });
+        memberEditingId = null;
+        const statusFilter = document.querySelector('input[name="memberFilter"]:checked')?.value || "";
+        await renderMemberTable(listId, statusFilter, currentMemberQuery);
+      } catch (e) {
+        alert("更新に失敗しました: " + e.message);
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
 function updateRemoveMembersButton() {
@@ -2358,6 +2451,12 @@ async function showDetail(id) {
         </div>
       </div>
       <h2>リスト詳細 <span>企業一覧</span></h2>
+      <div class="row" style="margin-bottom:10px;align-items:flex-end">
+        <div>
+          <label>会社名で検索</label>
+          <input type="text" id="memberSearch" placeholder="会社名の一部を入力...">
+        </div>
+      </div>
       <div class="chips" id="memberFilter" style="margin-bottom:10px">
         ${Object.entries(MEMBER_FILTERS).map(([key, label]) =>
           `<label class="chip${key === "" ? " on" : ""}"><input type="radio" name="memberFilter"
@@ -2368,8 +2467,17 @@ async function showDetail(id) {
       </div>
       <div id="memberTableWrap"></div>
       <div id="memberHistoryWrap"></div>`;
-    await renderMemberTable(id, "");
+    await renderMemberTable(id, "", "");
     bindMemberFilter(id);
+    let memberSearchTimer = null;
+    $("memberSearch").addEventListener("input", () => {
+      clearTimeout(memberSearchTimer);
+      memberSearchTimer = setTimeout(() => {
+        memberEditingId = null;
+        const activeFilter = document.querySelector('input[name="memberFilter"]:checked')?.value || "";
+        renderMemberTable(id, activeFilter, $("memberSearch").value.trim());
+      }, 400);
+    });
 
     $("btnGoAutosend").addEventListener("click", () => {
       goPage("autosend");
@@ -2388,7 +2496,7 @@ async function showDetail(id) {
           $("detailListCount").textContent = `${r.count.toLocaleString()}社`;
         }
         const activeFilter = document.querySelector('input[name="memberFilter"]:checked')?.value || "";
-        await renderMemberTable(id, activeFilter);
+        await renderMemberTable(id, activeFilter, currentMemberQuery);
         await refreshLists();
       } catch (e) {
         alert("除外に失敗しました: " + e.message);

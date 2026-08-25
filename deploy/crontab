@@ -39,6 +39,13 @@ TZ=Asia/Tokyo
 # 法令遵守の監査: 毎日。異常があればログに残る
 0 6 * * * cd /app && python3 suppress_cli.py check >> /app/out/audit.log 2>&1
 
+# 監視・アラート: 30分おき。Kill Switch停止・配信停止遵守違反・フォーム送信
+# 失敗率の上昇等を検知したらOPS_ALERT_EMAIL宛にメールで知らせる(T35)。
+# 同じ異常を何度も検知しても、内部のクールダウン(60分)により再送はしない
+# (アラート疲れ防止。monitor.py参照)。OPS_ALERT_EMAIL未設定時はcron.logに
+# 出力するのみでメールは送らない。
+*/30 * * * * cd /app && python3 monitor.py check >> /app/out/cron.log 2>&1
+
 # 休眠プールの再投入判定: 毎週月曜
 0 7 * * 1 cd /app && python3 dormant.py --campaign 1 --revive --dry >> /app/out/cron.log 2>&1
 

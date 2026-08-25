@@ -1949,6 +1949,55 @@ MIKOMERUの「パスワードをお忘れの方」相当を、T32/T33のSendGrid
 
 ---
 
+### T35. 監視・アラート(メール通知)を実装(2026-08-25)
+
+5点の運用課題の③。「止まっていることに誰も気づかない」を防ぐための最小限の
+監視。新しい監視基盤(外形監視SaaS等)は導入せず、既存の判断ロジックを1箇所
+(`monitor.py`)から呼び出してメールで知らせるだけにとどめた。
+
+- `monitor.py`(新規): `collect_alerts(con)`が4種類の異常を横断チェックする。
+  (1) 全体Kill Switch停止中(critical。`db.kill_switch_status()`を利用)
+  (2) テナント別Kill Switch停止中(warning。`db.list_tenant_kill_switches()`)
+  (3) 配信停止後に送信された記録(critical。`suppress_cli.py check`と同じ
+  監査SQLを再利用) (4) 配信停止対象への未送信予定が残っている(warning、
+  同上) (5) 直近1時間のフォーム送信失敗率が50%超(warning。試行5件未満は
+  誤報防止のため判定しない)。
+- **アラート疲れ対策**: 新規`alert_state`テーブル(`alert_key`→`last_sent_at`)で
+  異常ごとに直近何分前にメールを送ったか記録し、`ALERT_COOLDOWN_MINUTES=60`
+  以内の再検知はメール送信をスキップする(標準出力には出す。cron.logで
+  後から追える)。メール送信自体が失敗した場合(SendGrid未設定・API障害等)は
+  `alert_state`を更新しない設計にした——次回の巡回(30分後)ですぐ再試行させ、
+  「送信に失敗したのに送信済み扱いになって誰にも届かない」事故を防ぐため。
+  T33/T34と同じ「メール送信に例外があっても呼び出し元は落とさない」方針を
+  踏襲しつつ、こちらは戻り値ではなく例外の有無で成否を判定する(呼び出し元が
+  1件のメールに複数の異常をまとめて送るため)。
+- `db.py`: `migrate()`に`monitor.SCHEMA`を追加(resilience/offers/target_lists
+  と同じ並び)。`monitor.py`は`db`をトップレベルでimportするが、`db.migrate()`
+  側の`monitor`importは関数内の遅延importのため循環参照にはならない
+  (resilience.py/offers.pyが`db`をトップレベルでimportしないのと非対称だが、
+  動作検証済み)。
+- `deploy/crontab`: 30分おきに`monitor.py check`を実行する行を追加。
+  `.env.example`に`OPS_ALERT_EMAIL`(通知先。未設定ならメール送信せずcron.log
+  出力のみ)を追加。
+- テスト: `monitor.py test`を新規実装(21項目)。Kill Switch有無・配信停止
+  遵守違反/未送信残の発生と解消・フォーム送信失敗率の閾値境界(最低サンプル数
+  未満は判定しない/超過で警告/閾値以下は警告なし)・クールダウンの発生と
+  解除・`run_check()`のexit code(0/1/2)・メール送信成功時のalert_state記録・
+  メール送信失敗時に記録しないこと、をそれぞれ検証。既存のKill Switchテスト
+  (api.py test)と同じ「テスト前の値を保存し、必ず復元する」方針を踏襲。
+  全体回帰確認(api.py test 297/297、test_pipeline.py 44/48=既知の4件のみ、
+  storage.py test 5/5、senders.py test全項目パス)。テスト後にDBへ残留データが
+  無いことも確認済み(kill_switch/tenant_kill_switch/alert_state/companies/
+  form_send_log)。
+
+**次のステップ**: バックアップ構築→デプロイ自動化(GitHub Actions)→
+テンプレート類の編集。なお`deploy/crontab`には`0 1 * * * cp out/companies.db
+out/backup_$(date +%u).db`という簡易な日次バックアップ(同一ディスク上へ
+7世代ローテーション)が既に存在するが、オフサイト保管が無いため④の対応時に
+見直す。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

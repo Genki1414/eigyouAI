@@ -304,10 +304,11 @@ def migrate(con):
     # 耐障害化・マルチオファー・送信先リストのテーブルも常に作る(実行順序に依存させない)。
     # 下のALTER列(tenants.api_key等)より前に置くこと — でないと対象テーブルが
     # まだ存在せずALTERが失敗する
-    import resilience, offers as _offers, target_lists as _tl
+    import resilience, offers as _offers, target_lists as _tl, monitor as _monitor
     con.executescript(resilience.SCHEMA)
     con.executescript(_offers.SCHEMA)
     con.executescript(_tl.SCHEMA)
+    con.executescript(_monitor.SCHEMA)
     # 旧バージョンで欠けている列を後付け
     for table, col, ddl in [
         ("companies", "name_norm", "TEXT"), ("companies", "score_v2", "REAL"),

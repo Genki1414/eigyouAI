@@ -110,6 +110,9 @@ tr.clickable:hover{background:var(--blue-soft)}
 .statcard.key span{color:#B9BEC4}
 .statcard b{font-family:var(--mono);font-size:26px;font-weight:600;display:block;line-height:1.3}
 .statcard span{font-size:11px;color:var(--steel);letter-spacing:.04em}
+.statcard[data-target]{cursor:pointer;transition:border-color .15s}
+.statcard[data-target]:hover{border-color:var(--safety)}
+.statcard.key[data-target]:hover{border-color:var(--safety)}
 
 /* ページ切替 */
 .page{display:none}
@@ -133,6 +136,8 @@ tr.clickable:hover{background:var(--blue-soft)}
 .manual ol,.manual ul{margin:6px 0 6px 20px}
 .manual li{margin-bottom:4px}
 .manual .step{margin-bottom:18px}
+.card.step{margin-bottom:14px}
+.card.step h3{font-family:'Zen Kaku Gothic New';font-weight:700;font-size:14px;margin:0 0 8px}
 @media print{
   .stripe,.sidebar,.topbar,#connStatus{display:none !important}
   .shell{display:block}
@@ -154,10 +159,14 @@ tr.clickable:hover{background:var(--blue-soft)}
   <aside class="sidebar">
     <div class="brand"><b>ASHIBA AI SALES ENGINE</b><small>送信先リスト管理</small></div>
     <nav>
-      <div class="navitem active" data-page="home">ホーム</div>
-      <div class="navgroup-label">フォーム送信</div>
-      <div class="navitem" data-page="autosend">自動送信</div>
-      <div class="navitem" data-page="sendlog">自動送信ログ</div>
+      <div class="navitem active" data-page="home">ダッシュボード</div>
+      <div class="navitem" data-page="tutorial">🎓 チュートリアル</div>
+      <div class="navgroup-label">① 会社情報</div>
+      <div class="navitem" data-page="filter">リスト取得</div>
+      <div class="navitem" data-page="csv">CSV検索</div>
+      <div class="navitem" data-page="searchlog">CSV検索ログ</div>
+      <div class="navitem" data-page="lists">保存済みリスト</div>
+      <div class="navgroup-label">② 送信準備</div>
       <div class="navsub-label">送信文章テンプレート</div>
       <div class="navitem navsub" data-page="tmpl-body-list">テンプレート一覧</div>
       <div class="navitem navsub" data-page="tmpl-body-add">テンプレート登録</div>
@@ -167,11 +176,9 @@ tr.clickable:hover{background:var(--blue-soft)}
       <div class="navsub-label">送信除外設定</div>
       <div class="navitem navsub" data-page="exclude-add">登録</div>
       <div class="navitem navsub" data-page="exclude-list">一覧</div>
-      <div class="navgroup-label">会社情報</div>
-      <div class="navitem" data-page="filter">リスト取得</div>
-      <div class="navitem" data-page="csv">CSV検索</div>
-      <div class="navitem" data-page="searchlog">CSV検索ログ</div>
-      <div class="navitem" data-page="lists">保存済みリスト</div>
+      <div class="navgroup-label">③ 自動送信</div>
+      <div class="navitem" data-page="autosend">自動送信</div>
+      <div class="navitem" data-page="sendlog">自動送信ログ</div>
       <div class="navgroup-label">その他</div>
       <div class="navsub-label">担当者管理</div>
       <div class="navitem navsub" data-page="staff-list">担当者一覧</div>
@@ -188,43 +195,90 @@ tr.clickable:hover{background:var(--blue-soft)}
 
   <div class="main-wrap">
     <div class="topbar">
-      <h1 id="pageTitle">ホーム</h1>
+      <h1 id="pageTitle">ダッシュボード</h1>
       <span id="connStatus" class="status off">未接続</span>
     </div>
     <div id="killSwitchBanner" style="display:none;background:var(--warn);color:#fff;padding:10px 24px;font-weight:700;font-size:13px"></div>
     <div class="content">
 
       <section class="page active" data-page="home">
+        <div class="btnrow" style="margin-bottom:4px">
+          <button class="ghost" id="btnGoTutorialFromHome">🎓 使い方(チュートリアル)を見る</button>
+        </div>
         <h2 id="dashHeadline">今月の状況 <span>OVERVIEW</span></h2>
         <div class="statcards" id="homeStats">
-          <div class="statcard"><b>—</b><span>保存済みリスト数</span></div>
-          <div class="statcard key"><b>—</b><span>対象企業数(合計)</span></div>
+          <div class="statcard" data-target="lists"><b>—</b><span>保存済みリスト数</span></div>
+          <div class="statcard key" data-target="lists"><b>—</b><span>対象企業数(合計)</span></div>
         </div>
         <h2 style="margin-top:20px">今月のAI営業社員の働き <span>THIS MONTH</span></h2>
         <div class="statcards" id="dashThisMonth">
-          <div class="statcard"><b>—</b><span>営業対象企業数</span></div>
-          <div class="statcard"><b>—</b><span>送信試行数</span></div>
-          <div class="statcard key"><b>—</b><span>送信成功数</span></div>
-          <div class="statcard"><b>—</b><span>SKIP数</span></div>
-          <div class="statcard"><b>—</b><span>FAILED数</span></div>
+          <div class="statcard" data-target="sendlog"><b>—</b><span>営業対象企業数</span></div>
+          <div class="statcard" data-target="sendlog"><b>—</b><span>送信試行数</span></div>
+          <div class="statcard key" data-target="sendlog"><b>—</b><span>送信成功数</span></div>
+          <div class="statcard" data-target="sendlog"><b>—</b><span>SKIP数</span></div>
+          <div class="statcard" data-target="sendlog"><b>—</b><span>FAILED数</span></div>
         </div>
         <div class="statcards" id="dashOutcomes" style="margin-top:10px">
-          <div class="statcard"><b>—</b><span>累計送信成功数</span></div>
-          <div class="statcard"><b>—</b><span>返信あり(累計)</span></div>
-          <div class="statcard"><b>—</b><span>商談化(累計)</span></div>
-          <div class="statcard"><b>—</b><span>受注(累計)</span></div>
+          <div class="statcard" data-target="sendlog"><b>—</b><span>累計送信成功数</span></div>
+          <div class="statcard" data-target="lists"><b>—</b><span>返信あり(累計)</span></div>
+          <div class="statcard" data-target="lists"><b>—</b><span>商談化(累計)</span></div>
+          <div class="statcard" data-target="lists"><b>—</b><span>受注(累計)</span></div>
         </div>
         <h2 style="margin-top:20px">最近の営業履歴 <span>RECENT</span></h2>
         <div id="dashRecentWrap"><div class="empty">接続すると表示されます</div></div>
-        <h2 style="margin-top:20px">使い方</h2>
-        <div class="card">
-          <p class="hint">
-            1. 左メニューの「接続設定」でAPIキーを入力して接続します<br>
-            2. 「リスト取得」で都道府県・業種・ランク等の条件を選ぶと、該当件数が自動で表示されます。名前を付けて保存できます<br>
-            3. 自社で持っている企業リストがあれば「CSV検索」で取り込めます<br>
-            4. 作成したリストは「保存済みリスト」で内容を確認でき、「自動送信」でリストと送信文章
-              (テンプレートも使えます)を選んで送信します
-          </p>
+      </section>
+
+      <section class="page" data-page="tutorial">
+        <h2>チュートリアル <span>GETTING STARTED</span></h2>
+        <p class="hint">左メニューは送信の流れ(① 会社情報 → ② 送信準備 → ③ 自動送信)の順に
+          並んでいます。上から順番に進めれば迷わず送信まで辿り着けます。各カードの
+          ボタンから該当ページへ直接移動できます。</p>
+
+        <div class="card step">
+          <h3>1. 会社情報でリストを用意する</h3>
+          <p>「リスト取得」で都道府県・業種・スコアランク等の条件を選ぶと、該当件数が
+            自動で表示されます。名前を付けて保存すると「保存済みリスト」に残ります。
+            自社で持っている企業リストがあれば「CSV検索」から取り込むこともできます
+            (テンプレートは「CSV検索」ページからダウンロードできます)。</p>
+          <div class="btnrow">
+            <button class="ghost tutorialGo" data-page="filter">リスト取得へ</button>
+            <button class="ghost tutorialGo" data-page="csv">CSV検索へ</button>
+            <button class="ghost tutorialGo" data-page="lists">保存済みリストへ</button>
+          </div>
+        </div>
+
+        <div class="card step">
+          <h3>2. 送信準備(テンプレート・除外設定)を整える</h3>
+          <p>「送信文章テンプレート」「送信元テンプレート」を登録しておくと、自動送信の際に
+            件名・本文・送信者情報を選ぶだけで済みます。送りたくない企業がある場合は
+            「送信除外設定」に登録しておくと、以後どの送信でも自動的に除外されます。</p>
+          <div class="btnrow">
+            <button class="ghost tutorialGo" data-page="tmpl-body-add">送信文章テンプレート登録へ</button>
+            <button class="ghost tutorialGo" data-page="tmpl-sender-add">送信元テンプレート登録へ</button>
+            <button class="ghost tutorialGo" data-page="exclude-add">送信除外設定へ</button>
+          </div>
+        </div>
+
+        <div class="card step">
+          <h3>3. 自動送信する</h3>
+          <p>「自動送信」でリストをプルダウンから選ぶと、そのままページ内に送信フォームが
+            展開されます。送信元テンプレートを選ぶと個別入力欄に自動入力されるので、
+            内容を確認して送信してください。結果は「自動送信ログ」でリストごとに確認できます。</p>
+          <div class="btnrow">
+            <button class="ghost tutorialGo" data-page="autosend">自動送信へ</button>
+            <button class="ghost tutorialGo" data-page="sendlog">自動送信ログへ</button>
+          </div>
+        </div>
+
+        <div class="card step">
+          <h3>4. 自動送信できなかった企業を手動でフォローする(任意)</h3>
+          <p>「自動送信ログ」の詳細画面で「一時的な失敗」「失敗(未対応)」になった企業は、
+            Chrome拡張機能「AshiBase 自動入力アシスト」で入力欄だけ自動で埋めて、
+            内容を確認しながら手動送信できます(拡張機能のインストール方法は
+            「マニュアルDL」参照)。</p>
+          <div class="btnrow">
+            <button class="ghost tutorialGo" data-page="manual">マニュアルDLへ</button>
+          </div>
         </div>
       </section>
 
@@ -913,7 +967,7 @@ tr.clickable:hover{background:var(--blue-soft)}
 <script>
 // ── ナビゲーション(単一ページ内の切替。リロードなし) ──
 const PAGE_TITLES = {
-  home: "ホーム", autosend: "自動送信", sendlog: "自動送信ログ",
+  home: "ダッシュボード", tutorial: "チュートリアル", autosend: "自動送信", sendlog: "自動送信ログ",
   "sendlog-detail": "自動送信ログ | 詳細",
   "tmpl-body-list": "送信文章テンプレート | テンプレート一覧",
   "tmpl-body-add": "送信文章テンプレート | テンプレート登録",
@@ -961,6 +1015,20 @@ document.getElementById("navLogout").addEventListener("click", () => {
   setConnStatus("未接続", "off");
   ["btnRunFilterSearch", "btnRunCsvSearch"].forEach(id => $(id).disabled = true);
   goPage("home");
+});
+
+// ダッシュボードの統計カードをクリックすると関連ページへ遷移する(data-target属性で
+// 遷移先を指定。refreshHomeStats()/refreshDashboard()が描画するカードにも同じ
+// 属性を付けているので、接続前後どちらの状態でも動く)
+document.querySelectorAll("#homeStats, #dashThisMonth, #dashOutcomes").forEach(wrap => {
+  wrap.addEventListener("click", (e) => {
+    const card = e.target.closest(".statcard[data-target]");
+    if (card) goPage(card.dataset.target);
+  });
+});
+document.getElementById("btnGoTutorialFromHome").addEventListener("click", () => goPage("tutorial"));
+document.querySelectorAll(".tutorialGo").forEach(btn => {
+  btn.addEventListener("click", () => goPage(btn.dataset.page));
 });
 
 // 8地方区分。エリアチップは「管内の都道府県チェックボックスをまとめて操作する」
@@ -1084,6 +1152,12 @@ async function doConnect() {
     await refreshSenderTemplates();
     setConnStatus("接続済み", "on");
     ["btnRunFilterSearch", "btnRunCsvSearch"].forEach(id => $(id).disabled = false);
+    // この端末のブラウザで初めて接続できたときだけ、チュートリアルを自動で開く
+    // (2回目以降の接続・ページ再読込時の自動再接続では出さない)
+    if (!localStorage.getItem("ashibase_tutorial_seen")) {
+      localStorage.setItem("ashibase_tutorial_seen", "1");
+      goPage("tutorial");
+    }
     refreshHomeStats();
     refreshDashboard();
     refreshKillSwitch();
@@ -1122,8 +1196,8 @@ async function refreshKillSwitch() {
 function refreshHomeStats() {
   const totalCompanies = lastLists.reduce((a, l) => a + l.company_count, 0);
   $("homeStats").innerHTML = `
-    <div class="statcard"><b>${lastLists.length.toLocaleString()}</b><span>保存済みリスト数</span></div>
-    <div class="statcard key"><b>${totalCompanies.toLocaleString()}</b><span>対象企業数(合計)</span></div>`;
+    <div class="statcard" data-target="lists"><b>${lastLists.length.toLocaleString()}</b><span>保存済みリスト数</span></div>
+    <div class="statcard key" data-target="lists"><b>${totalCompanies.toLocaleString()}</b><span>対象企業数(合計)</span></div>`;
 }
 
 async function refreshDashboard() {
@@ -1132,16 +1206,16 @@ async function refreshDashboard() {
     const d = await call("/api/tenant/dashboard");
     $("dashHeadline").innerHTML = `今月、AI営業社員が${d.this_month.targeted_companies.toLocaleString()}社へ営業しました <span>OVERVIEW</span>`;
     $("dashThisMonth").innerHTML = `
-      <div class="statcard"><b>${d.this_month.targeted_companies.toLocaleString()}</b><span>営業対象企業数</span></div>
-      <div class="statcard"><b>${d.this_month.attempts.toLocaleString()}</b><span>送信試行数</span></div>
-      <div class="statcard key"><b>${d.this_month.success.toLocaleString()}</b><span>送信成功数</span></div>
-      <div class="statcard"><b>${d.this_month.skip.toLocaleString()}</b><span>SKIP数</span></div>
-      <div class="statcard"><b>${d.this_month.failed.toLocaleString()}</b><span>FAILED数</span></div>`;
+      <div class="statcard" data-target="sendlog"><b>${d.this_month.targeted_companies.toLocaleString()}</b><span>営業対象企業数</span></div>
+      <div class="statcard" data-target="sendlog"><b>${d.this_month.attempts.toLocaleString()}</b><span>送信試行数</span></div>
+      <div class="statcard key" data-target="sendlog"><b>${d.this_month.success.toLocaleString()}</b><span>送信成功数</span></div>
+      <div class="statcard" data-target="sendlog"><b>${d.this_month.skip.toLocaleString()}</b><span>SKIP数</span></div>
+      <div class="statcard" data-target="sendlog"><b>${d.this_month.failed.toLocaleString()}</b><span>FAILED数</span></div>`;
     $("dashOutcomes").innerHTML = `
-      <div class="statcard"><b>${d.all_time.success.toLocaleString()}</b><span>累計送信成功数</span></div>
-      <div class="statcard"><b>${d.outcomes.replied.toLocaleString()}</b><span>返信あり(累計)</span></div>
-      <div class="statcard"><b>${d.outcomes.deal.toLocaleString()}</b><span>商談化(累計)</span></div>
-      <div class="statcard"><b>${d.outcomes.won.toLocaleString()}</b><span>受注(累計)</span></div>`;
+      <div class="statcard" data-target="sendlog"><b>${d.all_time.success.toLocaleString()}</b><span>累計送信成功数</span></div>
+      <div class="statcard" data-target="lists"><b>${d.outcomes.replied.toLocaleString()}</b><span>返信あり(累計)</span></div>
+      <div class="statcard" data-target="lists"><b>${d.outcomes.deal.toLocaleString()}</b><span>商談化(累計)</span></div>
+      <div class="statcard" data-target="lists"><b>${d.outcomes.won.toLocaleString()}</b><span>受注(累計)</span></div>`;
 
     const logEl = $("dashRecentWrap");
     const lr = await call("/api/tenant/send-log/executions?limit=5");

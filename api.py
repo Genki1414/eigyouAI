@@ -138,12 +138,15 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/tenant/staff/register  {"name","email","password","role"} →
                            MIKOMERUの「担当者登録」相当(メール+パスワード)。
                            メール認証(GET /verify/staff/<token>)が完了するまで
-                           そのapi_keyは使えない。メール送信基盤は未実装のため、
-                           認証用URLはこの応答のverify_urlにそのまま返す
-                           (送信できたていで隠さない。管理者が手動で担当者へ
-                           共有する運用になる。HANDOFF.md T21参照)
+                           そのapi_keyは使えない。認証用URLは実際にSendGrid経由で
+                           担当者へメール送信する(T33)。応答のemail_sentが送信
+                           成否を示す。SENDGRID_API_KEY未設定・送信失敗時のみ、
+                           運用者が手動で共有できるようverify_pathを応答に含める
+                           フォールバックにする(黙って失敗させない。HANDOFF.md
+                           T21/T33参照)
   GET  /api/tenant/staff/pending  承認待ち(メール未認証)の担当者一覧
-  POST /api/tenant/staff/resend    {"staff_id"} → 認証用URLを再発行
+  POST /api/tenant/staff/resend    {"staff_id"} → 認証用URLを再発行し、
+                           register同様メールで再送する(応答の形もregisterと同じ)
   GET  /verify/staff/<token>      (認証不要・公開) メール認証リンク。
                            成功・失敗をHTMLページで表示する(MIKOMERUの
                            「認証完了」画面相当)
@@ -208,6 +211,9 @@ import target_lists as TL
 
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "dev-secret-change-me")
 LP_URL = os.environ.get("LP_URL", "https://ashibase.jp/sekisan")
+# 認証メール本文に埋め込む、このAPI自身の公開URL(GET /verify/staff/<token>を
+# 実際に叩けるドメイン)。本番では実際の公開ドメインを環境変数で上書きする。
+API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://ashibase.jp")
 # touch_idが無い流入を、直近何日以内の接触に帰属させるか
 ATTRIBUTION_WINDOW_DAYS = 45
 
@@ -1064,10 +1070,40 @@ def h_tenant_staff_revoke(con, tenant_id, data):
 _STAFF_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+def _send_staff_verification_email(con, tenant_id, name, email, verify_token):
+    """認証メールを実際にSendGrid経由で送る(T33)。応答を作る呼び出し元に
+    例外を伝播させない(登録・再発行そのものは、メール送信の成否にかかわらず
+    完了させる。_notify_completion()と同じ「ログにだけ残す」方針)。
+    戻り値: 送信できたかどうか(bool)。"""
+    import senders
+    verify_url = f"{API_PUBLIC_URL}/verify/staff/{verify_token}"
+    subject = "【AshiBase】担当者登録の確認"
+    body = (f"{name} 様\n\n"
+            f"AshiBaseへ担当者として登録されました。以下のURLを開いて、"
+            f"メールアドレスの確認を完了してください"
+            f"(有効期限: 登録から{offers.EMAIL_VERIFY_EXPIRY_HOURS}時間)。\n\n"
+            f"{verify_url}\n\n"
+            f"心当たりがない場合は、このメールを破棄してください。")
+    default_sender = senders.Sender(name="AshiBase（足場ベース）", email="info@ashibase.jp",
+                                     address="", optout_url="https://ashibase.jp/optout")
+    mailer = senders.MailSender(con, dry_run=False)
+    try:
+        mailer._deliver(senders.Recipient(company_id=0, name=name, email=email),
+                        default_sender, subject, body)
+        return True
+    except NotImplementedError:
+        print(f"  [担当者認証メール] メール送信基盤が未設定のため送信できません(宛先: {email})")
+        return False
+    except Exception as e:  # noqa: BLE001
+        print(f"  [担当者認証メール] 送信に失敗しました(宛先: {email}): {e}")
+        return False
+
+
 def h_tenant_staff_register(con, tenant_id, data):
     """MIKOMERUの「担当者登録」相当。offers.register_staff()の薄いラッパー。
-    メール送信基盤が未実装のため(HANDOFF.md T2)、認証メールの代わりに
-    verify_pathをこの応答へ直接含める(存在しないふりをして黙って失敗させない)。"""
+    認証用URLは実際にメール送信する(T33)。送信できなかった場合のみ、
+    運用者が手動共有できるようverify_pathを応答に含める(存在しないふりを
+    して黙って失敗させない)。"""
     name = (data.get("name") or "").strip()
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
@@ -1081,8 +1117,11 @@ def h_tenant_staff_register(con, tenant_id, data):
     res = offers.register_staff(con, tenant_id, name, email, password, role=role)
     if "error" in res:
         return 400, res
-    return 200, {"ok": True, "staff_id": res["staff_id"],
-                 "verify_path": f"/verify/staff/{res['verify_token']}"}
+    email_sent = _send_staff_verification_email(con, tenant_id, name, email, res["verify_token"])
+    out = {"ok": True, "staff_id": res["staff_id"], "email_sent": email_sent}
+    if not email_sent:
+        out["verify_path"] = f"/verify/staff/{res['verify_token']}"
+    return 200, out
 
 
 def h_tenant_staff_pending(con, tenant_id):
@@ -1096,7 +1135,12 @@ def h_tenant_staff_resend(con, tenant_id, data):
     token = offers.resend_staff_verification(con, tenant_id, staff_id)
     if not token:
         return 404, {"error": "承認待ちの担当者が見つかりません"}
-    return 200, {"ok": True, "verify_path": f"/verify/staff/{token}"}
+    row = con.execute("SELECT name, email FROM staff WHERE id=?", (staff_id,)).fetchone()
+    email_sent = _send_staff_verification_email(con, tenant_id, row["name"], row["email"], token)
+    out = {"ok": True, "email_sent": email_sent}
+    if not email_sent:
+        out["verify_path"] = f"/verify/staff/{token}"
+    return 200, out
 
 
 def h_verify_staff_email(con, token):
@@ -2976,7 +3020,7 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/lists", token=staff_key)
     t("担当者専用のapi_keyでも同じテナントのデータにアクセスできる", st == 200)
 
-    print("\n── 送信完了通知(MIKOMERU同等。宛先解決のみ検証。実送信はT2実装後) ──")
+    print("\n── 送信完了通知(MIKOMERU同等。宛先解決のみ検証。実送信の中身自体はsenders.py test参照) ──")
     import senders as _senders_mod
     notify_calls = []
 
@@ -3033,10 +3077,40 @@ def self_test(port=8899):
     st, r = post_auth("/api/tenant/staff/register",
                       {"name": "T21太郎", "email": "t21@test-a.example.co.jp",
                        "password": "pass1234", "role": "管理者"}, token=key_a)
-    t("POST /api/tenant/staff/register で登録でき、verify_pathが返る",
-      st == 200 and bool(r.get("staff_id")) and r.get("verify_path", "").startswith("/verify/staff/"))
+    t("POST /api/tenant/staff/register で登録でき、SENDGRID_API_KEY未設定時は"
+      "email_sent=falseでverify_pathが返る(T33)",
+      st == 200 and bool(r.get("staff_id")) and r.get("email_sent") is False
+      and r.get("verify_path", "").startswith("/verify/staff/"))
     t21_staff_id = r.get("staff_id")
     t21_verify_path = r.get("verify_path")
+
+    print("\n── 担当者認証メールの実送信(T33。SENDGRID_API_KEYが有効な場合の挙動をモックで検証) ──")
+    t33_sent_to = []
+
+    def _fake_verify_deliver(self, to, sender, subject, body):
+        t33_sent_to.append(to.email)
+        assert "/verify/staff/" in body, "メール本文に認証URLが含まれていない"
+        return _senders_mod.SendResult(ok=True, provider_id="fake-msg")
+
+    _senders_mod.MailSender._deliver = _fake_verify_deliver
+    try:
+        st, r = post_auth("/api/tenant/staff/register",
+                          {"name": "T33花子", "email": "t33@test-a.example.co.jp",
+                           "password": "pass1234"}, token=key_a)
+        t("メール送信が成功するとemail_sent=trueで、verify_pathは応答に含まれない",
+          st == 200 and r.get("email_sent") is True and "verify_path" not in r
+          and t33_sent_to == ["t33@test-a.example.co.jp"])
+        t33_staff_id = r.get("staff_id")
+
+        t33_sent_to.clear()
+        st, r = post_auth("/api/tenant/staff/resend", {"staff_id": t33_staff_id}, token=key_a)
+        t("POST /api/tenant/staff/resendも同様にメール送信を試み、成功時はverify_pathを含まない",
+          st == 200 and r.get("email_sent") is True and "verify_path" not in r
+          and t33_sent_to == ["t33@test-a.example.co.jp"])
+    finally:
+        _senders_mod.MailSender._deliver = orig_deliver
+        con.execute("DELETE FROM staff WHERE email='t33@test-a.example.co.jp'")
+        con.commit()
 
     st, r = post_auth("/api/tenant/staff/register",
                       {"name": "別名", "email": "t21@test-a.example.co.jp", "password": "pass1234"},

@@ -1819,9 +1819,12 @@ $("btnRegisterStaffLogin").addEventListener("click", async () => {
   try {
     const r = await call("/api/tenant/staff/register",
       { method: "POST", body: JSON.stringify({ name, email, password, role }) });
-    el.innerHTML = `<div class="result ok">登録しました。メール送信基盤が未実装のため、
-      以下の認証用URLを管理者から担当者へ直接共有してください(このURLを開くと認証が
-      完了し、ログインできるようになります):<br>${verifyLinkHtml(r.verify_path)}</div>`;
+    el.innerHTML = r.email_sent
+      ? `<div class="result ok">登録しました。${email} 宛に認証メールを送信しました。
+         担当者にメール内のURLを開いて認証を完了するよう伝えてください。</div>`
+      : `<div class="result ok">登録しました。認証メールを送信できなかったため、
+         以下の認証用URLを管理者から担当者へ直接共有してください(このURLを開くと認証が
+         完了し、ログインできるようになります):<br>${verifyLinkHtml(r.verify_path)}</div>`;
     $("stlName").value = ""; $("stlEmail").value = "";
     $("stlPassword").value = ""; $("stlPassword2").value = "";
     await refreshStaffPending();
@@ -1865,8 +1868,10 @@ async function resendStaffVerification(id) {
   const el = $("staffResendResult");
   try {
     const r = await call("/api/tenant/staff/resend", { method: "POST", body: JSON.stringify({ staff_id: id }) });
-    el.innerHTML = `<div class="result ok">新しい認証用URLを発行しました。管理者から担当者へ
-      直接共有してください:<br>${verifyLinkHtml(r.verify_path)}</div>`;
+    el.innerHTML = r.email_sent
+      ? `<div class="result ok">新しい認証メールを送信しました。</div>`
+      : `<div class="result ok">新しい認証用URLを発行しました。認証メールを送信できなかった
+         ため、管理者から担当者へ直接共有してください:<br>${verifyLinkHtml(r.verify_path)}</div>`;
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }

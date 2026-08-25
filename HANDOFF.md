@@ -1868,6 +1868,46 @@ API応答にそのまま返すだけで実際にはメールしていない。HA
 
 ---
 
+### T33. 担当者登録の認証メールを実送信に切替(2026-08-25)
+
+T32でSendGrid送信が動くようになったので、5点の運用課題のうち①(担当者登録の
+メール認証)を対応。従来はセキュリティ上のギャップがあった: `verify_path`を
+API応答にそのまま含めて返していたため、テナント管理者が実際にはアクセス権の
+無い他人のメールアドレスを入力しても、メール受信を経ずにその場でverify URLが
+手に入り、自己認証が成立してしまっていた(「メール認証」を名乗りながら
+実際にはメールアドレスの実所有を一切確認していなかった)。
+
+- `api.py`: `_send_staff_verification_email()`を新設。`senders.MailSender`で
+  `AshiBase（足場ベース）<info@ashibase.jp>`から担当者のメール宛に認証URL
+  (`API_PUBLIC_URL`環境変数 + `/verify/staff/<token>`。本番では実際の公開
+  ドメインを設定すること)を送る。`target_lists._notify_completion()`と同じ
+  「`_deliver()`を直接呼び、`NotImplementedError`はログにだけ残して呼び出し
+  元へは伝播させない」設計を踏襲(SendGrid未設定・送信失敗でも登録処理自体は
+  失敗させない)。
+- `h_tenant_staff_register`/`h_tenant_staff_resend`: 応答に`email_sent`
+  (bool)を追加。送信できた場合は`verify_path`を応答に含めない(セキュリティ
+  ギャップを塞ぐ本体)。送信できなかった場合(`SENDGRID_API_KEY`未設定・
+  SendGrid側障害等)のみ、運用者が手動で担当者へ共有できるよう従来通り
+  `verify_path`をフォールバックとして返す(黙って失敗させない、という
+  既存方針を維持)。
+- `list_builder.html`: 担当者登録・再発行の結果表示を`email_sent`で分岐。
+  送信できた場合は「◯◯宛に認証メールを送信しました」、できなかった場合は
+  従来通りURLをその場に表示するフォールバック表示にした。
+- テスト: `api.py test`に「担当者認証メールの実送信(T33)」セクションを追加。
+  `SENDGRID_API_KEY`未設定のこのテスト環境では自然に`email_sent=false`+
+  `verify_path`が返ることを確認(既存T21テストはそのまま無修正で通る)、
+  さらに`MailSender._deliver`をモンキーパッチして送信成功をシミュレートし、
+  `email_sent=true`かつ`verify_path`が応答に含まれないこと・メール本文に
+  認証URLが実際に埋め込まれていることを検証(register/resend両方)。
+  全体回帰確認(api.py test 287/287、test_pipeline.py 44/48=既知の4件のみ
+  未解決でT33起因の新規失敗なし、senders.py test全項目パス)。
+
+**次のステップ**: パスワードリセット機能の新規実装→監視・アラート
+(メール通知)→バックアップ構築→デプロイ自動化(GitHub Actions)→
+テンプレート類の編集。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

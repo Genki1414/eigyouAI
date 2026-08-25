@@ -96,6 +96,20 @@ FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT = 4000  # tenants.monthly_send_quota未設
 # メモリ(Chromiumプロセスを同時分だけ起動する)を圧迫するため小さめに抑える。
 FORM_SEND_CONCURRENCY = 3
 
+# ── 送信元IPの分散(プロキシ。T42) ─────────────
+# T41でフォーム送信を並列化した結果、複数ワーカーが同じサーバーIPから
+# 短時間に一斉アクセスする形になり、相手サイト側のWAF/bot判定に
+# 引っかかりやすくなる懸念がある。form_navigator.py がPlaywrightで
+# ブラウザを起動するたびに、このプールからプロキシを1つ選んで経由させる
+# ことでアクセス元IPを分散できるようにする(実際のプロキシサービスの契約は
+# インフラ側の判断のため、ここではコード側の受け皿のみ用意する)。
+#
+# FORM_PROXY_POOL環境変数にカンマ区切りで設定する:
+#   FORM_PROXY_POOL="http://user1:pass1@proxy1.example.com:8080,http://proxy2.example.com:8080"
+# 未設定(既定=空リスト)ならプロキシを使わず直接アクセスする(現状と同じ挙動、
+# 後方互換)。
+FORM_PROXY_POOL = [p.strip() for p in os.environ.get("FORM_PROXY_POOL", "").split(",") if p.strip()]
+
 # ── 原価計測(1送信あたりのコスト把握。β版・概算値) ──
 # 厳密なクラウド原価配賦ではなく、事業判断に使える推定値を出すのが目的。
 # サーバー月額費用を実行時間で按分する(実行時間ベースの単純な比例配分)。

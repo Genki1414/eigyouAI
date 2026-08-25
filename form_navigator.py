@@ -20,14 +20,46 @@ senders.FormSenderから呼ばれる。ここは「ブラウザ操作」だけ�
   result.status  # "SUCCESS" / "SKIP_CAPTCHA" / ...
 """
 import os
+import random
 import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import unquote, urlsplit
 
 MAX_CRAWL_PAGES = 5          # 問い合わせページ探索で開くページ数の上限
 NAV_TIMEOUT_MS = 45000
 ACTION_TIMEOUT_MS = 10000
+
+
+def _parse_proxy(proxy_url):
+    """"http://user:pass@host:port" 形式の文字列を、Playwrightのproxy引数が
+    要求する形({"server","username","password"})へ変換する。Playwrightは
+    user:pass@をserver URLへ埋め込む書き方をサポートしない(別引数として渡す
+    必要がある)ため、ここで分離する。認証情報が無い場合はserverのみ返す。"""
+    parts = urlsplit(proxy_url)
+    server = f"{parts.scheme}://{parts.hostname}"
+    if parts.port:
+        server += f":{parts.port}"
+    proxy = {"server": server}
+    if parts.username:
+        proxy["username"] = unquote(parts.username)
+    if parts.password:
+        proxy["password"] = unquote(parts.password)
+    return proxy
+
+
+def _pick_proxy():
+    """config.FORM_PROXY_POOL(T42: 送信元IPの分散)からランダムに1つ選ぶ。
+    未設定(空リスト)ならNoneを返し、直接接続する(既定・後方互換の挙動)。
+    T41で並列化した複数ワーカーそれぞれがブラウザ起動時に呼ぶため、単純な
+    ランダム選択で長期的にはプール全体へ分散する(厳密なラウンドロビンは
+    ワーカー間の共有カウンタが要るぶん複雑になるだけで、目的<IPの分散>には
+    どちらでも十分)。"""
+    import config as C
+    if not C.FORM_PROXY_POOL:
+        return None
+    return _parse_proxy(random.choice(C.FORM_PROXY_POOL))
 
 
 def _launch_browser(p, headless):
@@ -36,13 +68,17 @@ def _launch_browser(p, headless):
     開発環境でPlaywright標準のブラウザダウンロードができない場合だけ、
     環境変数PLAYWRIGHT_CHROMIUM_PATHで代替のchromium実行ファイルを指定できる
     (例: サンドボックス環境でcdn.playwright.devへ到達できない場合の開発用途。
-    本番では未設定のままにしておくこと)。"""
+    本番では未設定のままにしておくこと)。
+
+    config.FORM_PROXY_POOLが設定されていれば、起動のたびにプールから選んだ
+    プロキシを経由させる(T42: 送信元IPの分散)。"""
+    proxy = _pick_proxy()
     exe = os.environ.get("PLAYWRIGHT_CHROMIUM_PATH")
     if exe:
         return p.chromium.launch(
-            executable_path=exe, headless=headless,
+            executable_path=exe, headless=headless, proxy=proxy,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
-    return p.chromium.launch(headless=headless)
+    return p.chromium.launch(headless=headless, proxy=proxy)
 
 # ── フィールド判定の同義語辞書 ────────────────
 # 表記ゆれ・同義語を広めに持つ。name/id/placeholder/aria-label/label文言/
@@ -693,7 +729,28 @@ if __name__ == "__main__":
             print(f"⚠ Playwright未使用のためスキップ ({type(e).__name__}: {e})")
             sys.exit(0)
 
-        print("── フィールド検出ヒューリスティック ──")
+        print("── プロキシ設定の変換(T42: 送信元IPの分散) ──")
+        p1 = _parse_proxy("http://user:pa%40ss@myproxy.example.com:8080")
+        ok1 = p1 == {"server": "http://myproxy.example.com:8080",
+                     "username": "user", "password": "pa@ss"}
+        print(f"  {'✓' if ok1 else '✗'} 認証情報付きURLをserver/username/passwordへ分離: {p1}")
+        p2 = _parse_proxy("http://myproxy.example.com:3128")
+        ok2 = p2 == {"server": "http://myproxy.example.com:3128"}
+        print(f"  {'✓' if ok2 else '✗'} 認証情報が無ければserverのみ: {p2}")
+
+        import config as C
+        orig_pool = C.FORM_PROXY_POOL
+        try:
+            C.FORM_PROXY_POOL = []
+            ok3 = _pick_proxy() is None
+            print(f"  {'✓' if ok3 else '✗'} FORM_PROXY_POOL未設定なら直接接続(None)")
+            C.FORM_PROXY_POOL = ["http://onlyone.example.com:8080"]
+            ok4 = _pick_proxy() == {"server": "http://onlyone.example.com:8080"}
+            print(f"  {'✓' if ok4 else '✗'} FORM_PROXY_POOL設定時はプールから選ぶ: {_pick_proxy()}")
+        finally:
+            C.FORM_PROXY_POOL = orig_pool
+
+        print("\n── フィールド検出ヒューリスティック ──")
         samples = [
             ("標準的な日本語フォーム", """
                 <form>
@@ -761,6 +818,76 @@ if __name__ == "__main__":
                 else:
                     ok = fn(payload)
                 print(f"  {'✓' if ok else '✗'} {label}")
+
+            print("\n── プロキシ経由の実アクセス(T42。ローカルの疑似ターゲット+"
+                  "疑似プロキシで、実際にChromiumがプロキシを通ることを確認) ──")
+            import http.server
+            import http.client
+            import threading as _threading
+
+            proxy_seen = []
+
+            class _FakeTargetHandler(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    body = "<html><body>疑似お問い合わせページ</body></html>".encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, *a):
+                    pass
+
+            class _ProxyHandler(http.server.BaseHTTPRequestHandler):
+                """プロキシ宛のリクエストを記録してから、実際のターゲットへ転送する
+                (絶対URI形式のリクエストラインで届く。httpの平文なのでCONNECTトンネル
+                ではなく通常のプロキシ転送になる)。"""
+
+                def do_GET(self):
+                    proxy_seen.append(self.path)
+                    from urllib.parse import urlsplit as _us
+                    parsed = _us(self.path)
+                    conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+                    conn.request("GET", parsed.path or "/")
+                    resp = conn.getresponse()
+                    body = resp.read()
+                    self.send_response(resp.status)
+                    for k, v in resp.getheaders():
+                        if k.lower() not in ("transfer-encoding", "connection"):
+                            self.send_header(k, v)
+                    self.end_headers()
+                    self.wfile.write(body)
+                    conn.close()
+
+                def log_message(self, *a):
+                    pass
+
+            target_srv = http.server.HTTPServer(("127.0.0.1", 0), _FakeTargetHandler)
+            proxy_srv = http.server.HTTPServer(("127.0.0.1", 0), _ProxyHandler)
+            target_port = target_srv.server_address[1]
+            proxy_port = proxy_srv.server_address[1]
+            for srv in (target_srv, proxy_srv):
+                th = _threading.Thread(target=srv.serve_forever, daemon=True)
+                th.start()
+            try:
+                C.FORM_PROXY_POOL = [f"http://127.0.0.1:{proxy_port}"]
+                proxy_browser = _launch_browser(pw_ctx, True)
+                try:
+                    proxy_page = proxy_browser.new_page()
+                    proxy_page.goto(f"http://127.0.0.1:{target_port}/",
+                                     timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                    loaded_ok = "疑似お問い合わせページ" in _page_text(proxy_page)
+                    routed_ok = any(f":{target_port}" in seen for seen in proxy_seen)
+                    print(f"  {'✓' if loaded_ok else '✗'} プロキシ経由でもページ内容を正しく取得できる")
+                    print(f"  {'✓' if routed_ok else '✗'} 疑似プロキシが実際にリクエストを受けて中継した"
+                          f"(記録: {proxy_seen})")
+                finally:
+                    proxy_browser.close()
+            finally:
+                C.FORM_PROXY_POOL = orig_pool
+                target_srv.shutdown()
+                proxy_srv.shutdown()
         finally:
             browser.close()
             pw_ctx.stop()

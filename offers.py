@@ -244,27 +244,44 @@ def verify_password(password, stored_hash):
 EMAIL_VERIFY_EXPIRY_HOURS = 24  # MIKOMERUマニュアルの「担当者を登録する(2)」に合わせる
 
 
-def register_staff(con, tenant_id, name, email, password, role="一般"):
+def register_staff(con, tenant_id, name, email, password, role="一般", pre_verified=False):
     """MIKOMERUの「担当者登録」相当。add_staff()と違い、api_keyはこの時点では
     まだ使えない(email_verified_atが立つまで。resolve_tenant_by_key()参照)。
     同じメールアドレスがどのテナントにも既に登録されていれば拒否する
     (MIKOMERUの「すでにMIKOMERUへ登録済みのメールアドレスはご登録いただけません」と同じ。
-    ログインはテナントを問わずメールアドレス1つで引くため、全テナント横断で一意にする)。"""
+    ログインはテナントを問わずメールアドレス1つで引くため、全テナント横断で一意にする)。
+
+    pre_verified=True(本部画面がテナントの代わりにアカウントを作る場合。T46)は
+    メール認証を省略し、email_verified_atをこの時点で立てる。本部担当者が
+    電話等の別経路で既に本人確認した上でログイン情報を直接手渡しする運用の
+    ため、テナント側の自己登録(メールを実際に届けて確認する必要がある)とは
+    信頼の前提が異なる。この場合verify_tokenは発行しない(戻り値にも含めない)。"""
     existing = con.execute("SELECT 1 FROM staff WHERE email=?", (email,)).fetchone()
     if existing:
         return {"error": "このメールアドレスは既に登録されています"}
     now = datetime.now()
     api_key = generate_api_key()
-    verify_token = secrets.token_urlsafe(24)
-    expires_at = (now + timedelta(hours=EMAIL_VERIFY_EXPIRY_HOURS)).isoformat(timespec="seconds")
+    if pre_verified:
+        verify_token = None
+        expires_at = None
+        verified_at = now.isoformat(timespec="seconds")
+    else:
+        verify_token = secrets.token_urlsafe(24)
+        expires_at = (now + timedelta(hours=EMAIL_VERIFY_EXPIRY_HOURS)).isoformat(timespec="seconds")
+        verified_at = None
     cur = con.execute("""INSERT INTO staff
         (tenant_id, name, email, api_key, password_hash, role,
-         email_verify_token, email_verify_expires_at, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?)""",
+         email_verify_token, email_verify_expires_at, email_verified_at, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (tenant_id, name, email, api_key, hash_password(password), role,
-         verify_token, expires_at, now.isoformat(timespec="seconds")))
+         verify_token, expires_at, verified_at, now.isoformat(timespec="seconds")))
     con.commit()
-    return {"staff_id": cur.lastrowid, "verify_token": verify_token}
+    result = {"staff_id": cur.lastrowid}
+    if pre_verified:
+        result["api_key"] = api_key
+    else:
+        result["verify_token"] = verify_token
+    return result
 
 
 def verify_staff_email(con, token):

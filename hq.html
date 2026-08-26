@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>AshiBase 本部 — テナント管理</title>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@700;900&family=IBM+Plex+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --concrete:#EFF1F2; --surface:#FFFFFF; --ink:#16191D; --steel:#6E7880;
+  --line:#DDE1E4; --accent:#B4441F; --accent-soft:#FBEAE4;
+  --win:#1E7A4D; --warn:#B4441F; --mono:'IBM Plex Mono',monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--concrete);color:var(--ink);font-family:'IBM Plex Sans JP',sans-serif;font-size:14px;line-height:1.6}
+.stripe{height:4px;background:var(--accent)}
+header{background:var(--ink);color:#fff;padding:16px 24px}
+header b{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:17px}
+header small{display:block;font-family:var(--mono);font-size:11px;color:#C7CCD6;margin-top:2px}
+.wrap{max-width:900px;margin:0 auto;padding:20px 20px 60px}
+h2{font-family:'Zen Kaku Gothic New';font-weight:700;font-size:15px;margin:26px 0 10px;display:flex;align-items:center;gap:8px}
+h2:first-child{margin-top:0}
+h2::before{content:"";width:4px;height:16px;background:var(--accent)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
+label{font-size:12px;font-weight:700;color:var(--steel);display:block;margin-bottom:4px}
+input[type=text],input[type=password],input[type=email],select{
+  width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:5px;
+  font-family:'IBM Plex Sans JP',sans-serif;font-size:13px;background:var(--concrete);margin-bottom:10px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+button{font-family:'IBM Plex Sans JP',sans-serif;font-size:13px;font-weight:700;border:none;
+  border-radius:6px;padding:9px 18px;cursor:pointer;background:var(--ink);color:#fff}
+button.ghost{background:var(--surface);color:var(--ink);border:1px solid var(--line)}
+button:disabled{opacity:.4;cursor:not-allowed}
+.result{margin-top:10px;padding:10px 12px;border-radius:6px;font-size:13px;font-family:var(--mono);white-space:pre-wrap;word-break:break-all}
+.result.ok{background:#E7F5EC;color:var(--win)}
+.result.err{background:var(--accent-soft);color:var(--warn)}
+.status{font-family:var(--mono);font-size:11px;font-weight:600;padding:5px 12px;border-radius:99px;display:inline-block}
+.status.on{background:#E7F5EC;color:var(--win)}
+.status.off{background:var(--accent-soft);color:var(--warn)}
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-top:6px}
+th{background:var(--concrete);font-size:11px;color:var(--steel);text-align:left;padding:8px 10px}
+td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
+.hint{font-size:12px;color:var(--steel);margin-bottom:10px}
+.gated{display:none}
+.gated.show{display:block}
+</style>
+</head>
+<body>
+<div class="stripe"></div>
+<header>
+  <b>AshiBase 本部</b>
+  <small>契約テナントの作成・ログイン情報の代行発行(社内運用専用。顧客向け画面には一切リンクしていません)</small>
+</header>
+<div class="wrap">
+
+  <h2>接続</h2>
+  <div class="card">
+    <div class="hint">環境変数 SALES_ENGINE_API_KEY と同じ値を入力してください(Stock Factory連携APIキーと同じもの)。</div>
+    <div class="row">
+      <div>
+        <label>APIサーバURL</label>
+        <input type="text" id="apiBase" placeholder="https://ashibase.jp">
+      </div>
+      <div>
+        <label>SALES_ENGINE_API_KEY</label>
+        <input type="password" id="apiKey">
+      </div>
+    </div>
+    <button id="btnConnect">接続</button>
+    <span class="status off" id="connStatus" style="margin-left:10px">未接続</span>
+  </div>
+
+  <div class="gated" id="gated">
+
+    <h2>テナント作成</h2>
+    <div class="card">
+      <div class="hint">契約が決まった顧客の環境を作成します。作成後に表示される api_key は一度しか表示されません(list_builder.htmlへのログインに必要な値として、そのまま顧客へ共有してください)。</div>
+      <div class="row">
+        <div>
+          <label>会社名 *</label>
+          <input type="text" id="tName" placeholder="株式会社◯◯建設">
+        </div>
+        <div>
+          <label>種別</label>
+          <select id="tKind">
+            <option value="client">client(通常の販売先)</option>
+            <option value="acquirer">acquirer(買収元等)</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>送信元メールアドレス *</label>
+          <input type="email" id="tSenderEmail" placeholder="info@example.co.jp">
+        </div>
+        <div>
+          <label>送信元表示名</label>
+          <input type="text" id="tSenderName" placeholder="未入力なら会社名と同じ">
+        </div>
+      </div>
+      <label>送信元住所</label>
+      <input type="text" id="tSenderAddress">
+      <label>オプトアウト連絡先URL(未入力なら mailto:送信元メールアドレス)</label>
+      <input type="text" id="tOptoutUrl" placeholder="https://example.co.jp/optout">
+      <button id="btnCreateTenant">テナントを作成</button>
+      <div class="result" id="tenantResult" style="display:none"></div>
+    </div>
+
+    <h2>スタッフアカウントの代行作成</h2>
+    <div class="card">
+      <div class="hint">顧客本人と電話等で本人確認済みであることを前提に、本部が代わってログイン情報を発行します。メール認証は経由せず、その場で発行した api_key・パスワードがそのまま使えます。</div>
+      <label>テナント *</label>
+      <select id="sTenantId"></select>
+      <div class="row">
+        <div>
+          <label>担当者名 *</label>
+          <input type="text" id="sName">
+        </div>
+        <div>
+          <label>権限</label>
+          <select id="sRole">
+            <option value="一般">一般</option>
+            <option value="管理者">管理者</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>メールアドレス(ログインID) *</label>
+          <input type="email" id="sEmail">
+        </div>
+        <div>
+          <label>初期パスワード * (8〜64文字)</label>
+          <input type="text" id="sPassword">
+        </div>
+      </div>
+      <button id="btnCreateStaff">アカウントを発行</button>
+      <div class="result" id="staffResult" style="display:none"></div>
+    </div>
+
+    <h2>テナント一覧</h2>
+    <div class="card">
+      <button class="ghost" id="btnRefreshTenants">再読込</button>
+      <table id="tenantTable" style="display:none">
+        <thead><tr><th>ID</th><th>会社名</th><th>種別</th><th>送信元</th><th>作成日</th></tr></thead>
+        <tbody id="tenantTbody"></tbody>
+      </table>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let API = "", KEY = "";
+
+$("apiBase").value = localStorage.getItem("ashibase_hq_api_base") ||
+  (location.protocol.startsWith("http") && location.port ? location.origin : "");
+$("apiKey").value = localStorage.getItem("ashibase_hq_api_key") || "";
+
+async function call(path, opts) {
+  const res = await fetch(API.replace(/\/$/, "") + path, {
+    ...opts,
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + KEY, ...(opts && opts.headers) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+  return body;
+}
+
+function showResult(el, ok, text) {
+  el.style.display = "block";
+  el.className = "result " + (ok ? "ok" : "err");
+  el.textContent = text;
+}
+
+async function refreshTenants() {
+  const { tenants } = await call("/api/ops/tenants");
+  const tbody = $("tenantTbody");
+  tbody.innerHTML = tenants.map(t =>
+    `<tr><td>${t.id}</td><td>${escapeHtml(t.name)}</td><td>${escapeHtml(t.kind)}</td>` +
+    `<td>${escapeHtml(t.sender_email)}</td><td>${escapeHtml(t.created_at || "")}</td></tr>`
+  ).join("");
+  $("tenantTable").style.display = tenants.length ? "table" : "none";
+  const sel = $("sTenantId");
+  const prev = sel.value;
+  sel.innerHTML = tenants.map(t => `<option value="${t.id}">${t.id}: ${escapeHtml(t.name)}</option>`).join("");
+  if (prev && tenants.some(t => String(t.id) === prev)) sel.value = prev;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function doConnect() {
+  API = $("apiBase").value.trim();
+  KEY = $("apiKey").value.trim();
+  localStorage.setItem("ashibase_hq_api_base", API);
+  localStorage.setItem("ashibase_hq_api_key", KEY);
+  try {
+    await refreshTenants();
+    $("connStatus").textContent = "接続済み";
+    $("connStatus").className = "status on";
+    $("gated").classList.add("show");
+  } catch (e) {
+    $("connStatus").textContent = "接続失敗: " + e.message;
+    $("connStatus").className = "status off";
+    $("gated").classList.remove("show");
+  }
+}
+$("btnConnect").addEventListener("click", doConnect);
+$("btnRefreshTenants").addEventListener("click", () => refreshTenants().catch(e => alert(e.message)));
+
+$("btnCreateTenant").addEventListener("click", async () => {
+  const btn = $("btnCreateTenant");
+  const el = $("tenantResult");
+  btn.disabled = true;
+  try {
+    const res = await call("/api/ops/tenants", {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("tName").value.trim(),
+        kind: $("tKind").value,
+        sender_email: $("tSenderEmail").value.trim(),
+        sender_name: $("tSenderName").value.trim() || undefined,
+        sender_address: $("tSenderAddress").value.trim(),
+        optout_url: $("tOptoutUrl").value.trim() || undefined,
+      }),
+    });
+    showResult(el, true,
+      `作成しました。この api_key は今しか表示されません。顧客へ list_builder.html のログイン情報として渡してください。\n\n` +
+      `tenant_id: ${res.tenant_id}\napi_key: ${res.api_key}`);
+    $("tName").value = ""; $("tSenderEmail").value = ""; $("tSenderName").value = "";
+    $("tSenderAddress").value = ""; $("tOptoutUrl").value = "";
+    await refreshTenants();
+  } catch (e) {
+    showResult(el, false, "エラー: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$("btnCreateStaff").addEventListener("click", async () => {
+  const tenantId = $("sTenantId").value;
+  const btn = $("btnCreateStaff");
+  const el = $("staffResult");
+  if (!tenantId) { showResult(el, false, "先にテナントを作成してください"); return; }
+  btn.disabled = true;
+  try {
+    const res = await call(`/api/ops/tenants/${tenantId}/staff`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("sName").value.trim(),
+        email: $("sEmail").value.trim(),
+        password: $("sPassword").value,
+        role: $("sRole").value,
+      }),
+    });
+    showResult(el, true,
+      `発行しました。メール認証は不要で、そのままログインできます。\n\n` +
+      `staff_id: ${res.staff_id}\napi_key: ${res.api_key}\n` +
+      `(顧客にはメールアドレス・パスワードでのログイン、またはこのapi_keyを案内してください)`);
+    $("sName").value = ""; $("sEmail").value = ""; $("sPassword").value = "";
+  } catch (e) {
+    showResult(el, false, "エラー: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+if (KEY_AUTOCONNECT()) doConnect();
+function KEY_AUTOCONNECT() { return !!$("apiKey").value.trim(); }
+</script>
+</body>
+</html>

@@ -26,6 +26,21 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            "tenant_id"(scope=tenantのみ),"reason"} → 停止/解除。
                            全送信経路の合流点であるsenders.send_campaign()側で
                            必ずチェックされる(kill_switch_cli.pyでも操作可能)
+  GET  /api/ops/tenants        テナント一覧(api_keyは含まない。既に発行済みの
+                           キーを見返す手段は無い運用のため、再発行が必要なら
+                           手動でDBを更新するかテナントを作り直すこと)
+  POST /api/ops/tenants        {"name","sender_email","kind","sender_name",
+                           "sender_address","optout_url"} → 新規テナント作成
+                           (offers.add_tenant())。契約が決まった顧客へ渡す
+                           api_keyはこのレスポンスに一度だけ含まれる
+  POST /api/ops/tenants/<id>/staff  {"name","email","password","role"} →
+                           本部担当者が顧客に代わってログイン情報を発行する
+                           (offers.register_staff(pre_verified=True)。本部が
+                           既に電話等で本人確認済みという前提のため、テナント
+                           自身の新規登録</api/tenant/staff/register>と違い
+                           メール認証は経由しない)。hq.html専用
+  ※ /api/ops/* は本部専用画面(hq.html)からのみ叩く想定。/list_builder.html
+    等の顧客向け画面からはリンクしない(顧客に運用系の強い権限を渡さないため)
 
   ── 送信先リスト(SaaSとして他社に販売する側。テナントごとのapi_keyで認証) ──
   POST /api/tenant/lists/preview  {"filters"} → 該当件数のプレビュー(保存しない)
@@ -258,11 +273,16 @@ _SEND_LOG_MANUAL_SENT_PATH_RE = re.compile(r"^/api/tenant/send-log/(\d+)/manual-
 _SEND_LOG_EXEC_NOTE_PATH_RE = re.compile(r"^/api/tenant/send-log/executions/(\d+)/note$")
 _VERIFY_STAFF_PATH_RE = re.compile(r"^/verify/staff/([A-Za-z0-9_-]+)$")
 _RESET_PASSWORD_PATH_RE = re.compile(r"^/reset-password/([A-Za-z0-9_-]+)$")
+_OPS_TENANT_STAFF_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/staff$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
 # ブラウザの混在コンテンツ制限でfetch()がブロックされてしまうための対応。
-_STATIC_PAGES = {"/list_builder.html": "list_builder.html", "/": "list_builder.html"}
+# hq.htmlは意図的に"/"にもlist_builder.htmlのnavにもリンクしない
+# (本部専用。URLを直接知っている運用者だけが辿り着く想定。将来的に
+# 別サブドメイン<例: hq.ashibase.jp>へ切り離すことも可能<Caddy側の設定のみで済む>)。
+_STATIC_PAGES = {"/list_builder.html": "list_builder.html", "/": "list_builder.html",
+                  "/hq.html": "hq.html"}
 _BASE_DIR = Path(__file__).parent
 
 
@@ -1615,6 +1635,57 @@ def h_tenant_kill_switch_status(con, tenant_id):
     return 200, {"stopped": stopped, "reason": reason}
 
 
+# ── 本部画面(hq.html)専用: 契約済みテナントの作成・ログイン情報代行発行(T46) ──
+def h_ops_tenants_list(con):
+    """api_keyは含めない(発行時に一度きり表示する運用。list_builder.htmlの
+    担当者一覧が個々のapi_keyを返さないのと同じ方針)。"""
+    rows = con.execute("""SELECT id, name, kind, sender_name, sender_email, created_at
+        FROM tenants ORDER BY created_at DESC""").fetchall()
+    return 200, {"tenants": [dict(r) for r in rows]}
+
+
+def h_ops_tenants_create(con, data):
+    name = (data.get("name") or "").strip()
+    sender_email = (data.get("sender_email") or "").strip()
+    if not name or not sender_email:
+        return 400, {"error": "name・sender_emailは必須です"}
+    if not _STAFF_EMAIL_RE.match(sender_email):
+        return 400, {"error": "sender_emailの形式が正しくありません"}
+    kind = (data.get("kind") or "client").strip()
+    if kind not in ("own", "client", "acquirer"):
+        return 400, {"error": "kindはown・client・acquirerのいずれかです"}
+    sender_name = (data.get("sender_name") or "").strip() or None
+    sender_address = (data.get("sender_address") or "").strip()
+    optout_url = (data.get("optout_url") or "").strip() or None
+    tenant_id, api_key = offers.add_tenant(con, name, sender_email, kind=kind,
+                                            sender_name=sender_name, sender_address=sender_address,
+                                            optout_url=optout_url)
+    return 200, {"ok": True, "tenant_id": tenant_id, "api_key": api_key}
+
+
+def h_ops_tenant_staff_create(con, tenant_id, data):
+    """本部担当者が、契約済みテナントの担当者アカウントを代行で作る。
+    offers.register_staff(pre_verified=True)を使うため、テナント自身の
+    /api/tenant/staff/register(メール認証が必要)と違い、この場で
+    api_keyがそのまま使える状態で返る(本部が既に本人確認済みという前提)。"""
+    if not con.execute("SELECT 1 FROM tenants WHERE id=?", (tenant_id,)).fetchone():
+        return 404, {"error": "テナントが見つかりません"}
+    name = (data.get("name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    role = (data.get("role") or "一般").strip() or "一般"
+    if not name or not email or not password:
+        return 400, {"error": "name・email・passwordは必須です"}
+    if not _STAFF_EMAIL_RE.match(email):
+        return 400, {"error": "メールアドレスの形式が正しくありません"}
+    if len(password) < 8 or len(password) > 64:
+        return 400, {"error": "パスワードは半角英数記号8〜64文字で指定してください"}
+    res = offers.register_staff(con, tenant_id, name, email, password, role=role, pre_verified=True)
+    if "error" in res:
+        return 400, res
+    return 200, {"ok": True, "staff_id": res["staff_id"], "api_key": res["api_key"]}
+
+
 # ── HTTPサーバ ──────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def _json(self, status, obj):
@@ -1667,6 +1738,27 @@ class Handler(BaseHTTPRequestHandler):
             con = self._con()
             try:
                 st, res = h_ops_kill_switch_set(con, data)
+                return self._json(st, res)
+            finally:
+                con.close()
+
+        if path == "/api/ops/tenants":
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                st, res = h_ops_tenants_create(con, data)
+                return self._json(st, res)
+            finally:
+                con.close()
+
+        ops_tenant_staff_match = _OPS_TENANT_STAFF_PATH_RE.match(path)
+        if ops_tenant_staff_match:
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                st, res = h_ops_tenant_staff_create(con, int(ops_tenant_staff_match.group(1)), data)
                 return self._json(st, res)
             finally:
                 con.close()
@@ -1923,7 +2015,7 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
-        if u.path in ("/api/ops/status", "/api/ops/metrics", "/api/ops/kill-switch"):
+        if u.path in ("/api/ops/status", "/api/ops/metrics", "/api/ops/kill-switch", "/api/ops/tenants"):
             if not verify_ops_bearer(self.headers.get("Authorization")):
                 return self._json(401, {"error": "unauthorized"})
             con = self._con()
@@ -1932,6 +2024,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, R.status_dict(con))
                 if u.path == "/api/ops/kill-switch":
                     st, res = h_ops_kill_switch_get(con)
+                    return self._json(st, res)
+                if u.path == "/api/ops/tenants":
+                    st, res = h_ops_tenants_list(con)
                     return self._json(st, res)
                 campaign = qs.get("campaignId", [None])[0]
                 return self._json(200, metrics.compute(con, int(campaign) if campaign else None))
@@ -3663,6 +3758,42 @@ def self_test(port=8899):
     db.set_global_kill_switch(con, orig_global_stopped, reason=orig_global_reason,
                               updated_by="test-restore")
 
+    print("\n── 本部画面: テナント作成・スタッフ代行作成(T46) ──")
+    st, r = post_auth("/api/ops/tenants", {"name": "テスト本部作成テナント",
+                                            "sender_email": "hq-test@example.co.jp"})
+    t("認証ヘッダなしのPOST /api/ops/tenantsは401", st == 401)
+    st, r = get_auth("/api/ops/tenants")
+    t("認証ヘッダなしのGET /api/ops/tenantsは401", st == 401)
+    st, r = post_auth("/api/ops/tenants", {"sender_email": "hq-test@example.co.jp"}, token=ops_key)
+    t("name無しのPOST /api/ops/tenantsは400", st == 400)
+    st, r = post_auth("/api/ops/tenants",
+                      {"name": "テスト本部作成テナント", "sender_email": "hq-test@example.co.jp"},
+                      token=ops_key)
+    t("POST /api/ops/tenantsでテナント作成、tenant_id・api_keyが返る",
+      st == 200 and bool(r.get("tenant_id")) and bool(r.get("api_key")))
+    hq_tenant_id = r["tenant_id"]
+    hq_tenant_key = r["api_key"]
+    st, r = get_auth("/api/ops/tenants", token=ops_key)
+    t("GET /api/ops/tenantsに作成したテナントが出る(api_keyは含まれない)",
+      st == 200 and any(x["id"] == hq_tenant_id for x in r["tenants"])
+      and "api_key" not in r["tenants"][0])
+    st, r = post_auth(f"/api/ops/tenants/{hq_tenant_id}/staff",
+                      {"name": "本部代行 担当者", "email": "hq-staff-test@example.co.jp",
+                       "password": "hq-test-pass-1"})
+    t("認証ヘッダなしのPOST /api/ops/tenants/<id>/staffは401", st == 401)
+    st, r = post_auth(f"/api/ops/tenants/{hq_tenant_id}/staff",
+                      {"name": "本部代行 担当者", "email": "hq-staff-test@example.co.jp",
+                       "password": "hq-test-pass-1"}, token=ops_key)
+    t("POST /api/ops/tenants/<id>/staffでスタッフ作成、api_keyが返る(即使える)",
+      st == 200 and bool(r.get("staff_id")) and bool(r.get("api_key")))
+    hq_staff_key = r["api_key"]
+    t("代行作成されたapi_keyはメール認証なしで即resolve_tenant_by_keyできる",
+      offers.resolve_tenant_by_key(con, hq_staff_key) is not None)
+    st, r = post_auth("/api/ops/tenants/999999999/staff",
+                      {"name": "存在しないテナント", "email": "hq-staff-test2@example.co.jp",
+                       "password": "hq-test-pass-1"}, token=ops_key)
+    t("存在しないtenant_idへの代行作成は404", st == 404)
+
     srv.shutdown()
     # 後片付け
     con.execute("DELETE FROM suppression WHERE company_id=?", (cid,))
@@ -3676,6 +3807,10 @@ def self_test(port=8899):
     # ありません」で再度run.py all --demoが必要になってしまう)
     con.execute("""UPDATE touches SET responded=0, signed_up=0, activated=0, paid=0,
                    mrr_yen=0 WHERE id=?""", (tid,))
+    # T46テストが作ったテナント・スタッフの後片付け(FK依存の都合でstaff/offers→tenantsの順)
+    con.execute("DELETE FROM staff WHERE tenant_id=?", (hq_tenant_id,))
+    con.execute("DELETE FROM offers WHERE tenant_id=?", (hq_tenant_id,))
+    con.execute("DELETE FROM tenants WHERE id=?", (hq_tenant_id,))
     con.commit()
     print(f"\n  成功 {sum(ok)} / {len(ok)}")
     return all(ok)

@@ -2571,6 +2571,50 @@ vs db 191`等)が出ていたのは、①と同根——`run.py`が「metrics.js
 
 ---
 
+### T46. 本部画面(hq.html)の新設(2026-08-26)
+
+契約が決まった顧客テナントへログイン情報を発行する作業が、これまで
+`offers.py`のCLI(`add-tenant`)を運用者がサーバへSSHして手動実行する
+以外に手段が無かった。これを画面化してほしいとの依頼。
+
+**認証方式・機能範囲はユーザーに確認して決定した**:
+- 認証: 既存の`SALES_ENGINE_API_KEY`(Stock Factory連携`/api/ops/*`と
+  同じ鍵)を流用する別サイト案を採用。list_builder.html等の顧客向け画面とは
+  完全に切り離し、`hq.html`はどこからもリンクしない(URLを直接知っている
+  運用者だけが辿り着く)。同一オリジンでの配信自体はlist_builder.htmlと
+  同じ理由(平文HTTPの混在コンテンツ制限回避)。
+- 機能範囲: 「テナント作成」に加えて「テナントに対するスタッフアカウントの
+  代行作成」も含める(顧客が自分でMIKOMERU式のメール認証フローを踏まなくても、
+  本部が電話等で本人確認した上でログイン情報をその場で渡せるようにする)。
+
+**実装**:
+- `offers.register_staff()`に`pre_verified`引数を追加。`True`のときは
+  `email_verify_token`を発行せず`email_verified_at`をその場で立てる
+  (戻り値も`verify_token`ではなく即使える`api_key`を返す)。テナント自身の
+  自己登録(`/api/tenant/staff/register`)は従来通り`pre_verified`未指定
+  (=メール認証必須)のまま変えていない。
+- `api.py`に`/api/ops/tenants`(GET一覧・POST作成)・
+  `/api/ops/tenants/<id>/staff`(POST代行作成)を追加。いずれも既存の
+  `/api/ops/*`と同じ`verify_ops_bearer()`(`SALES_ENGINE_API_KEY`)で保護。
+  GET一覧はapi_keyを含めない(発行時に一度だけ表示する運用)。
+- `_STATIC_PAGES`に`/hq.html`を追加してAPIサーバ自身から配信。
+- `hq.html`を新規作成。list_builder.htmlと同じ「APIサーバURL+APIキーを
+  入力して接続」パターン(localStorageキーは別名`ashibase_hq_*`にして
+  list_builder.html側の保存値と混ざらないようにした)。テナント作成フォーム・
+  スタッフ代行作成フォーム・テナント一覧を1ページに収めた最小限のUI。
+
+**テスト**: `api.py test`に「本部画面: テナント作成・スタッフ代行作成(T46)」
+セクションを追加(未認証401・バリデーション400・作成成功・一覧にapi_key
+非掲載・代行作成したapi_keyが`resolve_tenant_by_key()`で即解決できること・
+存在しないtenant_idへの代行作成が404になることを検証)。SQLite
+(318/318)・Postgres(318/318)の両方で確認し、実サーバを立てて
+`GET /hq.html`(200)・`POST /api/ops/tenants`(実際にtenant_id/api_keyが
+返る)もcurlで実地確認した。テストで作成したテナント・スタッフは
+毎回後片付けしている(`h_tenant_kill_switch_status`テスト等と同じ、
+FK依存順でのDELETE)。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

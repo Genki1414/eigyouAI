@@ -281,6 +281,12 @@ def connect(timeout=30.0):
     if backend() == "postgres":
         return PgConnection(os.environ["DATABASE_URL"])
 
+    # out/はgitignore対象のため、真っさらなcheckout(CI・初回デプロイ)には
+    # 存在しない。無いとsqlite3.connect()が"unable to open database file"で
+    # 即座に落ちる(2026-08-26、T46のデプロイでCIのtestジョブが毎回この
+    # エラーで失敗し続け、T38以降の全pushが本番へデプロイされていなかった
+    # ことが判明して発覚)。
+    C.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(C.DB_PATH, timeout=timeout, isolation_level=None)
     con.row_factory = sqlite3.Row
     con.executescript("""

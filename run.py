@@ -280,6 +280,16 @@ def run_op(con, step, campaign_id=None, dry_run=False):
 
 
 def run_all(con, demo, only=None):
+    # metrics/learn/imの「完了済み」判定はout/配下のファイル存在チェックであり、
+    # DBと違って--demoでDBを作り直しても連動してリセットされない。そのため、
+    # 過去の(無関係な)実行で残ったmetrics.json等が既にあると、真っさらなDBに
+    # 対して全く古い内容のまま「実行済みのためスキップ」してしまい、
+    # test_pipeline.pyの「メトリクスがDBと一致」系チェックが軒並み失敗する
+    # (2026-08-25、run.py all --demoを実際に空のDBから動かして発見)。
+    # 通常運用(cron)ではファイル存在チェックのままで正しい(毎回作り直す必要は
+    # 無い)ため、--demo実行時に限りこの3ステップを強制的に再実行する。
+    FORCE_RERUN_ON_DEMO = {"metrics", "learn", "im"}
+
     for s in STEPS:
         if only and s["key"] != only:
             continue
@@ -294,8 +304,9 @@ def run_all(con, demo, only=None):
                 print("\n  ここで停止します。前段を先に実行してください。")
                 return False
             return False
+        force = demo and s["key"] in FORCE_RERUN_ON_DEMO
         try:
-            if s["done"](con) and not only:
+            if s["done"](con) and not only and not force:
                 print("  （実行済みのためスキップ）")
                 continue
         except Exception:

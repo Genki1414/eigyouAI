@@ -3,7 +3,7 @@ generate_sample.py — 動作確認用サンプル200社を生成してDBに投�
 (本番運用では ingest.py + enrich.py の実データに置換。分布は業界実態に寄せてある:
  HP保有率~55%, 求人出稿~25%, 従業員中央値8人, 知事許可~93%)
 """
-import random, sqlite3
+import random
 from pathlib import Path
 import db
 
@@ -27,7 +27,10 @@ NOTES = [
 
 def main():
     DB.parent.mkdir(exist_ok=True)
-    con = sqlite3.connect(DB)
+    # db.migrate()はstorage.table_columns()経由で列名アクセス(r["name"])を
+    # 前提にしているため、row_factory=sqlite3.Row を設定するdb.connect()を
+    # 使う(素のsqlite3.connect()だとタプルアクセスになりTypeErrorになる)。
+    con = db.connect()
     con.executescript("""DROP TABLE IF EXISTS companies; DROP TABLE IF EXISTS touches;
         DROP TABLE IF EXISTS campaigns; DROP TABLE IF EXISTS dormant;
         DROP TABLE IF EXISTS suppression;""")
@@ -40,19 +43,25 @@ def main():
         emp = max(2, int(random.lognormvariate(2.2, 0.8)))
         trades = random.choices(["tobi","tobi,tosou","tobi,kaitai","tosou","kaitai","tobi,tosou,kaitai"],
                                 [0.45,0.12,0.15,0.12,0.08,0.08])[0]
+        # HPありの会社のうち一部は問い合わせフォームが見つかった状態にしておく
+        # (contact_url。mikomeru由来の実データではこの列がほぼ全件揃っているため、
+        # デモデータでも空のままだとフォーム自動送信<target_lists.send_list()>を
+        # 一切試せず、tenant向けSaaS機能の動作確認ができない)。
+        has_contact_form = has_hp and random.random() < 0.7
         con.execute(
             """INSERT INTO companies
                (license_no,name,pref,city,phone,fax,license_type,trades,capital,founded_year,
-                has_website,website_url,website_quality,hiring_now,est_employees,
+                has_website,website_url,contact_url,website_quality,hiring_now,est_employees,
                 google_reviews,prime_ratio,enrich_note)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (f"般-{random.randint(1,6)}-第{10000+i}号", name, random.choice(PREFS), "",
              f"0{random.randint(3,9)}-{random.randint(1000,9999)}-{random.randint(1000,9999)}",
              f"0{random.randint(3,9)}-{random.randint(1000,9999)}-{random.randint(1000,9999)}",
              "知事" if random.random() < 0.93 else "大臣",
              trades, random.choice([3000,5000,10000,20000,50000]),
              random.randint(1975, 2024),
-             int(has_hp), f"https://example-{i}.co.jp" if has_hp else None, wq,
+             int(has_hp), f"https://example-{i}.co.jp" if has_hp else None,
+             f"https://example-{i}.co.jp/contact" if has_contact_form else None, wq,
              int(hiring), emp, random.choices([0,2,5,12,30],[0.5,0.2,0.15,0.1,0.05])[0],
              round(random.betavariate(2,3),2), random.choice(NOTES)))
     con.commit()

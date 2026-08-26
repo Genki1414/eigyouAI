@@ -29,17 +29,22 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ここで実行するのは、既存の会社データを前提とせず単体で完結するテスト
-      # スイートのみ(storage.py/senders.py/monitor.py/backup.py。それぞれ
-      # 自分でテスト用データを作って後片付けする設計)。api.py test /
-      # test_pipeline.pyは`run.py all --demo`で投入した実データを前提にしており
-      # (未投入だと「テスト対象の接触がありません」で即失敗)、現状そのdemo
-      # 投入パス自体に潜在バグがあることが判明したため(HANDOFF.md T38参照)、
-      # 直すまでは他の3スイートと同列にCIへは組み込まない。
-      - name: Run self-contained test suites
+      # api.py test / test_pipeline.pyは実データ(companies/touches等)の存在を
+      # 前提にしているため、先にrun.py all --demoでcompanies.dbを作る
+      # (HANDOFF.md T38で「まっさらな環境でrun.py all --demoが失敗する」
+      # バグが見つかりCIから外していたが、その後の作業<T45>で根本原因
+      # <generate_sample.pyがdb.migrate()に対応しないsqlite3接続を使っていた点、
+      # および metrics/learn/im ステップがout/配下の残置ファイルを見て
+      # 誤って「実行済み」とスキップしていた点>を修正し、まっさらな環境から
+      # run.py all --demo → api.py test → test_pipeline.py が通しで
+      # 成功することを確認できたため、4スイートに戻した)。
+      - name: Bootstrap demo data
+        run: python3 run.py all --demo
+
+      - name: Run test suites
         run: |
           fail=0
-          for suite in "storage.py test" "senders.py test" "monitor.py test" "backup.py test"; do
+          for suite in "storage.py test" "senders.py test" "monitor.py test" "backup.py test" "api.py test" "test_pipeline.py"; do
             echo "::group::python3 $suite"
             python3 $suite 2>&1 | tee /tmp/suite_out.log
             if grep -q "✗" /tmp/suite_out.log; then

@@ -32,9 +32,12 @@ def main():
     check("空白を無視", normalize_name("丸友 組") == normalize_name("丸友組"))
 
     print("\n── スコアリング ──")
-    check("全社にランクが付与されている",
-          q("SELECT COUNT(*) FROM companies WHERE rank IS NULL") == 0,
-          f"{q('SELECT COUNT(*) FROM companies WHERE rank IS NULL')}社が未採点")
+    # is_target_business=0(施工実態なしとAIが判定)はscoring.pyが意図的に
+    # rank=NULLのままにする対象(採点対象外)なので、未採点数の判定から除く
+    # (is_target_business IS NULL<未判定>は対象外にしない。scoring.pyは
+    # ==0のときだけ明示的にスキップし、NULLはそのまま採点する挙動のため)。
+    unscored_sql = "SELECT COUNT(*) FROM companies WHERE rank IS NULL AND COALESCE(is_target_business,1)!=0"
+    check("採点対象の全社にランクが付与されている", q(unscored_sql) == 0, f"{q(unscored_sql)}社が未採点")
     check("スコアが0-100の範囲内",
           q("SELECT COUNT(*) FROM companies WHERE score < 0 OR score > 100") == 0)
     check("ランクとスコアの対応が閾値と一致",

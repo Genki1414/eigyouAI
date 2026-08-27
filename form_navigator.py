@@ -140,6 +140,20 @@ _NO_SOLICIT_HINTS = [
 _RECRUIT_ONLY_HINTS = ["採用に関するお問い合わせ専用", "採用エントリー", "新卒採用専用", "中途採用専用"]
 _SUPPORT_ONLY_HINTS = ["既存のお客様専用", "契約者様専用", "サポート専用窓口", "会員専用"]
 
+# 送信後ページに明確な拒否・エラー文言が出ているのに、_SUCCESS_HINTS/url_changed/
+# form_goneのどれかに引っかかって誤ってSUCCESS判定されるケースへの対策(2026-08-28、
+# 「このフォームは日本国内からのみ送信可能です」という地域制限エラーが出ているのに
+# フォームがエラーメッセージへ差し替わった<form_gone=True>ためSUCCESSと記録された
+# 実インシデントで発見)。地域制限は本番サーバーが日本国外(Hetzner)にあることが
+# 原因で、T42のプロキシプール(FORM_PROXY_POOL、国内IP)を実際に契約すれば
+# 解消しうる。ここではまず「エラーを誤ってSUCCESSと記録しない」ことだけを担保する。
+_ERROR_HINTS = (
+    "日本国内からのみ", "国内からのみご利用", "国内からのみ送信", "海外からのアクセス",
+    "国外からのアクセス", "海外からの送信", "送信に失敗しました", "送信できませんでした",
+    "送信できません", "エラーが発生しました", "現在ご利用いただけません",
+    "アクセスが制限されています", "不正なリクエスト",
+)
+
 # Cloudflare等のボット検証チャレンジ画面。CAPTCHAと同じく自動突破の対象にはしない
 _BOT_CHALLENGE_TITLE_HINTS = ["just a moment", "attention required", "checking your browser"]
 
@@ -358,6 +372,12 @@ def _detect_recruit_only(text):
 
 def _detect_support_only(text):
     return any(h in text for h in _SUPPORT_ONLY_HINTS)
+
+
+def _detect_submission_error(text):
+    """送信後ページに明確な拒否・エラー文言があれば、その文言を返す(無ければNone)。
+    マッチした場合はSUCCESS判定より優先させること(_ERROR_HINTSのコメント参照)。"""
+    return next((h for h in _ERROR_HINTS if h in text), None)
 
 
 def _detect_bot_challenge(page):
@@ -686,6 +706,16 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 result.final_url = page.url
                 final_text = _page_text(page)
                 result.page_text_snippet = final_text[:400]
+                # 明確な拒否・エラー文言が出ていれば、以下のSUCCESS判定(文言一致/URL変化/
+                # フォーム消失)より優先する。「日本国内からのみ送信可能です」という
+                # 地域制限エラーで、フォームがエラーメッセージへ差し替わった
+                # (=form_gone成立)ためSUCCESSと誤記録された実インシデントへの対策。
+                error_hit = _detect_submission_error(final_text)
+                if error_hit:
+                    result.status = "FAILED_UNSUPPORTED"
+                    result.reason_code = "error_message_detected"
+                    result.error_message = f"送信後ページにエラー文言を検知: {error_hit}"
+                    return result
                 url_changed = page.url != contact_url
                 # フォームがDOM上から消えている(=AJAXで完了画面に差し替わった)ことも
                 # 成功の傍証として見る。文言・URLどちらも一致しないAJAX系フォーム向けの保険
@@ -818,6 +848,13 @@ if __name__ == "__main__":
                 else:
                     ok = fn(payload)
                 print(f"  {'✓' if ok else '✗'} {label}")
+
+            print("\n── 送信後エラー文言の誤SUCCESS化防止(2026-08-28、実インシデントで発見) ──")
+            e1 = _detect_submission_error("エラー: このフォームは日本国内からのみ送信可能です。")
+            print(f"  {'✓' if e1 else '✗'} 地域制限エラー文言を検知できる: {e1!r}")
+            e2 = _detect_submission_error(
+                "お問い合わせいただきありがとうございます。担当者より追ってご連絡いたします。")
+            print(f"  {'✓' if e2 is None else '✗'} 通常の完了ページはエラー扱いにしない")
 
             print("\n── プロキシ経由の実アクセス(T42。ローカルの疑似ターゲット+"
                   "疑似プロキシで、実際にChromiumがプロキシを通ることを確認) ──")

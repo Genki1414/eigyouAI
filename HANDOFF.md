@@ -550,7 +550,10 @@ Caddyはポート競合で起動できなかった。そのため最終的には
     `db.connect()`(storage.py経由)ではなく`sqlite3.connect()`を直接使っており、
     将来Postgresへ移行した際にAPI/cronと別のデータベースを見てしまう
     可能性がある。現状はSQLite運用のため実害なしだが、Postgres移行時は
-    要修正。(b) サーバーがidempotencyキーをclaimした直後(delivery前)に
+    要修正 → **T49(2026-08-27)で修正済み**。`db.connect()`経由に変更し、
+    PRAGMA table_info依存の個別ALTER TABLE(SQLite専用構文で、既にdb.pyの
+    SCHEMAにstep列が定義済みのため到達しない死んだコードだった)も削除した。
+    (b) サーバーがidempotencyキーをclaimした直後(delivery前)に
     クラッシュすると、そのキーは「占有されたまま」残り、以後そのtouchは
     自動では再試行されない。危険な方向(二重送信)ではなく安全な方向
     (未送信のまま止まる)の失敗モードなので許容したが、運用上は
@@ -2612,6 +2615,85 @@ vs db 191`等)が出ていたのは、①と同根——`run.py`が「metrics.js
 返る)もcurlで実地確認した。テストで作成したテナント・スタッフは
 毎回後片付けしている(`h_tenant_kill_switch_status`テスト等と同じ、
 FK依存順でのDELETE)。
+
+---
+
+### T47. CIのtestジョブが毎回失敗し、T38以降デプロイが一度も成功していなかった不具合を修正(2026-08-26)
+
+T46をpushしたにもかかわらず本番の`app.ashibase.jp/hq.html`が404を返すため
+調査したところ、GitHub Actionsの実行履歴が、デプロイ自動化を入れたT38の
+コミット自身を含めて**以降の全push(T38〜T46、9回)でtestジョブが失敗
+していた**ことが判明した。testジョブが失敗するとdeployジョブ(`needs: test`)
+は一度も走らない設計のため、本番は自動デプロイが導入される前の状態で
+ずっと止まっていたことになる。
+
+原因は`storage.connect()`が`sqlite3.connect()`の前に`out/`ディレクトリの
+存在を前提にしていたが、`out/`は`.gitignore`対象のため、真っさらな
+checkout(CIランナー・本来の初回デプロイ)には存在せず、
+`sqlite3.OperationalError: unable to open database file`で即座に落ちて
+いた。ローカルの開発環境では`out/`が既に存在していたため誰も気づかな
+かった。
+
+`sqlite3.connect()`の直前で`C.DB_PATH.parent.mkdir(parents=True,
+exist_ok=True)`するよう1行修正。`out/`を実際に丸ごと退避して(companies.db
+だけでなくmodel_v2.json/IM.md等も含め全部)真っさらな状態を作り、
+`run.py all --demo`→`api.py test`(318/318)→`test_pipeline.py`(47/47)が
+通しで成功することを確認した上で、退避した`out/`を復元して回帰も確認した
+(T45で一度、退避時のバックアップ漏れでmodel_v2.json/IM.mdを失った反省を
+踏まえ、今回は`out/`ディレクトリ全体をtar等ではなく`mv`で丸ごと退避
+→確認後に丸ごと戻す、という手順で実施し、データ損失を防いだ)。
+
+### T48. デプロイ用SSH秘密鍵をbase64の1行secretとして扱うよう変更(2026-08-27)
+
+T47修正後、GitHub Secrets(`DEPLOY_HOST`/`DEPLOY_USER`/`DEPLOY_PATH`/
+`DEPLOY_SSH_KEY`)をユーザーと一緒に初めて登録し、手動でワークフローを
+実行して動作確認する過程で、`DEPLOY_SSH_KEY`に複数行のPEM形式秘密鍵を
+そのまま貼り付ける運用だと、ブラウザのsecret入力欄への手動コピー&
+ペースト時に改行が崩れ(CRLF混入等)、SSH側で"Load key: error in
+libcrypto"→`Permission denied`になる事故が実際に2回発生した(サーバー上で
+`ssh-keygen -y`して鍵ファイル自体は無事なことを確認済みだったため、
+貼り付け時の破損と判明)。
+
+secretの値をbase64エンコードした1行の文字列に統一し、`Configure SSH`
+ステップ側で`base64 -d`してから書き出すよう変更。1行になることで
+コピー時の改行崩れが原理的に起きなくなる。3回目の手動実行でtest・deploy
+とも成功し、`app.ashibase.jp/hq.html`が実際に200を返すことをユーザーの
+ブラウザで確認できた。これでT38〜T48の変更が初めて本番へ反映された。
+
+**教訓**: デプロイ用の秘密鍵をユーザーとのチャット越しに扱う場合、
+複数行PEM形式のコピー&ペーストは事故りやすい。base64の1行にして
+渡す方が壊れにくい。また、チャット上に秘密鍵の中身が貼られる場面が
+複数回あったため、その都度「このセッションの外では使わない・
+できれば鍵を無効化して作り直す」ことを伝えたが、最終的にはユーザーの
+判断でそのまま使う運用とした。
+
+### T49. followup.pyの生SQLite接続を修正(2026-08-27)
+
+「本部画面の作業のうち、ユーザーの判断・作業が不要なもの」を洗い出す中で
+発見。HANDOFF.mdに「既知の残課題(低リスク)」として以前から記載されて
+いた通り、`followup.py`が`db.connect()`(storage.py経由、SQLite/Postgresを
+`DATABASE_URL`で自動振り分け)ではなく素の`sqlite3.connect()`を直接
+使っていた。放置すると、将来本番がPostgresへ切り替わった後もこの
+スクリプトだけはローカルSQLiteファイルへ書き込み続け、本番の`touches`と
+静かに乖離する(=フォローアップの多段接触が本番へ一切反映されなくなる)
+という実害のある不具合だったため修正した。
+
+あわせて、同じ関数内にあった`PRAGMA table_info(touches)`によるstep列の
+個別ALTER TABLE処理(SQLite専用構文でPostgresでは構文エラーになる)も
+削除した。`db.py`のSCHEMAには`touches.step`が既に定義済みで
+`db.migrate()`が作成するため、この個別処理は今のDBには到達しない
+死んだコードだった。
+
+あわせて、`list_builder.html`の担当者登録(ログイン方式)ヒント文言が
+「現在メール送信基盤が未実装のため、自動では送信されません」のまま
+T33以降更新されていなかった(T32/T33で実際にSendGrid経由の自動送信を
+実装済み)のを、実際の挙動(登録すると自動送信され、送信できなかった
+場合のみURLが画面に表示される)に合わせて修正した。
+
+**テスト**: `followup.py --campaign 1 --step 2`をSQLite・Postgres両方の
+`DATABASE_URL`で実行し、クラッシュせず動作することを確認。
+`storage.py`/`senders.py`/`monitor.py`/`backup.py`/`api.py test`
+(318/318)/`test_pipeline.py`(47/47)の全スイートで回帰無しを確認。
 
 ---
 

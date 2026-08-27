@@ -18,13 +18,10 @@ followup.py — 多段フォローアップ + 勝ち文面の自動増殖
   python3 followup.py --campaign 1 --step 2 --simulate
   python3 followup.py --campaign 1 --evolve --offline
 """
-import argparse, json, random, sqlite3
+import argparse, json, random
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import db as DBM   # 接触ガード
-
-DB = Path(__file__).parent / "out" / "companies.db"
 
 # ステップごとの「次に使うチャネル」。初回と必ず変える。
 NEXT_CHANNEL = {
@@ -169,12 +166,12 @@ if __name__ == "__main__":
     ap.add_argument("--offline", action="store_true")
     a = ap.parse_args()
 
-    con = sqlite3.connect(DB)
-    # step列がなければ追加（既存DBとの互換）
-    if not any(c[1] == "step" for c in con.execute("PRAGMA table_info(touches)")):
-        con.execute("ALTER TABLE touches ADD COLUMN step INTEGER DEFAULT 1")
-        con.execute("DROP INDEX IF EXISTS sqlite_autoindex_touches_1")
-        con.commit()
+    # DATABASE_URL未設定ならSQLite、設定済みならPostgresへ自動で振り分ける
+    # (db.connect()経由。素のsqlite3.connect()だとPostgres運用時にも常に
+    # ローカルSQLiteへ書いてしまい、本番のtouchesと乖離する)。
+    # touches.stepはdb.pyのSCHEMAに既に定義済み(db.migrate()で作成される)
+    # ため、ここでの個別ALTER TABLEは不要。
+    con = DBM.connect()
 
     if a.evolve:
         evolve(con, a.campaign, a.offline)

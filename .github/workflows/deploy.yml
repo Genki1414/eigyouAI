@@ -11,7 +11,13 @@ name: CI & Deploy
 #   DEPLOY_SSH_KEY   デプロイ専用のSSH秘密鍵(ed25519推奨)。対応する公開鍵を
 #                    サーバー側の ~DEPLOY_USER/.ssh/authorized_keys に
 #                    登録しておくこと(ssh-keygen -t ed25519 -f deploy_key で
-#                    生成し、秘密鍵の中身をそのままこのsecretへ貼り付ける)
+#                    生成する)。secretへ登録する値は秘密鍵のPEM本文を
+#                    そのまま貼るのではなく、base64エンコードした1行に
+#                    してから貼ること:
+#                      base64 -w0 deploy_key
+#                    (PEM形式を複数行のまま貼り付けると、コピー時の改行崩れで
+#                    "error in libcrypto"になりSSH認証が通らない事故が
+#                    起きたため。Configure SSHステップ側でbase64 -dして戻す)
 #   DEPLOY_SSH_PORT  (任意)SSHポート番号。未設定なら22
 on:
   push:
@@ -74,7 +80,13 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          # DEPLOY_SSH_KEYはOpenSSH秘密鍵をbase64エンコードした1行の文字列で
+          # 登録すること(サーバー上で `base64 -w0 ~/.ssh/deploy_key` の出力を
+          # そのまま貼る)。複数行のPEM形式をGitHub Secretsへ直接貼り付けると、
+          # コピー時の改行崩れ(CRLF混入等)で "error in libcrypto" になり
+          # 認証が通らない事故が実際に起きたため、1行のbase64にして
+          # 崩れようがない形にしている。
+          printf '%s' "$DEPLOY_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 

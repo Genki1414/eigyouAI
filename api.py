@@ -1401,7 +1401,16 @@ def h_tenant_activity_log(con, tenant_id, qs):
 def h_tenant_dashboard(con, tenant_id):
     """「AI営業社員がどれだけ働いたか」を一目で見せるβ版ダッシュボード。
     既存のform_send_log/target_list_membersから集計するだけで、
-    新しい巨大なデータ構造は作らない。"""
+    新しい巨大なデータ構造は作らない。
+
+    T52: MIKOMERUの「今月の統計情報」(プラン名+送信数/上限)相当を
+    quotaとして追加。ここでのthis_month.success(成功件数のみ)を
+    上限に対する使用量として表示する想定(MIKOMERU自身も「表示されている
+    送信数は成功件数のみ」と明記している)。実際の送信可否を決める
+    ペーシング上限(senders.py._check_quota())は直近30日のローリング
+    ウィンドウ・全試行数(失敗含む)で判定しており、こちらのカレンダー月・
+    成功数のみの表示とは意図的に窓も対象も異なる(参考値であることを
+    画面側の注記で示す)。"""
     month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0) \
         .isoformat(timespec="seconds")
 
@@ -1428,11 +1437,21 @@ def h_tenant_dashboard(con, tenant_id):
         FROM target_list_members m JOIN target_lists tl ON tl.id=m.list_id
         WHERE tl.tenant_id=?""", (tenant_id,)).fetchone()
 
+    import config as C
+    tenant_row = con.execute(
+        "SELECT plan_name, monthly_send_quota, daily_send_quota FROM tenants WHERE id=?",
+        (tenant_id,)).fetchone()
+    monthly_quota = tenant_row["monthly_send_quota"] or C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT
+    daily_quota = tenant_row["daily_send_quota"] or C.FORM_MAX_PER_TENANT_PER_DAY_DEFAULT
+    plan_name = tenant_row["plan_name"] or f"月間{monthly_quota:,}通プラン"
+
     return 200, {
         "this_month": this_month,
         "all_time": {"success": all_time_success},
         "outcomes": {"replied": outcomes["replied"] or 0, "deal": outcomes["deal"] or 0,
                      "won": outcomes["won"] or 0},
+        "quota": {"plan_name": plan_name, "monthly_send_quota": monthly_quota,
+                   "daily_send_quota": daily_quota},
     }
 
 
@@ -3157,6 +3176,24 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/dashboard", token=key_b)
     t("他テナントのダッシュボードには自テナントの数字が出ない(テナント分離)",
       st == 200 and r["this_month"]["success"] == 0)
+
+    print("\n── プラン表示(T52) ──")
+    st, r = get_auth("/api/tenant/dashboard", token=key_a)
+    t("quota.monthly_send_quotaが数値で返る(未設定なら既定値)",
+      st == 200 and isinstance(r["quota"]["monthly_send_quota"], int)
+      and r["quota"]["monthly_send_quota"] > 0)
+    t("plan_name未設定なら月間◯◯通プランという自動ラベルになる",
+      "プラン" in r["quota"]["plan_name"])
+    con.execute("UPDATE tenants SET plan_name='テスト用プレミアムプラン', monthly_send_quota=9999 "
+                "WHERE id=?", (tid_a,))
+    con.commit()
+    st, r = get_auth("/api/tenant/dashboard", token=key_a)
+    t("tenants.plan_nameを設定するとそのままplan_nameに使われる",
+      r["quota"]["plan_name"] == "テスト用プレミアムプラン")
+    t("tenants.monthly_send_quotaを設定するとそのまま使われる",
+      r["quota"]["monthly_send_quota"] == 9999)
+    con.execute("UPDATE tenants SET plan_name=NULL, monthly_send_quota=NULL WHERE id=?", (tid_a,))
+    con.commit()
 
     con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (tid_a,))
     con.commit()

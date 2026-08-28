@@ -470,6 +470,11 @@ def migrate(con):
         # テナントは最低プラン相当の枠になる)。senders.py._check_quota()参照。
         ("tenants", "monthly_send_quota", "INTEGER"),
         ("tenants", "daily_send_quota", "INTEGER"),
+        # T52: list_builder.htmlのホーム画面にMIKOMERU同様の「プラン名+今月の
+        # 送信数/上限」表示を追加するための任意項目。未設定なら画面側が
+        # monthly_send_quotaから自動でラベルを組み立てる(例:
+        # 「月間4,000通プラン」)ため、この列自体は空でも表示は壊れない。
+        ("tenants", "plan_name", "TEXT"),
     ]:
         cols = storage.table_columns(con, table)
         if col not in cols:

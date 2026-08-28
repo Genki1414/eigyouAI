@@ -2785,6 +2785,45 @@ Playwrightまで到達せずスキップされる、という正しい(意図通
 
 ---
 
+### T52. list_builder.htmlのホームにプラン表示+今月の送信数を追加(2026-08-28)
+
+ユーザーがMIKOMERU管理画面の「今月の統計情報」(プランバッジ+送信数/上限+
+使用率+プログレスバー)を見せて、同様の表示が欲しいとの依頼。
+
+- `db.py`: `tenants.plan_name`(TEXT、任意)を新設。未設定でも表示が壊れない
+  設計にする(下記参照)ため、既存テナントへの一括設定は不要
+- `api.py`: `h_tenant_dashboard()`(`GET /api/tenant/dashboard`)のレスポンスに
+  `quota: {plan_name, monthly_send_quota, daily_send_quota}`を追加。
+  `plan_name`が未設定なら`"月間{monthly_send_quota}通プラン"`を自動生成する。
+  `monthly_send_quota`/`daily_send_quota`は`tenants`の値、NULLなら
+  `config.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT`/`_DAY_DEFAULT`にフォールバック
+  (T29の`senders.py._check_quota()`と同じ既定値)
+- **表示する送信数はMIKOMERU同様「成功件数のみ・カレンダー月」**
+  (`this_month.success`をそのまま流用)。MIKOMERU自身も画面に
+  「表示されている送信数は成功件数のみで、現在実行中の送信は含まれません」と
+  明記しており、それに合わせた。**注意**: 実際の送信可否を決める
+  ペーシング上限(`senders.py._check_quota()`)は直近30日のローリング
+  ウィンドウ・全試行数(失敗・スキップ含む)で判定しており、窓も対象も
+  異なる別の集計。この表示はあくまで参考値で、実際の送信ブロックの
+  タイミングとは一致しないことがある(画面上部の注記でその旨を示している)
+- `list_builder.html`: ホーム画面(`data-page="home"`)の最上部に
+  `.planwidget`(プランバッジ+使用率バー)を追加。使用率90%以上で
+  バーの色が警告色(`--warn`)に変わる。`refreshDashboard()`が
+  `/api/tenant/dashboard`の`quota`フィールドから値を埋める(新規API
+  呼び出しは増やさず、既存のダッシュボード取得に相乗り)
+- CSV検索については、今回は上限管理を作らず送信数の表示のみとした
+  (ユーザーの判断。CSV検索は現状通り無制限のまま)
+
+**テスト**: `api.py test`に「プラン表示(T52)」セクションを追加
+(quota.monthly_send_quotaが常に数値で返る・plan_name未設定時の自動ラベル・
+tenants.plan_name/monthly_send_quotaを設定した場合にそのまま反映される、
+の4件)。SQLite・Postgres両方で322/322を確認。実サーバを立てて
+`GET /api/tenant/dashboard`のレスポンス、およびPlaywrightで実際に
+`list_builder.html`のホーム画面を開いてプランバッジ・使用率バー(0%と
+警告色になる93%の両方)が正しく描画されることを目視確認した。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

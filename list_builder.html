@@ -102,6 +102,14 @@ tr.clickable:hover{background:var(--accent-soft)}
 .hint{font-size:12px;color:var(--steel);margin-top:6px}
 .empty{color:var(--steel);font-size:13px;text-align:center;padding:16px}
 
+/* プラン表示(MIKOMERUの「今月の統計情報」相当。T52) */
+.planwidget{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:16px}
+.planbadge{font-family:var(--mono);font-size:12px;font-weight:700;padding:6px 14px;border-radius:99px;
+  background:var(--ink);color:#fff;display:inline-block}
+.usagebar-track{background:var(--concrete);border-radius:99px;height:8px;overflow:hidden;margin-top:6px;min-width:200px}
+.usagebar-fill{height:100%;background:var(--accent);border-radius:99px;transition:width .3s}
+.usagebar-fill.warn{background:var(--warn)}
+
 /* ホーム統計カード */
 .statcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
 .statcard{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px}
@@ -203,6 +211,17 @@ tr.clickable:hover{background:var(--accent-soft)}
       <section class="page active" data-page="home">
         <div class="btnrow" style="margin-bottom:4px">
           <button class="ghost" id="btnGoTutorialFromHome">🎓 使い方(チュートリアル)を見る</button>
+        </div>
+        <div class="card planwidget" id="planWidget">
+          <div>
+            <span class="planbadge" id="planBadge">—</span>
+            <div class="hint" style="margin-top:6px">
+              今月の送信数(成功件数のみ。実行中の送信は含みません)<br>
+              <b id="planUsageText" style="font-family:var(--mono);font-size:15px;color:var(--ink)">— / —</b>
+              <span id="planUsagePct" style="font-family:var(--mono);color:var(--steel)"></span>
+              <div class="usagebar-track"><div class="usagebar-fill" id="planUsageBar" style="width:0%"></div></div>
+            </div>
+          </div>
         </div>
         <h2 id="dashHeadline">今月の状況 <span>OVERVIEW</span></h2>
         <div class="statcards" id="homeStats">
@@ -1227,6 +1246,17 @@ async function refreshDashboard() {
   try {
     const d = await call("/api/tenant/dashboard");
     $("dashHeadline").innerHTML = `今月、AI営業社員が${d.this_month.targeted_companies.toLocaleString()}社へ営業しました <span>OVERVIEW</span>`;
+
+    const q = d.quota;
+    $("planBadge").textContent = q.plan_name;
+    $("planUsageText").textContent =
+      `${d.this_month.success.toLocaleString()} / ${q.monthly_send_quota.toLocaleString()}`;
+    const pct = q.monthly_send_quota > 0
+      ? Math.min(100, Math.round(d.this_month.success / q.monthly_send_quota * 100)) : 0;
+    $("planUsagePct").textContent = `　使用率${pct}%`;
+    const bar = $("planUsageBar");
+    bar.style.width = `${pct}%`;
+    bar.classList.toggle("warn", pct >= 90);
     $("dashThisMonth").innerHTML = `
       <div class="statcard" data-target="sendlog"><b>${d.this_month.targeted_companies.toLocaleString()}</b><span>営業対象企業数</span></div>
       <div class="statcard" data-target="sendlog"><b>${d.this_month.attempts.toLocaleString()}</b><span>送信試行数</span></div>

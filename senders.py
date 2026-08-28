@@ -377,11 +377,14 @@ class FormSender(BaseSender):
             return True, None
 
         if self._tenant_quota is None:
+            import db
+            # 月間クォータはdb.get_quota_status()に委譲する(tenants.monthly_send_quotaに
+            # T55のクォータ追加購入<quota_purchases、直近30日分>を足した実効値。
+            # ここと表示側<GET /api/tenant/quota>で別々に計算すると、表示上は余裕が
+            # あるのに送信はブロックされるという食い違いが起きるため一本化している)
+            monthly_q = db.get_quota_status(self.con, self.tenant_id)["effective_quota_30d"]
             row = self.con.execute(
-                "SELECT monthly_send_quota, daily_send_quota FROM tenants WHERE id=?",
-                (self.tenant_id,)).fetchone()
-            monthly_q = (row["monthly_send_quota"] if row and row["monthly_send_quota"]
-                         else C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT)
+                "SELECT daily_send_quota FROM tenants WHERE id=?", (self.tenant_id,)).fetchone()
             daily_q = (row["daily_send_quota"] if row and row["daily_send_quota"]
                        else C.FORM_MAX_PER_TENANT_PER_DAY_DEFAULT)
             self._tenant_quota = (monthly_q, daily_q)
@@ -1266,6 +1269,23 @@ if __name__ == "__main__":
         ok_month = (not rb2[0]) and "月間クォータ" in (rb2[1] or "")
         print(f"  {'✓' if ok_month else '✗'} tenants.monthly_send_quota(=2、直近30日)"
               f"に達すると止まる: {rb2}")
+
+        print("\n── クォータ追加購入(AI入札連携。T55) ──")
+        import db
+        db.add_quota_purchase(con, tid_qb, 500, unit_price_yen=5000, external_ref="test-quota-addon-1")
+        fb3 = FormSender(con, dry_run=False, tenant_id=tid_qb)  # 別インスタンス=キャッシュ無しで再判定
+        rb3 = fb3._check_quota()
+        ok_addon = rb3[0] is True
+        print(f"  {'✓' if ok_addon else '✗'} クォータ追加購入で月間クォータの上限が緩和される"
+              f"(2件消化済み+500件購入 > 2件のtenants.monthly_send_quota): {rb3}")
+        _, created_dup = db.add_quota_purchase(con, tid_qb, 500, unit_price_yen=5000,
+                                                external_ref="test-quota-addon-1")
+        print(f"  {'✓' if created_dup is False else '✗'} 同じexternal_refでの再購入は二重計上しない"
+              f"(created={created_dup})")
+        status_qb = db.get_quota_status(con, tid_qb)
+        ok_status = status_qb["addon_quota_30d"] == 500 and status_qb["effective_quota_30d"] == 502
+        print(f"  {'✓' if ok_status else '✗'} get_quota_status()がaddon分を反映する"
+              f"(addon=500のまま、effective=2+500=502): {status_qb}")
 
         tid_qc, _ = OF.add_tenant(con, "test-quota-C", "qc@example.co.jp")
         con.commit()

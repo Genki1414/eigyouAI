@@ -166,7 +166,7 @@ SERIAL_ID_TABLES = {
     "companies", "campaigns", "touches", "message_templates", "sender_templates",
     "announcements", "scheduled_sends", "run_log", "form_send_log",
     "tenants", "offers", "staff", "target_lists", "search_log",
-    "plan_change_requests",
+    "plan_change_requests", "quota_purchases",
 }
 
 

@@ -2974,6 +2974,83 @@ Playwrightでlist_builder.htmlのホーム画面(サイドバーヘッダー)・
 
 ---
 
+### T55. AI入札連携: クォータ追加購入(500通/¥5,000単位)を追加(2026-08-28)
+
+`Genki1414/AInyusatsu`(建設業向けAI入札管理ツール。案件ごとに不足している協力会社の
+業種を検出し、ヒラケルへ送信先リスト作成・送信を委譲する連携を持つ。詳細は先方リポジトリ
+`docs/reference/営業AI連携.md`)から相談を受けての実装。AI入札の契約者はヒラケルにも
+テナント登録される想定だが、基本プラン(既定500通/月)を使い切った場合にどうするかを
+ユーザーに確認したところ、「AI入札側から、500通5,000円単位で枠追加可能にしたい。
+これにはストライプ決済使う。送信済みのカウントと表示は必要」との指示。
+
+**設計方針**:
+- **決済はAI入札側で完結させ、ヒラケル側はStripeを一切扱わない**。AI入札のバックエンドが
+  自前のStripe Checkoutで決済を完了させたあと、`POST /api/ops/tenants/<id>/quota-purchase`
+  を叩いて記録するだけ。ヒラケル側にStripeのSDK/APIキー/webhookは一切追加していない
+- **追加枠は恒久的な底上げではなく、既存のT29ローリング30日ウィンドウに合わせた「30日で
+  自然に失効する加算」としてモデル化した**。`senders.py._check_quota()`が元々
+  `tenants.monthly_send_quota`を「直近30日」で判定している(暦月ではない)ため、購入枠だけ
+  暦月やカレンダー方式にすると判定と表示がずれる。`quota_purchases`テーブルに購入履歴を
+  蓄積し、`db.get_quota_status()`が「直近30日以内に購入された`qty`の合計」を`base`へ加算
+  した`effective_quota_30d`を返す設計にした。ユーザーへ明示的に確認した設計ではないが、
+  T29の既存アーキテクチャとの一貫性を優先した判断
+- **表示と判定の数字を一本化**した。T52の`list_builder.html`ダッシュボードは意図的に
+  「暦月・成功数のみ」(MIKOMERU本家画面に合わせた見た目用の数字)を出しているが、AI入札は
+  この画面を見ない。AI入札が知りたいのは「あと何通送れるか」という実際のブロック判定に
+  直結する数字のため、新設の`GET /api/tenant/quota`は`senders.py._check_quota()`と全く
+  同じ計算(直近30日ローリングウィンドウ・成否を問わない全試行数)を返す`db.get_quota_status()`
+  を共有している。表示側と判定側を別々に計算すると「表示上は余裕があるのに送信はブロック
+  される」という食い違いが起きるため、あえて一本化した
+- **外部参照(`external_ref`)による冪等性**。Stripeのwebhookは再送されることがあるため、
+  `db.add_quota_purchase()`は`(tenant_id, external_ref)`が既存と一致する場合は新規挿入せず
+  既存レコードをそのまま返す(`created=False`)。既存の冪等性設計(`resilience.py`の
+  `Idempotency`、T53のresolve冪等性)と同じ考え方
+
+**追加したもの**:
+- `db.py`: `quota_purchases`テーブル(`tenant_id`,`qty`,`unit_price_yen`,`external_ref`,
+  `purchased_at`)+索引、`get_quota_status(con, tenant_id)`(base+addon+used+remaining+
+  plan_nameを返す)、`add_quota_purchase(con, tenant_id, qty, unit_price_yen=None,
+  external_ref=None)`
+- `storage.py`: `SERIAL_ID_TABLES`に`"quota_purchases"`を追加(Postgresの`RETURNING id`が
+  正しく効くようにするため。T53と同じ理由)
+- `senders.py`: `FormSender._check_quota()`の月間クォータ判定を、`tenants.monthly_send_quota`
+  の直接参照から`db.get_quota_status(...)["effective_quota_30d"]`へ差し替え(判定と表示を
+  一本化するため。上記参照)
+- `api.py`:
+  - `GET /api/tenant/quota`(テナント認証。`h_tenant_quota_get`) — 直近30日の実効クォータ・
+    使用数・残数を返す。AI入札が「送信済みのカウントと表示」に使う想定
+  - `POST /api/ops/tenants/<id>/quota-purchase`(ops認証。`h_ops_tenant_quota_purchase`) —
+    `{"qty","unit_price_yen"(任意),"external_ref"(任意)}` → 追加購入を記録し、更新後の
+    quotaを返す。qtyが正の整数でない場合400、テナントが存在しなければ404
+
+**テスト**: `senders.py test`に`_check_quota()`が購入分を反映して上限を緩和すること・
+`external_ref`の重複が二重計上しないこと・`get_quota_status()`のbase/addon/effective計算を
+検証する新規ブロックを追加(既存のT29「テナント別クォータ」テストのfixtureを再利用)。
+`api.py test`に`GET /api/tenant/quota`・`POST /api/ops/tenants/<id>/quota-purchase`の
+HTTPレイヤーテスト(未認証401・不正qty/型の400・存在しないテナントの404・購入成功・
+external_ref重複時のcreated=False・購入後のGET /api/tenant/quotaへの反映・他テナントへの
+非波及<テナント分離>)を追加。SQLite側は`api.py test`(347/347)・`senders.py test`・
+`test_pipeline.py`(47/47)・`test_concurrency.py`・`storage.py test`(5/5)を全て実行し
+回帰なしを確認。
+
+**Postgres確認について**: T53と同様、`run.py all --demo`がPostgres接続時に`ingest`
+ステップで進行が止まる既知の問題が今回も再現した(原因未調査のまま)。フルスイートでの
+Postgres確認の代わりに、`db.migrate()`後の実Postgres接続に対して`db.get_quota_status()`・
+`db.add_quota_purchase()`・`h_tenant_quota_get()`・`h_ops_tenant_quota_purchase()`を直接
+呼び出すスモークテストを実施し、初期状態・購入・冪等性・不正入力の400・存在しないテナント
+の404・購入後の反映を全て確認した。`run.py all --demo`のPostgresハングは今回も未解決の
+ままなので、次にPostgres側のフルスイート確認が必要になった際は原因調査から着手すること。
+
+**AI入札側で今後必要になるもの(未着手・このリポジトリの範囲外)**: Stripe Checkoutの
+UI・決済成功時のwebhookハンドラ(成功後に上記`POST /api/ops/tenants/<id>/quota-purchase`
+を呼ぶ)、および`packages/outreach/adapters/eigyou_ai.ts`の`sendTargetList()`に見つかった
+既存バグ(レスポンスの`payload.sent`/`payload.count`/`payload.requested`を読んでいるが、
+実際のヒラケル側`POST /api/tenant/lists/<id>/send`の応答は`payload.target_count`であり、
+現状では実送信のたびに`PARSE_INVALID`になる)の修正——どちらもユーザーとの合意がまだの
+ため着手していない。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

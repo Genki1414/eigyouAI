@@ -44,6 +44,13 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/ops/plan-change-requests/<id>/resolve   申請を対応済みにする
                            (実際のプラン変更=tenants.plan_name等の更新は
                            自動化せず、本部が別途手動で行う。T53)
+  POST /api/ops/tenants/<id>/quota-purchase  {"qty","unit_price_yen"(任意),
+                           "external_ref"(任意)} → 送信可能件数を追加する
+                           (直近30日分をtenants.monthly_send_quotaへ加算。
+                           AI入札連携(T55)向け: 決済自体はAI入札側のStripeで
+                           完結させ、成功後にこのAPIで記録するだけ。ここでは
+                           Stripeを一切扱わない。external_refが同じ呼び出しは
+                           二重計上しない<db.add_quota_purchase()>)
   ※ /api/ops/* は本部専用画面(hq.html)からのみ叩く想定。/list_builder.html
     等の顧客向け画面からはリンクしない(顧客に運用系の強い権限を渡さないため)
 
@@ -205,6 +212,12 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            返信/商談化/受注の件数。form_send_log/
                            target_list_membersからの集計のみで、
                            新規の集計テーブルは持たない
+  GET  /api/tenant/quota          直近30日の実効クォータ・使用数・残数
+                           (base_monthly_send_quota/addon_quota_30d/
+                           effective_quota_30d/used_30d/remaining_30d)。
+                           senders.py._check_quota()が実際にブロック判定へ
+                           使う数字と同じ計算(dashboardはカレンダー月・
+                           成功数のみで意図的に別物)。AI入札連携(T55)向け
   GET  /api/tenant/plan-change-request   自テナントの直近のプラン変更申請
                            (無ければnull)。pending中は画面側でボタンを
                            「申請中」表示に切り替えるために使う(T53)
@@ -287,6 +300,7 @@ _SEND_LOG_EXEC_NOTE_PATH_RE = re.compile(r"^/api/tenant/send-log/executions/(\d+
 _VERIFY_STAFF_PATH_RE = re.compile(r"^/verify/staff/([A-Za-z0-9_-]+)$")
 _RESET_PASSWORD_PATH_RE = re.compile(r"^/reset-password/([A-Za-z0-9_-]+)$")
 _OPS_TENANT_STAFF_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/staff$")
+_OPS_TENANT_QUOTA_PURCHASE_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/quota-purchase$")
 _OPS_PLAN_CHANGE_RESOLVE_PATH_RE = re.compile(r"^/api/ops/plan-change-requests/(\d+)/resolve$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
@@ -1469,6 +1483,15 @@ def h_tenant_dashboard(con, tenant_id):
     }
 
 
+def h_tenant_quota_get(con, tenant_id):
+    """AI入札連携(T55)向け。直近30日の実効クォータ・使用数・残数を返す軽量API。
+    list_builder.htmlのダッシュボード(T52、カレンダー月・成功数のみ)とは意図的に
+    別物: こちらはsenders.py._check_quota()が実際にブロック判定へ使う数字と
+    同じ計算(直近30日ローリングウィンドウ・全試行数)にして、AI入札側が
+    「あと何通送れるか」を正確に表示できるようにしている。"""
+    return 200, {"quota": db.get_quota_status(con, tenant_id)}
+
+
 def h_tenant_plan_change_request_get(con, tenant_id):
     """自テナントの直近1件の申請状態を返す(T52のプラン表示ウィジェットが、
     pending中は「申請中」ボタンに切り替えるために使う。過去の全履歴は
@@ -1772,6 +1795,26 @@ def h_ops_tenant_staff_create(con, tenant_id, data):
     return 200, {"ok": True, "staff_id": res["staff_id"], "api_key": res["api_key"]}
 
 
+def h_ops_tenant_quota_purchase(con, tenant_id, data):
+    """AI入札連携(T55)。AI入札側でStripe決済が成功したあとに叩いてもらう
+    エンドポイント——ここではStripeを一切扱わず、記録するだけ。
+    external_ref(Stripeの決済ID等)が同じ呼び出しを繰り返しても二重計上しない
+    (db.add_quota_purchase()参照。webhookの再送に対する安全策)。"""
+    if not con.execute("SELECT 1 FROM tenants WHERE id=?", (tenant_id,)).fetchone():
+        return 404, {"error": "テナントが見つかりません"}
+    qty = data.get("qty")
+    if not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0:
+        return 400, {"error": "qty(追加する送信可能件数)は正の整数で指定してください"}
+    unit_price_yen = data.get("unit_price_yen")
+    if unit_price_yen is not None and (not isinstance(unit_price_yen, int) or isinstance(unit_price_yen, bool)):
+        return 400, {"error": "unit_price_yenは整数で指定してください"}
+    external_ref = (data.get("external_ref") or "").strip() or None
+    purchase, created = db.add_quota_purchase(con, tenant_id, qty, unit_price_yen=unit_price_yen,
+                                               external_ref=external_ref)
+    return 200, {"ok": True, "created": created, "purchase": purchase,
+                 "quota": db.get_quota_status(con, tenant_id)}
+
+
 def h_ops_plan_change_requests_list(con):
     """hq.html用: 全テナントのプラン変更申請を新しい順に返す(T53)。
     件数が今後増えても運用が破綻しないよう直近200件に絞る(必要なら
@@ -1872,6 +1915,17 @@ class Handler(BaseHTTPRequestHandler):
             con = self._con()
             try:
                 st, res = h_ops_tenant_staff_create(con, int(ops_tenant_staff_match.group(1)), data)
+                return self._json(st, res)
+            finally:
+                con.close()
+
+        ops_quota_purchase_match = _OPS_TENANT_QUOTA_PURCHASE_PATH_RE.match(path)
+        if ops_quota_purchase_match:
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                st, res = h_ops_tenant_quota_purchase(con, int(ops_quota_purchase_match.group(1)), data)
                 return self._json(st, res)
             finally:
                 con.close()
@@ -2181,7 +2235,8 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/activity-log"
                 or u.path == "/api/tenant/kill-switch"
                 or u.path == "/api/tenant/dashboard"
-                or u.path == "/api/tenant/plan-change-request"):
+                or u.path == "/api/tenant/plan-change-request"
+                or u.path == "/api/tenant/quota"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -2217,6 +2272,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_kill_switch_status(con, tenant["id"])
                 elif u.path == "/api/tenant/dashboard":
                     st, res = h_tenant_dashboard(con, tenant["id"])
+                elif u.path == "/api/tenant/quota":
+                    st, res = h_tenant_quota_get(con, tenant["id"])
                 elif u.path == "/api/tenant/plan-change-request":
                     st, res = h_tenant_plan_change_request_get(con, tenant["id"])
                 elif u.path == "/api/tenant/lists":
@@ -3351,6 +3408,50 @@ def self_test(port=8899):
 
     con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (tid_a,))
     con.commit()
+
+    print("\n── クォータ追加購入(AI入札連携。T55) ──")
+    st, r = get_auth("/api/tenant/quota")
+    t("認証ヘッダなしのGET /api/tenant/quotaは401", st == 401)
+    st, r = get_auth("/api/tenant/quota", token=key_a)
+    t("GET /api/tenant/quotaで直近30日の実効クォータが返る(初期状態はaddon=0)",
+      st == 200 and r["quota"]["addon_quota_30d"] == 0
+      and r["quota"]["effective_quota_30d"] == r["quota"]["base_monthly_send_quota"])
+
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/quota-purchase", {"qty": 500})
+    t("認証ヘッダなしのPOST /api/ops/tenants/<id>/quota-purchaseは401", st == 401)
+    st, r = post_auth("/api/ops/tenants/999999999/quota-purchase", {"qty": 500}, token=ops_key)
+    t("存在しないテナントへのquota-purchaseは404", st == 404)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/quota-purchase", {"qty": 0}, token=ops_key)
+    t("qty=0は400", st == 400)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/quota-purchase", {"qty": -1}, token=ops_key)
+    t("qtyが負数は400", st == 400)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/quota-purchase", {"qty": "500"}, token=ops_key)
+    t("qtyが文字列は400", st == 400)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/quota-purchase",
+                       {"qty": 500, "unit_price_yen": "5000"}, token=ops_key)
+    t("unit_price_yenが文字列は400", st == 400)
+
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/quota-purchase",
+                       {"qty": 500, "unit_price_yen": 5000, "external_ref": "test-api-quota-1"},
+                       token=ops_key)
+    t("POST .../quota-purchaseで追加購入を記録できる",
+      st == 200 and r.get("ok") and r["created"] and r["purchase"]["qty"] == 500)
+    t("購入直後のレスポンスにも更新後のquotaが含まれる(addon_quota_30d=500)",
+      r["quota"]["addon_quota_30d"] == 500)
+
+    st, r2 = post_auth(f"/api/ops/tenants/{tid_a}/quota-purchase",
+                        {"qty": 500, "external_ref": "test-api-quota-1"}, token=ops_key)
+    t("external_refが同じ購入をもう一度POSTしても二重計上しない(created=False)",
+      st == 200 and r2["created"] is False and r2["quota"]["addon_quota_30d"] == 500)
+
+    st, r = get_auth("/api/tenant/quota", token=key_a)
+    t("GET /api/tenant/quotaが購入後の実効クォータを反映する",
+      st == 200 and r["quota"]["addon_quota_30d"] == 500
+      and r["quota"]["effective_quota_30d"] == r["quota"]["base_monthly_send_quota"] + 500)
+
+    st, r = get_auth("/api/tenant/quota", token=key_b)
+    t("【テナント分離監査】他テナント(key_b)のquota-purchaseは自分のquotaに影響しない",
+      st == 200 and r["quota"]["addon_quota_30d"] == 0)
 
     print("\n── 送信除外設定 ──")
     # can_contact()が既にFalseな会社(他テストの副作用で反応済み等)だと

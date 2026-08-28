@@ -37,6 +37,7 @@ CREATE INDEX IF NOT EXISTS idx_emailtok_touch ON email_tracking_tokens(touch_id)
 CREATE INDEX IF NOT EXISTS idx_scheduled_sends_due ON scheduled_sends(status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_planreq_tenant ON plan_change_requests(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_planreq_status ON plan_change_requests(status);
+CREATE INDEX IF NOT EXISTS idx_quotapurchase_tenant ON quota_purchases(tenant_id, purchased_at);
 """
 
 SCHEMA = """
@@ -239,6 +240,22 @@ CREATE TABLE IF NOT EXISTS form_send_log (
   final_url TEXT,               -- 開発・検証中のみ埋める想定
   page_title TEXT,
   page_text_snippet TEXT        -- 開発・検証中のみ埋める想定(成功判定できなかった原因調査用)
+);
+
+-- クォータ追加購入(T55)。AI入札連携で、契約者が基本プランの送信枠(既定500通/月)を
+-- 使い切った際にAI入札側のStripe決済で500通単位の追加枠を買えるようにするための
+-- 購入履歴。決済自体はAI入札側で完結し、成功後にAI入札のバックエンドがこちら側の
+-- POST /api/ops/tenants/<id>/quota-purchase を叩いて記録する(ヒラケル側はStripeを
+-- 一切扱わない)。external_refにStripeの決済ID等を入れ、二重計上防止に使う。
+-- get_quota_status()が「直近30日分の合計」を実効クォータへ加算する(_check_quota()の
+-- 判定窓と揃えるため。恒久的な底上げにはしない=買った分は30日で自然に効果が切れる)。
+CREATE TABLE IF NOT EXISTS quota_purchases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  qty INTEGER NOT NULL,           -- 追加された送信可能件数(例: 500)
+  unit_price_yen INTEGER,         -- 購入時点の価格(参考値。将来の価格改定に影響されない記録用)
+  external_ref TEXT,              -- Stripe決済ID等。同じ値の再送は二重計上しない
+  purchased_at TEXT NOT NULL
 );
 
 -- プラン変更申請(T53)。list_builder.htmlのプラン表示(T52)から、テナントが
@@ -920,6 +937,54 @@ def list_tenant_kill_switches(con):
         FROM tenant_kill_switch k LEFT JOIN tenants t ON t.id = k.tenant_id
         ORDER BY k.updated_at DESC""").fetchall()
     return [dict(r) for r in rows]
+
+
+# ── クォータ追加購入(AI入札連携。T55) ──
+def get_quota_status(con, tenant_id):
+    """実効クォータ(直近30日)を返す。base(tenants.monthly_send_quota。NULLなら
+    config既定値) + addon(quota_purchasesの直近30日分の合計)。
+    senders.py._check_quota()の上限判定と、GET /api/tenant/quotaの表示の両方が
+    ここを使う(別々に計算すると「表示上は余裕があるのに送信はブロックされる」
+    という食い違いが起きるため、判定窓(直近30日)も含めて一本化する)。
+    usedは成否を問わない試行数(_check_quota()と同じ数え方。成功数のみの
+    list_builder.htmlダッシュボード<T52>とは意図的に別物)。"""
+    import config as C
+    row = con.execute("SELECT monthly_send_quota, plan_name FROM tenants WHERE id=?",
+                       (tenant_id,)).fetchone()
+    base = (row["monthly_send_quota"] if row and row["monthly_send_quota"]
+            else C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT)
+    plan_name = row["plan_name"] if row else None
+    month_ago = (datetime.now() - timedelta(days=30)).isoformat(timespec="seconds")
+    addon = con.execute(
+        "SELECT COALESCE(SUM(qty),0) FROM quota_purchases WHERE tenant_id=? AND purchased_at>=?",
+        (tenant_id, month_ago)).fetchone()[0]
+    used = con.execute(
+        "SELECT COUNT(*) FROM form_send_log WHERE tenant_id=? AND started_at>=?",
+        (tenant_id, month_ago)).fetchone()[0]
+    effective = base + addon
+    return {"base_monthly_send_quota": base, "addon_quota_30d": addon,
+            "effective_quota_30d": effective, "used_30d": used,
+            "remaining_30d": max(0, effective - used), "plan_name": plan_name}
+
+
+def add_quota_purchase(con, tenant_id, qty, unit_price_yen=None, external_ref=None):
+    """クォータ追加購入を1件記録する。external_refが既存の購入と重複する場合は
+    新規挿入せず、その既存レコードをそのまま返す(Stripeのwebhook再送等による
+    二重計上を防ぐ。決済自体はAI入札側で完結しており、ここは記録するだけ)。"""
+    if external_ref:
+        existing = con.execute(
+            "SELECT id, tenant_id, qty, unit_price_yen, external_ref, purchased_at "
+            "FROM quota_purchases WHERE tenant_id=? AND external_ref=?",
+            (tenant_id, external_ref)).fetchone()
+        if existing:
+            return dict(existing), False
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = con.execute("""INSERT INTO quota_purchases (tenant_id, qty, unit_price_yen, external_ref, purchased_at)
+        VALUES (?,?,?,?,?)""", (tenant_id, qty, unit_price_yen, external_ref, now))
+    con.commit()
+    return {"id": cur.lastrowid, "tenant_id": tenant_id, "qty": qty,
+            "unit_price_yen": unit_price_yen, "external_ref": external_ref,
+            "purchased_at": now}, True
 
 
 # ── 企業1社×1リストの送信状態(target_list_members) ──

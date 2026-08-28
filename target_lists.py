@@ -805,8 +805,8 @@ def _notify_completion(con, tenant_id, list_name, target_count, stats):
             f"ガードで中止: {stats.get('blocked', 0)}\n"
             f"配信停止: {stats.get('suppressed', 0)}\n"
             f"Kill Switchで中止: {stats.get('stopped', 0)}\n")
-    default_sender = senders.Sender(name="ヒラケル", email="info@hirakeru.jp",
-                                     address="", optout_url="https://hirakeru.jp/optout")
+    default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
+                                     address="", optout_url="https://ashibase.jp/optout")
     mailer = senders.MailSender(con, dry_run=False)
     for email in recipients:
         try:

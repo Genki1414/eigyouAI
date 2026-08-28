@@ -670,9 +670,9 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
         sender = Sender(
             name=_ov("name", (s["sender_name"] if override_sender_row else r["sname"])
                      or "ヒラケル"),
-            email=_ov("email", s["sender_email"] or "info@hirakeru.jp"),
+            email=_ov("email", s["sender_email"] or "info@ashibase.jp"),
             address=s["sender_address"] or "",
-            optout_url=s["optout_url"] or "https://hirakeru.jp/optout",
+            optout_url=s["optout_url"] or "https://ashibase.jp/optout",
             last_name=_ov("last_name", s["sender_last_name"] or ""),
             first_name=_ov("first_name", s["sender_first_name"] or ""),
             last_name_kana=_ov("last_name_kana", s["sender_last_name_kana"] or ""),
@@ -768,7 +768,7 @@ if __name__ == "__main__":
             print(f"  {'✓' if ok else '✗'} {cls.channel:<6} {why or '送信可'}")
 
         print("\n── 送信者情報の自動付与 ──")
-        s = Sender("ヒラケル", "info@hirakeru.jp", "東京都...", "https://hirakeru.jp/optout")
+        s = Sender("ヒラケル", "info@ashibase.jp", "東京都...", "https://ashibase.jp/optout")
         for cls in (MailSender, FaxSender, SmsSender, FormSender):
             f = cls(con).footer(s)
             has = all(k in f for k in ("ヒラケル",)) and ("optout" in f or "ご返信" in f)

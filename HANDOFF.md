@@ -2934,18 +2934,22 @@ lp.htmlの積算LP)を作っていた自社の名前で、後にT31以降のSaaS
 - `target_lists.py`: 送信完了通知メールの件名・送信者、コメント中の製品名言及
 - `hq.html`: `<title>`・ヘッダー・接続フォームのプレースホルダ
 - `list_builder.html`: サイドバーのブランドヘッダー(`ASHIBA AI SALES ENGINE` →
-  `HIRAKERU AI SALES ENGINE`)、Chrome拡張機能名の言及3箇所、CSVテンプレートのダウンロード
-  ファイル名、プラン比較表の自社行・見出し(「建設業特化」の表現も業種を問わない汎用表現に
-  修正)
+  `HIRAKERU`)、ブラウザタブの`<title>`、Chrome拡張機能名の言及3箇所、CSVテンプレートの
+  ダウンロードファイル名、プラン比較表の自社行・見出し(「建設業特化」の表現も業種を
+  問わない汎用表現に修正)
 - `chrome_extension/`: `manifest.json`(name/description/default_title)・`options.html`・
   `background.js`
-- `.env.example` / `deploy/docker-compose.yml`: `SENDER_NAME`/`SENDER_EMAIL`等のドメイン
-  プレースホルダを`ashibase.jp`→`hirakeru.jp`に、PostgresのDB名/ユーザー名も
-  `ashibase`→`hirakeru`に更新(本番はまだSQLite運用でPostgres未移行のため実データへの
-  影響なし)
 - `HANDOFF.md`/`INDEX.md`: タイトル行に新名称を反映(過去のT1〜T53の本文中の「AshiBase」
   表記はその時点の履歴として意図的にそのまま残した。日付入りログを事後的に書き換えると
   記録の正確性が損なわれるため)
+
+**ドメインは`ashibase.jp`のまま変更しない**(ユーザーの明示的な判断。改称直後は一旦
+`hirakeru.jp`に統一したが、「ドメインはashibase.jpから変更なしでOK」と指示があり
+撤回した)。そのため`config.py`/`senders.py`/`api.py`/`monitor.py`/`target_lists.py`の
+送信者メールアドレス・オプトアウトURL・`LP_URL`/`API_PUBLIC_URL`・`TRACK_BASE_URL`、
+`.env.example`/`deploy/docker-compose.yml`のドメイン・Postgres DB名/ユーザー名は
+`ashibase.jp`/`ashibase`のまま。**表示名(sender_name等)は「ヒラケル」、メール
+アドレス・URLのドメインは`ashibase.jp`のまま**という組み合わせが最終形。
 
 **意図的に変更しなかった範囲**(理由付き):
 - `lp.html`(「図面を送るだけ。足場の積算が返ってくる。」の無料積算ツールLP)・
@@ -3007,8 +3011,5 @@ Playwrightでlist_builder.htmlのホーム画面(サイドバーヘッダー)・
   判定は撤廃済み。配信停止<suppression>のみ法令対応として維持)
 - 個人情報の新たな取得項目の追加
 - 他社への販売・譲渡に伴うテナント分離の要件
-- hirakeru.jpドメインの実際の取得・DNS設定・SendGrid等の送信ドメイン認証(T54で
-  コード上の既定値・プレースホルダは`hirakeru.jp`に統一済みだが、実際のドメイン契約・
-  メールボックス開設・本番Caddy/DNS切替は別途インフラ作業として必要)
 - 全業種のB2B企業データをどこから調達するか(T54でユーザーから要望済みだが、
   データソース<有償リスト購入/公開データ/顧客CSV持込>の選定は未着手)

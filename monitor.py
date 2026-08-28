@@ -153,8 +153,8 @@ def _send_alert_email(con, to_email, due_alerts):
         badge = "[緊急]" if level == "critical" else "[注意]"
         lines.append(f"{badge} {title}\n{detail}\n")
     body = "\n".join(lines)
-    default_sender = senders.Sender(name="ヒラケル", email="info@hirakeru.jp",
-                                     address="", optout_url="https://hirakeru.jp/optout")
+    default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
+                                     address="", optout_url="https://ashibase.jp/optout")
     mailer = senders.MailSender(con, dry_run=False)
     mailer._deliver(senders.Recipient(company_id=0, name="運用担当", email=to_email),
                     default_sender, subject, body)

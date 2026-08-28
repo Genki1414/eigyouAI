@@ -257,10 +257,10 @@ import storage
 import target_lists as TL
 
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "dev-secret-change-me")
-LP_URL = os.environ.get("LP_URL", "https://hirakeru.jp/sekisan")
+LP_URL = os.environ.get("LP_URL", "https://ashibase.jp/sekisan")
 # 認証メール本文に埋め込む、このAPI自身の公開URL(GET /verify/staff/<token>を
 # 実際に叩けるドメイン)。本番では実際の公開ドメインを環境変数で上書きする。
-API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://hirakeru.jp")
+API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://ashibase.jp")
 # touch_idが無い流入を、直近何日以内の接触に帰属させるか
 ATTRIBUTION_WINDOW_DAYS = 45
 
@@ -294,7 +294,7 @@ _OPS_PLAN_CHANGE_RESOLVE_PATH_RE = re.compile(r"^/api/ops/plan-change-requests/(
 # ブラウザの混在コンテンツ制限でfetch()がブロックされてしまうための対応。
 # hq.htmlは意図的に"/"にもlist_builder.htmlのnavにもリンクしない
 # (本部専用。URLを直接知っている運用者だけが辿り着く想定。将来的に
-# 別サブドメイン<例: hq.hirakeru.jp>へ切り離すことも可能<Caddy側の設定のみで済む>)。
+# 別サブドメイン<例: hq.ashibase.jp>へ切り離すことも可能<Caddy側の設定のみで済む>)。
 _STATIC_PAGES = {"/list_builder.html": "list_builder.html", "/": "list_builder.html",
                   "/hq.html": "hq.html"}
 _BASE_DIR = Path(__file__).parent
@@ -848,9 +848,9 @@ def h_tenant_send_log_autofill_queue(con, tenant_id, log_id):
         sender_postal_code, sender_prefecture, sender_city, sender_block, sender_building,
         sender_phone FROM tenants WHERE id=?""", (tenant_id,)).fetchone()
     sender_name = (tn["sender_name"] if tn else None) or "ヒラケル"
-    sender_email = (tn["sender_email"] if tn else None) or "info@hirakeru.jp"
+    sender_email = (tn["sender_email"] if tn else None) or "info@ashibase.jp"
     sender_address = (tn["sender_address"] if tn else None) or ""
-    optout_url = (tn["optout_url"] if tn else None) or "https://hirakeru.jp/optout"
+    optout_url = (tn["optout_url"] if tn else None) or "https://ashibase.jp/optout"
     sender_last_name = (tn["sender_last_name"] if tn else None) or sender_name
     sender_first_name = (tn["sender_first_name"] if tn else None) or ""
     sender_postal_code = (tn["sender_postal_code"] if tn else None) or ""
@@ -1193,8 +1193,8 @@ def _send_staff_verification_email(con, tenant_id, name, email, verify_token):
             f"(有効期限: 登録から{offers.EMAIL_VERIFY_EXPIRY_HOURS}時間)。\n\n"
             f"{verify_url}\n\n"
             f"心当たりがない場合は、このメールを破棄してください。")
-    default_sender = senders.Sender(name="ヒラケル", email="info@hirakeru.jp",
-                                     address="", optout_url="https://hirakeru.jp/optout")
+    default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
+                                     address="", optout_url="https://ashibase.jp/optout")
     mailer = senders.MailSender(con, dry_run=False)
     try:
         mailer._deliver(senders.Recipient(company_id=0, name=name, email=email),
@@ -1286,8 +1286,8 @@ def _send_password_reset_email(con, name, email, reset_token):
             f"{reset_url}\n\n"
             f"心当たりがない場合は、このメールを破棄してください"
             f"(このメールを開くだけでパスワードが変更されることはありません)。")
-    default_sender = senders.Sender(name="ヒラケル", email="info@hirakeru.jp",
-                                     address="", optout_url="https://hirakeru.jp/optout")
+    default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
+                                     address="", optout_url="https://ashibase.jp/optout")
     mailer = senders.MailSender(con, dry_run=False)
     try:
         mailer._deliver(senders.Recipient(company_id=0, name=name, email=email),
@@ -1511,8 +1511,8 @@ def h_tenant_plan_change_request_create(con, tenant_id, data, staff_id=None):
                     f"希望プラン: {requested_plan}\n\n"
                     f"補足:\n{message or '(記載なし)'}\n\n"
                     f"hq.htmlの「プラン変更申請」から対応してください。")
-            default_sender = senders.Sender(name="ヒラケル", email="info@hirakeru.jp",
-                                             address="", optout_url="https://hirakeru.jp/optout")
+            default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
+                                             address="", optout_url="https://ashibase.jp/optout")
             mailer = senders.MailSender(con, dry_run=False)
             mailer._deliver(senders.Recipient(company_id=0, name="運用担当", email=to_email),
                             default_sender, subject, body)

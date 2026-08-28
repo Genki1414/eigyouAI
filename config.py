@@ -13,7 +13,7 @@ OUT_DIR = BASE / "out"
 # クリック計測(MIKOMERUの「URLアクセスの記録」相当)のリダイレクトリンクに使う
 # 公開URL。本番では実際の公開ドメインを環境変数で上書きすること
 # (api.py LP_URLと同じ考え方)。
-TRACK_BASE_URL = os.environ.get("TRACK_BASE_URL", "https://ashibase.jp")
+TRACK_BASE_URL = os.environ.get("TRACK_BASE_URL", "https://hirakeru.jp")
 
 # ── 対象業種 ──────────────────────────────
 TARGET_TRADES = {"とび": "tobi", "土工": "tobi", "塗装": "tosou", "解体": "kaitai"}
@@ -55,10 +55,10 @@ COMPOSE_SLEEP_SEC = 0.3
 # ── コンプライアンス ──────────────────────
 # 特定電子メール法: 送信者情報の明記と、受信拒否の意思表示を受ける窓口が必須。
 SENDER_INFO = {
-    "name": "AshiBase（足場ベース）",
+    "name": "ヒラケル",
     "address": "（本番: 登記上の住所を記載）",
-    "email": "info@ashibase.jp",
-    "optout_url": "https://ashibase.jp/optout",
+    "email": "info@hirakeru.jp",
+    "optout_url": "https://hirakeru.jp/optout",
 }
 # T44(2026-08-25): 1社あたりの生涯接触上限(旧MAX_LIFETIME_TOUCHES=6)・
 # 最短再接触間隔(旧MIN_TOUCH_INTERVAL_DAYS=10日)は、100社×月4,000通規模へ

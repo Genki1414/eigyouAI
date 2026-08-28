@@ -147,14 +147,14 @@ def _send_alert_email(con, to_email, due_alerts):
     メール送信に失敗した場合はクールダウンを進めず、次回すぐ再送を試みたいため)。"""
     import senders
     icon = "🔴" if any(level == "critical" for _, level, _, _ in due_alerts) else "🟡"
-    subject = f"【AshiBase監視】{icon} 異常を検知しました({len(due_alerts)}件)"
+    subject = f"【ヒラケル監視】{icon} 異常を検知しました({len(due_alerts)}件)"
     lines = []
     for _, level, title, detail in due_alerts:
         badge = "[緊急]" if level == "critical" else "[注意]"
         lines.append(f"{badge} {title}\n{detail}\n")
     body = "\n".join(lines)
-    default_sender = senders.Sender(name="AshiBase（足場ベース）", email="info@ashibase.jp",
-                                     address="", optout_url="https://ashibase.jp/optout")
+    default_sender = senders.Sender(name="ヒラケル", email="info@hirakeru.jp",
+                                     address="", optout_url="https://hirakeru.jp/optout")
     mailer = senders.MailSender(con, dry_run=False)
     mailer._deliver(senders.Recipient(company_id=0, name="運用担当", email=to_email),
                     default_sender, subject, body)
@@ -165,10 +165,10 @@ def run_check(con, force=False):
     con.commit()
     alerts = collect_alerts(con)
     if not alerts:
-        print("── AshiBase監視(T35) ── 異常なし")
+        print("── ヒラケル監視(T35) ── 異常なし")
         return 0
 
-    print(f"── AshiBase監視(T35) ── {len(alerts)}件の異常を検知")
+    print(f"── ヒラケル監視(T35) ── {len(alerts)}件の異常を検知")
     due_alerts = []
     for key, level, title, detail in alerts:
         badge = "🔴" if level == "critical" else "🟡"

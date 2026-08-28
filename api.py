@@ -257,10 +257,10 @@ import storage
 import target_lists as TL
 
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "dev-secret-change-me")
-LP_URL = os.environ.get("LP_URL", "https://ashibase.jp/sekisan")
+LP_URL = os.environ.get("LP_URL", "https://hirakeru.jp/sekisan")
 # 認証メール本文に埋め込む、このAPI自身の公開URL(GET /verify/staff/<token>を
 # 実際に叩けるドメイン)。本番では実際の公開ドメインを環境変数で上書きする。
-API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://ashibase.jp")
+API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://hirakeru.jp")
 # touch_idが無い流入を、直近何日以内の接触に帰属させるか
 ATTRIBUTION_WINDOW_DAYS = 45
 
@@ -294,7 +294,7 @@ _OPS_PLAN_CHANGE_RESOLVE_PATH_RE = re.compile(r"^/api/ops/plan-change-requests/(
 # ブラウザの混在コンテンツ制限でfetch()がブロックされてしまうための対応。
 # hq.htmlは意図的に"/"にもlist_builder.htmlのnavにもリンクしない
 # (本部専用。URLを直接知っている運用者だけが辿り着く想定。将来的に
-# 別サブドメイン<例: hq.ashibase.jp>へ切り離すことも可能<Caddy側の設定のみで済む>)。
+# 別サブドメイン<例: hq.hirakeru.jp>へ切り離すことも可能<Caddy側の設定のみで済む>)。
 _STATIC_PAGES = {"/list_builder.html": "list_builder.html", "/": "list_builder.html",
                   "/hq.html": "hq.html"}
 _BASE_DIR = Path(__file__).parent
@@ -452,7 +452,7 @@ def h_track_click(con, token):
     """MIKOMERUの「URLアクセスの記録」相当。senders.rewrite_tracked_links()が
     本文に埋め込んだトラッキングリンクのクリックを記録し、本来のURLを返す
     (呼び出し側で302リダイレクトする)。h_click()/LP_URLとは別物(こちらは
-    AshiBase自身の成長エンジンではなく、各テナントが送る文章中の任意のURLを
+    ヒラケル自身の成長エンジンではなく、各テナントが送る文章中の任意のURLを
     対象にする)。トークンが見つからなければNoneを返す。"""
     return db.resolve_click_token(con, token)
 
@@ -847,10 +847,10 @@ def h_tenant_send_log_autofill_queue(con, tenant_id, log_id):
         sender_last_name, sender_first_name, sender_last_name_kana, sender_first_name_kana,
         sender_postal_code, sender_prefecture, sender_city, sender_block, sender_building,
         sender_phone FROM tenants WHERE id=?""", (tenant_id,)).fetchone()
-    sender_name = (tn["sender_name"] if tn else None) or "AshiBase（足場ベース）"
-    sender_email = (tn["sender_email"] if tn else None) or "info@ashibase.jp"
+    sender_name = (tn["sender_name"] if tn else None) or "ヒラケル"
+    sender_email = (tn["sender_email"] if tn else None) or "info@hirakeru.jp"
     sender_address = (tn["sender_address"] if tn else None) or ""
-    optout_url = (tn["optout_url"] if tn else None) or "https://ashibase.jp/optout"
+    optout_url = (tn["optout_url"] if tn else None) or "https://hirakeru.jp/optout"
     sender_last_name = (tn["sender_last_name"] if tn else None) or sender_name
     sender_first_name = (tn["sender_first_name"] if tn else None) or ""
     sender_postal_code = (tn["sender_postal_code"] if tn else None) or ""
@@ -1186,15 +1186,15 @@ def _send_staff_verification_email(con, tenant_id, name, email, verify_token):
     戻り値: 送信できたかどうか(bool)。"""
     import senders
     verify_url = f"{API_PUBLIC_URL}/verify/staff/{verify_token}"
-    subject = "【AshiBase】担当者登録の確認"
+    subject = "【ヒラケル】担当者登録の確認"
     body = (f"{name} 様\n\n"
-            f"AshiBaseへ担当者として登録されました。以下のURLを開いて、"
+            f"ヒラケルへ担当者として登録されました。以下のURLを開いて、"
             f"メールアドレスの確認を完了してください"
             f"(有効期限: 登録から{offers.EMAIL_VERIFY_EXPIRY_HOURS}時間)。\n\n"
             f"{verify_url}\n\n"
             f"心当たりがない場合は、このメールを破棄してください。")
-    default_sender = senders.Sender(name="AshiBase（足場ベース）", email="info@ashibase.jp",
-                                     address="", optout_url="https://ashibase.jp/optout")
+    default_sender = senders.Sender(name="ヒラケル", email="info@hirakeru.jp",
+                                     address="", optout_url="https://hirakeru.jp/optout")
     mailer = senders.MailSender(con, dry_run=False)
     try:
         mailer._deliver(senders.Recipient(company_id=0, name=name, email=email),
@@ -1261,7 +1261,7 @@ def h_verify_staff_email(con, token):
                "このURLは無効か、24時間の有効期限が切れています。管理者に"
                "「承認待ち一覧」からの再発行を依頼してください。")
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
-<title>AshiBase — {title}</title>
+<title>ヒラケル — {title}</title>
 <style>body{{font-family:sans-serif;background:#EFF1F2;display:flex;align-items:center;
   justify-content:center;height:100vh;margin:0}}
 .card{{background:#fff;border-radius:8px;padding:32px 40px;max-width:420px;text-align:center;
@@ -1278,7 +1278,7 @@ def _send_password_reset_email(con, name, email, reset_token):
     メール列挙攻撃を防ぐため送信成否に関わらず常に同じ応答を返すため。"""
     import senders
     reset_url = f"{API_PUBLIC_URL}/reset-password/{reset_token}"
-    subject = "【AshiBase】パスワード再設定のご案内"
+    subject = "【ヒラケル】パスワード再設定のご案内"
     body = (f"{name} 様\n\n"
             f"パスワード再設定のリクエストを受け付けました。以下のURLから新しい"
             f"パスワードを設定してください"
@@ -1286,8 +1286,8 @@ def _send_password_reset_email(con, name, email, reset_token):
             f"{reset_url}\n\n"
             f"心当たりがない場合は、このメールを破棄してください"
             f"(このメールを開くだけでパスワードが変更されることはありません)。")
-    default_sender = senders.Sender(name="AshiBase（足場ベース）", email="info@ashibase.jp",
-                                     address="", optout_url="https://ashibase.jp/optout")
+    default_sender = senders.Sender(name="ヒラケル", email="info@hirakeru.jp",
+                                     address="", optout_url="https://hirakeru.jp/optout")
     mailer = senders.MailSender(con, dry_run=False)
     try:
         mailer._deliver(senders.Recipient(company_id=0, name=name, email=email),
@@ -1337,7 +1337,7 @@ def h_reset_password_page(token):
     POST /api/password-reset/confirmを叩く(list_builder.htmlを経由しなくても
     リンクを開くだけで完結させるため、h_verify_staff_emailと同じ設計)。"""
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
-<title>AshiBase — パスワード再設定</title>
+<title>ヒラケル — パスワード再設定</title>
 <style>body{{font-family:sans-serif;background:#EFF1F2;display:flex;align-items:center;
   justify-content:center;min-height:100vh;margin:0}}
 .card{{background:#fff;border-radius:8px;padding:32px 40px;max-width:420px;width:100%;
@@ -1505,14 +1505,14 @@ def h_tenant_plan_change_request_create(con, tenant_id, data, staff_id=None):
             import senders
             tenant_row = con.execute("SELECT name FROM tenants WHERE id=?", (tenant_id,)).fetchone()
             tenant_name = tenant_row["name"] if tenant_row else f"tenant#{tenant_id}"
-            subject = f"【AshiBase】プラン変更のご相談({tenant_name})"
+            subject = f"【ヒラケル】プラン変更のご相談({tenant_name})"
             body = (f"テナント: {tenant_name} (id={tenant_id})\n"
                     f"申請ID: {request_id}\n"
                     f"希望プラン: {requested_plan}\n\n"
                     f"補足:\n{message or '(記載なし)'}\n\n"
                     f"hq.htmlの「プラン変更申請」から対応してください。")
-            default_sender = senders.Sender(name="AshiBase（足場ベース）", email="info@ashibase.jp",
-                                             address="", optout_url="https://ashibase.jp/optout")
+            default_sender = senders.Sender(name="ヒラケル", email="info@hirakeru.jp",
+                                             address="", optout_url="https://hirakeru.jp/optout")
             mailer = senders.MailSender(con, dry_run=False)
             mailer._deliver(senders.Recipient(company_id=0, name="運用担当", email=to_email),
                             default_sender, subject, body)
@@ -1651,7 +1651,7 @@ def h_tenant_list_preview_message(con, tenant_id, list_id, data):
 
     tn = con.execute("""SELECT sender_name, sender_last_name FROM tenants WHERE id=?""",
                       (tenant_id,)).fetchone()
-    sender_name = (tn["sender_name"] if tn else None) or "AshiBase（足場ベース）"
+    sender_name = (tn["sender_name"] if tn else None) or "ヒラケル"
     sender_last_name = (tn["sender_last_name"] if tn else None) or sender_name
 
     import senders as S
@@ -2726,7 +2726,7 @@ def self_test(port=8899):
     sc_company = con.execute("""SELECT name, pref FROM companies
         WHERE dedup_of IS NULL AND owner_tenant_id IS NULL AND pref IS NOT NULL LIMIT 1""").fetchone()
     # 2行目は会社名列が空(=会社名を特定できない行)なので「会社不明」扱いになる。
-    # 存在しない社名を入れても(AshiBaseの意図的な設計上)非公開企業として新規作成
+    # 存在しない社名を入れても(ヒラケルの意図的な設計上)非公開企業として新規作成
     # されてしまい「会社不明」にはならないため、skipped_rowsを狙って再現するには
     # 会社名そのものを空にする必要がある
     csv_search_text = f"会社名,都道府県\n{sc_company['name']},{sc_company['pref']}\n,東京都\n"

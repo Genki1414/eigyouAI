@@ -1,4 +1,4 @@
-// AshiBase 自動入力アシスト — background service worker (Manifest V3)
+// ヒラケル自動入力アシスト — background service worker (Manifest V3)
 //
 // ブックマークレット版(list_builder.htmlに埋め込んでいた旧方式)は、対象企業の
 // フォームページが厳しめのContent-Security-Policyやmixed content制限を持っていると、
@@ -93,7 +93,7 @@ async function runAutofill(tabId) {
     await chrome.scripting.executeScript({
       target: { tabId },
       func: showPageAlert,
-      args: ["AshiBaseとの連携が未設定です。list_builder.htmlの「自動送信ログ」画面で"
+      args: ["ヒラケルとの連携が未設定です。list_builder.htmlの「自動送信ログ」画面で"
            + "「拡張機能と連携する」を押してください。"],
     });
     return;

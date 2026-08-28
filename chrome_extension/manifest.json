@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "AshiBase 自動入力アシスト",
-  "description": "AshiBaseの自動送信ログで「自動入力」を押した後、対象企業のフォームページでこの拡張機能のアイコンを押すと、入力欄が自動で埋まります(送信ボタンは押しません)。",
+  "name": "ヒラケル自動入力アシスト",
+  "description": "ヒラケルの自動送信ログで「自動入力」を押した後、対象企業のフォームページでこの拡張機能のアイコンを押すと、入力欄が自動で埋まります(送信ボタンは押しません)。",
   "version": "1.0.0",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsY9x/CiIM68iWqODnC6ELNs3LX62dZcmzTDzK5G29VkjQhP8CuRBH06cylBwZuNhPCjFyjhN6OcNEQpj8CxIEU8A1FoGPoBcsCzqg26zUOaMu1bwr0BzdTw/iElBUXninNH/guVZgxu37/22wP6nwEDE0B62inR714SS2Jp3IQGoNenScGEpkb0dSmXhwlcn2TlOnb2KgY7XAMdov2otsZzx+7/kvlw4SoZFs9jB4/jubVq8YAshDmZjdlCBh9oaIlhuOuZi80bP7th4AWOb5XO9gVYofQA34W2CqiAsPN+aPP5doo2hJq/HI19sEDjWvJLxgT+fzK58pI1Q7Ns4GQIDAQAB",
   "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
   "action": {
     "default_icon": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
-    "default_title": "AshiBase 自動入力(対象ページでクリック)"
+    "default_title": "ヒラケル自動入力(対象ページでクリック)"
   },
   "background": { "service_worker": "background.js" },
   "permissions": ["activeTab", "scripting", "storage", "notifications"],

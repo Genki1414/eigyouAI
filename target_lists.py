@@ -324,10 +324,10 @@ def run_csv_search(con, tenant_id, filename, csv_text, mode="name", name_col=Non
     (保存は別途save_search_log_as_list()を呼ぶ)。
 
     MIKOMERUとの意図的な違い: MIKOMERUは自社が保有する会社基本情報DBを検索するだけで、
-    一致しない行(「会社不明」)は何も作られない。AshiBaseの「CSV検索」は元々
+    一致しない行(「会社不明」)は何も作られない。ヒラケルの「CSV検索」は元々
     「自社の企業リストを取り込む」機能(MIKOMERUに無い独自機能)を兼ねているため、
     一致しない行は御社専用の非公開企業として新規に追加する。これは仕様の劣化ではなく、
-    自社保有リストを送信対象にできるというAshiBase側の価値をそのまま残すための設計判断。
+    自社保有リストを送信対象にできるというヒラケル側の価値をそのまま残すための設計判断。
 
     mode='url'の場合は、name_col/url_colで指定した列を使い、問い合わせページの探索
     (discover_contact_url)を必ず行う(MIKOMERUの「URLで検索」が問い合わせページURLの
@@ -797,7 +797,7 @@ def _notify_completion(con, tenant_id, list_name, target_count, stats):
     if not recipients:
         return
 
-    subject = f"【AshiBase】送信完了: {list_name}"
+    subject = f"【ヒラケル】送信完了: {list_name}"
     body = (f"リスト「{list_name}」への送信が完了しました。\n\n"
             f"対象企業数: {target_count}\n"
             f"送信成功: {stats.get('sent', 0)}\n"
@@ -805,8 +805,8 @@ def _notify_completion(con, tenant_id, list_name, target_count, stats):
             f"ガードで中止: {stats.get('blocked', 0)}\n"
             f"配信停止: {stats.get('suppressed', 0)}\n"
             f"Kill Switchで中止: {stats.get('stopped', 0)}\n")
-    default_sender = senders.Sender(name="AshiBase（足場ベース）", email="info@ashibase.jp",
-                                     address="", optout_url="https://ashibase.jp/optout")
+    default_sender = senders.Sender(name="ヒラケル", email="info@hirakeru.jp",
+                                     address="", optout_url="https://hirakeru.jp/optout")
     mailer = senders.MailSender(con, dry_run=False)
     for email in recipients:
         try:

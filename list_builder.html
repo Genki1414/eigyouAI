@@ -165,7 +165,7 @@ tr.clickable:hover{background:var(--accent-soft)}
 <div class="stripe"></div>
 <div class="shell">
   <aside class="sidebar">
-    <div class="brand"><b>ASHIBA AI SALES ENGINE</b><small>送信先リスト管理</small></div>
+    <div class="brand"><b>HIRAKERU AI SALES ENGINE</b><small>送信先リスト管理</small></div>
     <nav>
       <div class="navitem" data-page="autosend">🚀 自動送信</div>
       <div class="navitem active" data-page="home">ダッシュボード</div>
@@ -295,7 +295,7 @@ tr.clickable:hover{background:var(--accent-soft)}
         <div class="card step">
           <h3>4. 自動送信できなかった企業を手動でフォローする(任意)</h3>
           <p>「自動送信ログ」の詳細画面で「一時的な失敗」「失敗(未対応)」になった企業は、
-            Chrome拡張機能「AshiBase 自動入力アシスト」で入力欄だけ自動で埋めて、
+            Chrome拡張機能「ヒラケル自動入力アシスト」で入力欄だけ自動で埋めて、
             内容を確認しながら手動送信できます(拡張機能のインストール方法は
             「マニュアルDL」参照)。</p>
           <div class="btnrow">
@@ -360,7 +360,7 @@ tr.clickable:hover{background:var(--accent-soft)}
         <div class="btnrow"><button class="ghost" id="btnSendLogDetailBack">← 一覧へ戻る</button></div>
         <div class="card" style="margin-top:12px">
           <p class="hint">自動送信に失敗した企業(「一時的な失敗」「失敗(未対応)」)は、
-            Chrome拡張機能「<b>AshiBase 自動入力アシスト</b>」を使うと、各行の「自動入力」ボタン→
+            Chrome拡張機能「<b>ヒラケル自動入力アシスト</b>」を使うと、各行の「自動入力」ボタン→
             対象企業のフォームが新しいタブで開く→そのタブで拡張機能のアイコンをクリック、で
             入力欄が自動で埋まります(送信ボタンは人が確認して押してください。取り消せない操作を
             自動化はしません)。
@@ -744,7 +744,7 @@ tr.clickable:hover{background:var(--accent-soft)}
         <div class="card step">
           <h3>4.5. 自動送信に失敗した企業を手動でフォローする</h3>
           <p>「自動送信ログ」ページで「一時的な失敗」「失敗(未対応)」になった企業は、
-            <b>Chrome拡張機能「AshiBase 自動入力アシスト」</b>で手動フォローできます
+            <b>Chrome拡張機能「ヒラケル自動入力アシスト」</b>で手動フォローできます
             (フォームは見つかったが自動判定できなかった場合の補助機能で、
             対象企業ごとに1件・10分間だけ有効です)。</p>
           <ol>
@@ -1011,7 +1011,7 @@ tr.clickable:hover{background:var(--accent-soft)}
     <details open style="margin:10px 0">
       <summary style="cursor:pointer;font-size:13px;font-weight:700">プラン比較表・他社サービスとの比較</summary>
 
-      <div style="margin-top:10px;font-size:12px;font-weight:700;color:var(--steel)">AshiBaseのプラン</div>
+      <div style="margin-top:10px;font-size:12px;font-weight:700;color:var(--steel)">ヒラケルのプラン</div>
       <div style="margin-top:4px;overflow-x:auto">
         <table>
           <tr><th>プラン</th><th style="white-space:nowrap">月間送信数</th><th style="white-space:nowrap">月額</th><th style="white-space:nowrap">1通あたり</th></tr>
@@ -1027,7 +1027,7 @@ tr.clickable:hover{background:var(--accent-soft)}
       <div style="margin-top:4px;overflow-x:auto">
         <table>
           <tr><th style="white-space:nowrap">サービス</th><th style="white-space:nowrap">月額目安</th><th style="white-space:nowrap">単価目安</th><th>特徴</th></tr>
-          <tr><td style="white-space:nowrap"><b>AshiBase(当サービス)</b></td><td style="white-space:nowrap">¥8,000〜</td><td style="white-space:nowrap">¥7.5〜16</td><td>建設業特化。国交省データ+CSV検索でリスト取得込み</td></tr>
+          <tr><td style="white-space:nowrap"><b>ヒラケル(当サービス)</b></td><td style="white-space:nowrap">¥8,000〜</td><td style="white-space:nowrap">¥7.5〜16</td><td>業種を問わず利用可能。独自データ+CSV検索でリスト取得込み</td></tr>
           <tr><td style="white-space:nowrap">MIKOMERU</td><td style="white-space:nowrap">¥48,000〜<br>(4,000通)</td><td style="white-space:nowrap">約¥12</td><td>業界問わず汎用。30以上の条件で絞込・リスト取得込み</td></tr>
           <tr><td style="white-space:nowrap">Lead Dynamics</td><td style="white-space:nowrap">¥39,000〜</td><td style="white-space:nowrap">上限なし(公表)</td><td>成功率50〜80%を公表</td></tr>
           <tr><td style="white-space:nowrap">業界相場(その他各社)</td><td style="white-space:nowrap">¥10,000〜<br>200,000</td><td style="white-space:nowrap">¥10〜20<br>(従量制の場合)</td><td>成果報酬型は1件¥10,000〜20,000のことも</td></tr>
@@ -2260,7 +2260,7 @@ $("btnDownloadCsvTemplate").addEventListener("click", () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = tab === "url" ? "ashibase_csv_template_url.csv" : "ashibase_csv_template_name.csv";
+  a.download = tab === "url" ? "hirakeru_csv_template_url.csv" : "hirakeru_csv_template_name.csv";
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

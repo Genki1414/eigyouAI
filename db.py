@@ -35,6 +35,8 @@ CREATE INDEX IF NOT EXISTS idx_tlm_status ON target_list_members(send_status);
 CREATE INDEX IF NOT EXISTS idx_formlog_list ON form_send_log(list_id);
 CREATE INDEX IF NOT EXISTS idx_emailtok_touch ON email_tracking_tokens(touch_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_sends_due ON scheduled_sends(status, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_planreq_tenant ON plan_change_requests(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_planreq_status ON plan_change_requests(status);
 """
 
 SCHEMA = """
@@ -237,6 +239,24 @@ CREATE TABLE IF NOT EXISTS form_send_log (
   final_url TEXT,               -- 開発・検証中のみ埋める想定
   page_title TEXT,
   page_text_snippet TEXT        -- 開発・検証中のみ埋める想定(成功判定できなかった原因調査用)
+);
+
+-- プラン変更申請(T53)。list_builder.htmlのプラン表示(T52)から、テナントが
+-- 「プランを変更したい」と本部へ知らせるための単純な申請キュー。
+-- 承認・実際のプラン切替(tenants.plan_name/monthly_send_quota等の更新)は
+-- 自動化せず、本部がhq.htmlで内容を確認し、顧客と個別に相談のうえ
+-- 手動で行う想定(料金体系がまだ固まっておらず、自動課金・自動昇格は範囲外)。
+-- statusは'pending'(未対応)/'done'(本部が対応済みにした)の2値のみ。
+CREATE TABLE IF NOT EXISTS plan_change_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  staff_id INTEGER,              -- 申請した担当者(共用キーで叩いた場合はNULL)
+  requested_plan TEXT,           -- 選択したプラン名(list_builder.html側のプルダウン文言。
+                                  -- 料金改定のたびにDB側は変更不要なよう固定enumにはしない)
+  message TEXT,                  -- 任意の自由記述(補足・相談したい内容等)
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  resolved_at TEXT
 );
 """
 

@@ -2824,6 +2824,78 @@ tenants.plan_name/monthly_send_quotaを設定した場合にそのまま反映�
 
 ---
 
+### T53. プラン変更申請機能を追加(2026-08-28)
+
+T52で作ったプラン表示ウィジェットを見て、ユーザーから「プランを見ると
+プラン変更申請も置きたい」との依頼。ユーザーからは合わせて実際の料金表も
+提示された(list_builder.html側のプルダウンにそのまま使用):
+ミニマム(500通/月)¥8,000 / スターター(1,000通/月)¥13,000 /
+ライト(4,000通/月)¥40,000 / ベーシック(10,000通/月)¥85,000 /
+プレミアム(20,000通/月)¥150,000。
+
+料金体系がまだ固まっていない段階(法人向け個別交渉の余地がある)ため、
+**実際のプラン切替(課金・`tenants.plan_name`等の更新)は自動化しない**。
+テナントが「このプランに変更したい」と申請すると、本部へメール通知が飛び、
+本部がhq.htmlの一覧を見て顧客と個別に相談のうえ手動で対応する、という
+単純な「相談キュー」として設計した(承認フローや決済連携は範囲外)。
+
+- `db.py`: `plan_change_requests`テーブルを新設
+  (`tenant_id`, `staff_id`, `requested_plan`, `message`, `status`
+  ['pending'|'done'], `created_at`, `resolved_at`)。`requested_plan`は
+  list_builder.html側のプルダウン文言をそのまま自由文字列で受け取り、
+  固定enumにしない(料金改定のたびにサーバ側の変更が不要なように)。
+  `storage.py`の`SERIAL_ID_TABLES`にも追加(Postgres側でRETURNING idが
+  自動で付くようにするため。忘れると`cur.lastrowid`がNoneのままになる)
+- `api.py`:
+  - `POST /api/tenant/plan-change-request` — テナント認証で申請を1件作成。
+    `requested_plan`必須(空なら400)。作成後、`OPS_ALERT_EMAIL`が設定
+    されていれば通知メールを送る(T35の監視アラートと同じ
+    `senders.MailSender(con, dry_run=False)._deliver()`パターンを流用)。
+    **メール送信はベストエフォート**: 送信基盤未設定・失敗時も例外を
+    握りつぶして申請自体は成立させる(hq.htmlの一覧が正のデータ源であり、
+    メールは補助的な通知に過ぎないため)
+  - `GET /api/tenant/plan-change-request` — 自テナントの直近1件の状態
+    (pending中はlist_builder.html側でボタンを「申請中」表示に切り替える
+    ために使う。過去の全履歴はテナントには見せない)
+  - `GET /api/ops/plan-change-requests` — hq.html用。全テナント分を
+    テナント名付きで新しい順に返す(直近200件)
+  - `POST /api/ops/plan-change-requests/<id>/resolve` — 対応済みにする。
+    既に'done'なものへの再呼び出しは冪等に200を返す(再クリック対策)。
+    存在しないIDは404
+- `list_builder.html`: ホームの`#planWidget`に「プラン変更を相談する」
+  ボタンを追加。押すと料金表プルダウン(6択。最後は「その他・相談したい」)
+  +任意の補足テキストのモーダルが開く。送信後は`refreshPlanChangeStatus()`
+  が`GET /api/tenant/plan-change-request`を叩いて、pending中はボタンを
+  無効化し「申請中(◯◯)— 本部からの連絡をお待ちください」に切り替える
+  (`refreshDashboard()`から毎回呼ばれるので、他画面から戻ってきても
+  状態が最新化される)
+- `hq.html`: 「プラン変更申請」セクションを新設。状態(未対応/対応済み)・
+  テナント名・希望プラン・補足・申請日の一覧テーブルと、未対応行にだけ
+  出る「対応済みにする」ボタン。**実際のプラン切替はここでは行わない**
+  (ボタンは`status='done'`にするだけ。`tenants.plan_name`等の更新は
+  本部が別途手動で行う運用)
+
+**テスト**: `api.py test`に「プラン変更申請(T53)」セクションを追加
+(12件: 認証なしは401・requested_plan未指定は400・申請作成・自テナントの
+直近状態取得・【テナント分離監査】他テナントからは見えない・ops一覧に
+テナント名付きで出る・存在しないIDのresolveは404・resolveで対応済みに
+できる・resolveの冪等性・resolve後は自テナント側もstatus=doneに変わる、
+等)。**SQLiteは`api.py test`で334/334を確認**。**Postgresは**、この検証時
+たまたま`run.py all --demo`のingestステップ(`generate_sample.py`呼び出し)が
+本機能と無関係な理由でハングし(サンドボックス固有の事象。調査の結果、
+新機能のコードには起因しないことを確認)、HTTPサーバ越しの`api.py test`
+フルスイートを回す前提のデモデータ投入が完了しなかったため、代わりに
+`db.migrate()`後の実Postgres接続に対して本機能のハンドラ関数
+(`h_tenant_plan_change_request_create/get`・`h_ops_plan_change_requests_list`・
+`h_ops_plan_change_request_resolve`)を直接呼び出すスモークテストで
+作成・取得・一覧(テナント名JOIN)・resolve・resolveの冪等性・存在しないID
+の404・resolve後のstatus反映を全て確認した(`RETURNING id`が
+`storage.SERIAL_ID_TABLES`への追加により正しく効いていることも確認済み)。
+フルスイートでのPostgres確認は次回`run.py all --demo`のハング原因調査と
+合わせて改めて行うこと。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

@@ -222,6 +222,10 @@ tr.clickable:hover{background:var(--accent-soft)}
               <div class="usagebar-track"><div class="usagebar-fill" id="planUsageBar" style="width:0%"></div></div>
             </div>
           </div>
+          <div>
+            <button class="ghost" id="btnOpenPlanChange">プラン変更を相談する</button>
+            <div class="hint" id="planChangeStatus" style="text-align:right"></div>
+          </div>
         </div>
         <h2 id="dashHeadline">今月の状況 <span>OVERVIEW</span></h2>
         <div class="statcards" id="homeStats">
@@ -995,6 +999,33 @@ tr.clickable:hover{background:var(--accent-soft)}
     <div class="btnrow" style="justify-content:flex-end"><button id="saveListModalSave">保存</button></div>
   </div>
 </div>
+
+<div class="imgmodal" id="planChangeModal">
+  <div class="imgmodal-inner" style="max-width:480px">
+    <div class="imgmodal-head">
+      <b>プラン変更のご相談</b>
+      <button class="ghost" id="planChangeModalClose">閉じる</button>
+    </div>
+    <p class="hint">申請いただいた内容をもとに、後ほど担当者よりご連絡します。実際のプラン切替は本申請の送信だけでは行われません。</p>
+    <div style="margin-top:10px">
+      <label>希望プラン</label>
+      <select id="planChangeSelect">
+        <option value="ミニマム（500通/月）¥8,000">ミニマム(500通/月) ¥8,000</option>
+        <option value="スターター（1,000通/月）¥13,000">スターター(1,000通/月) ¥13,000</option>
+        <option value="ライト（4,000通/月）¥40,000">ライト(4,000通/月) ¥40,000</option>
+        <option value="ベーシック（10,000通/月）¥85,000">ベーシック(10,000通/月) ¥85,000</option>
+        <option value="プレミアム（20,000通/月）¥150,000">プレミアム(20,000通/月) ¥150,000</option>
+        <option value="その他・相談したい">その他・相談したい</option>
+      </select>
+    </div>
+    <div style="margin-top:10px">
+      <label>補足(任意)</label>
+      <textarea id="planChangeMessage" rows="3" placeholder="ご要望があればご記入ください"></textarea>
+    </div>
+    <div id="planChangeModalResult"></div>
+    <div class="btnrow" style="justify-content:flex-end"><button id="planChangeModalSubmit">この内容で相談する</button></div>
+  </div>
+</div>
 <script>
 // ── ナビゲーション(単一ページ内の切替。リロードなし) ──
 const PAGE_TITLES = {
@@ -1257,6 +1288,7 @@ async function refreshDashboard() {
     const bar = $("planUsageBar");
     bar.style.width = `${pct}%`;
     bar.classList.toggle("warn", pct >= 90);
+    refreshPlanChangeStatus();
     $("dashThisMonth").innerHTML = `
       <div class="statcard" data-target="sendlog"><b>${d.this_month.targeted_companies.toLocaleString()}</b><span>営業対象企業数</span></div>
       <div class="statcard" data-target="sendlog"><b>${d.this_month.attempts.toLocaleString()}</b><span>送信試行数</span></div>
@@ -1376,6 +1408,52 @@ $("saveListModalSave").addEventListener("click", async () => {
     el.innerHTML = `<div class="result ok">保存しました(合計${r.count.toLocaleString()}社) — list_id=${r.list_id}</div>`;
     await refreshLists();
     setTimeout(() => $("saveListModal").classList.remove("open"), 900);
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+});
+
+// ── プラン変更申請(T53。ホームのプラン表示ウィジェットから、希望プランを
+// 選んで本部へ相談を送るだけの単純なフォーム。実際のプラン切替は自動化せず、
+// 送信後は本部からの連絡を待つ運用) ──
+async function refreshPlanChangeStatus() {
+  const btn = $("btnOpenPlanChange");
+  const status = $("planChangeStatus");
+  try {
+    const r = await call("/api/tenant/plan-change-request");
+    if (r.request && r.request.status === "pending") {
+      btn.disabled = true;
+      status.textContent = `申請中(${r.request.requested_plan})— 本部からの連絡をお待ちください`;
+    } else {
+      btn.disabled = false;
+      status.textContent = "";
+    }
+  } catch (e) {
+    // ダッシュボード全体は壊さない(申請状態が取れないだけなので静かに諦める)
+  }
+}
+$("btnOpenPlanChange").addEventListener("click", () => {
+  $("planChangeSelect").value = $("planChangeSelect").options[0].value;
+  $("planChangeMessage").value = "";
+  $("planChangeModalResult").innerHTML = "";
+  $("planChangeModal").classList.add("open");
+});
+$("planChangeModalClose").addEventListener("click", () => $("planChangeModal").classList.remove("open"));
+$("planChangeModal").addEventListener("click", (e) => { if (e.target.id === "planChangeModal") $("planChangeModal").classList.remove("open"); });
+$("planChangeModalSubmit").addEventListener("click", async () => {
+  const el = $("planChangeModalResult");
+  el.innerHTML = `<div class="result">送信中…</div>`;
+  try {
+    await call("/api/tenant/plan-change-request", {
+      method: "POST",
+      body: JSON.stringify({
+        requested_plan: $("planChangeSelect").value,
+        message: $("planChangeMessage").value.trim(),
+      }),
+    });
+    el.innerHTML = `<div class="result ok">相談を送信しました。担当者よりご連絡いたします。</div>`;
+    await refreshPlanChangeStatus();
+    setTimeout(() => $("planChangeModal").classList.remove("open"), 1200);
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }

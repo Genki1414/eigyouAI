@@ -148,6 +148,17 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
       </table>
     </div>
 
+    <h2>プラン変更申請</h2>
+    <div class="card">
+      <div class="hint">list_builder.htmlのプラン表示から届いた相談です。対応後は「対応済みにする」を押してください
+        (実際のプラン切替=tenants.plan_name等の更新は、ここではなく顧客との合意後に別途手動で行ってください)。</div>
+      <button class="ghost" id="btnRefreshPlanRequests">再読込</button>
+      <table id="planRequestTable" style="display:none">
+        <thead><tr><th>状態</th><th>テナント</th><th>希望プラン</th><th>補足</th><th>申請日</th><th></th></tr></thead>
+        <tbody id="planRequestTbody"></tbody>
+      </table>
+    </div>
+
   </div>
 </div>
 
@@ -193,6 +204,32 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+async function refreshPlanRequests() {
+  const { requests } = await call("/api/ops/plan-change-requests");
+  const tbody = $("planRequestTbody");
+  tbody.innerHTML = requests.map(r => `<tr>
+      <td><span class="status ${r.status === "pending" ? "off" : "on"}">${r.status === "pending" ? "未対応" : "対応済み"}</span></td>
+      <td>${escapeHtml(r.tenant_name)}</td>
+      <td>${escapeHtml(r.requested_plan || "")}</td>
+      <td>${escapeHtml(r.message || "")}</td>
+      <td>${escapeHtml(r.created_at || "")}</td>
+      <td>${r.status === "pending" ? `<button class="ghost planResolveBtn" data-id="${r.id}">対応済みにする</button>` : ""}</td>
+    </tr>`).join("");
+  tbody.querySelectorAll(".planResolveBtn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await call(`/api/ops/plan-change-requests/${btn.dataset.id}/resolve`, { method: "POST", body: "{}" });
+        await refreshPlanRequests();
+      } catch (e) {
+        alert(e.message);
+        btn.disabled = false;
+      }
+    });
+  });
+  $("planRequestTable").style.display = requests.length ? "table" : "none";
+}
+
 async function doConnect() {
   API = $("apiBase").value.trim();
   KEY = $("apiKey").value.trim();
@@ -200,6 +237,7 @@ async function doConnect() {
   localStorage.setItem("ashibase_hq_api_key", KEY);
   try {
     await refreshTenants();
+    await refreshPlanRequests();
     $("connStatus").textContent = "接続済み";
     $("connStatus").className = "status on";
     $("gated").classList.add("show");
@@ -211,6 +249,7 @@ async function doConnect() {
 }
 $("btnConnect").addEventListener("click", doConnect);
 $("btnRefreshTenants").addEventListener("click", () => refreshTenants().catch(e => alert(e.message)));
+$("btnRefreshPlanRequests").addEventListener("click", () => refreshPlanRequests().catch(e => alert(e.message)));
 
 $("btnCreateTenant").addEventListener("click", async () => {
   const btn = $("btnCreateTenant");

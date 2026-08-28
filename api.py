@@ -39,6 +39,11 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            既に電話等で本人確認済みという前提のため、テナント
                            自身の新規登録</api/tenant/staff/register>と違い
                            メール認証は経由しない)。hq.html専用
+  GET  /api/ops/plan-change-requests   プラン変更申請の一覧(全テナント分。
+                           status=pendingが優先表示される想定。T53)
+  POST /api/ops/plan-change-requests/<id>/resolve   申請を対応済みにする
+                           (実際のプラン変更=tenants.plan_name等の更新は
+                           自動化せず、本部が別途手動で行う。T53)
   ※ /api/ops/* は本部専用画面(hq.html)からのみ叩く想定。/list_builder.html
     等の顧客向け画面からはリンクしない(顧客に運用系の強い権限を渡さないため)
 
@@ -200,6 +205,14 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            返信/商談化/受注の件数。form_send_log/
                            target_list_membersからの集計のみで、
                            新規の集計テーブルは持たない
+  GET  /api/tenant/plan-change-request   自テナントの直近のプラン変更申請
+                           (無ければnull)。pending中は画面側でボタンを
+                           「申請中」表示に切り替えるために使う(T53)
+  POST /api/tenant/plan-change-request   {"requested_plan","message"(任意)} →
+                           申請を1件作成し、OPS_ALERT_EMAILへ通知メールを送る
+                           (ベストエフォート。メール送信基盤未設定・失敗時も
+                           申請自体は成立する。承認は自動化せず本部が個別に
+                           対応する。T53)
   ※ Authorization: Bearer <tenant.api_key または staff.api_key>。テナントIDは
     このキーからサーバ側で解決し、リクエストボディのtenant_idは一切信用しない
     (offers.resolve_tenant_by_key。担当者ごとのキーでもテナント全体のキーでも
@@ -274,6 +287,7 @@ _SEND_LOG_EXEC_NOTE_PATH_RE = re.compile(r"^/api/tenant/send-log/executions/(\d+
 _VERIFY_STAFF_PATH_RE = re.compile(r"^/verify/staff/([A-Za-z0-9_-]+)$")
 _RESET_PASSWORD_PATH_RE = re.compile(r"^/reset-password/([A-Za-z0-9_-]+)$")
 _OPS_TENANT_STAFF_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/staff$")
+_OPS_PLAN_CHANGE_RESOLVE_PATH_RE = re.compile(r"^/api/ops/plan-change-requests/(\d+)/resolve$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
@@ -1455,6 +1469,59 @@ def h_tenant_dashboard(con, tenant_id):
     }
 
 
+def h_tenant_plan_change_request_get(con, tenant_id):
+    """自テナントの直近1件の申請状態を返す(T52のプラン表示ウィジェットが、
+    pending中は「申請中」ボタンに切り替えるために使う。過去の全履歴は
+    テナント自身には見せない=hq.html側の一覧で本部だけが確認する設計)。"""
+    row = con.execute("""SELECT id, requested_plan, message, status, created_at, resolved_at
+        FROM plan_change_requests WHERE tenant_id=? ORDER BY created_at DESC LIMIT 1""",
+        (tenant_id,)).fetchone()
+    return 200, {"request": dict(row) if row else None}
+
+
+def h_tenant_plan_change_request_create(con, tenant_id, data, staff_id=None):
+    """プラン変更の相談を1件記録し、本部へメールで知らせる(T53)。
+    requested_planはlist_builder.html側のプルダウン文言をそのまま自由文字列で
+    受け取る(固定enumにしない=料金改定のたびにサーバ側の変更が不要)。
+    承認・実際のプラン変更(tenants.plan_name等の更新)は自動化しない
+    ——料金体系が固まっておらず、顧客ごとの個別相談が前提のため。
+    メール送信はベストエフォート: OPS_ALERT_EMAIL未設定・送信失敗でも
+    申請自体はDBに残るので、本部はhq.htmlの一覧から取りこぼさず確認できる。"""
+    requested_plan = (data.get("requested_plan") or "").strip()
+    if not requested_plan:
+        return 400, {"error": "requested_planは必須です"}
+    message = (data.get("message") or "").strip() or None
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = con.execute("""INSERT INTO plan_change_requests
+        (tenant_id, staff_id, requested_plan, message, status, created_at)
+        VALUES (?,?,?,?,'pending',?)""",
+        (tenant_id, staff_id, requested_plan, message, now))
+    con.commit()
+    request_id = cur.lastrowid
+
+    to_email = os.environ.get("OPS_ALERT_EMAIL")
+    if to_email:
+        try:
+            import senders
+            tenant_row = con.execute("SELECT name FROM tenants WHERE id=?", (tenant_id,)).fetchone()
+            tenant_name = tenant_row["name"] if tenant_row else f"tenant#{tenant_id}"
+            subject = f"【AshiBase】プラン変更のご相談({tenant_name})"
+            body = (f"テナント: {tenant_name} (id={tenant_id})\n"
+                    f"申請ID: {request_id}\n"
+                    f"希望プラン: {requested_plan}\n\n"
+                    f"補足:\n{message or '(記載なし)'}\n\n"
+                    f"hq.htmlの「プラン変更申請」から対応してください。")
+            default_sender = senders.Sender(name="AshiBase（足場ベース）", email="info@ashibase.jp",
+                                             address="", optout_url="https://ashibase.jp/optout")
+            mailer = senders.MailSender(con, dry_run=False)
+            mailer._deliver(senders.Recipient(company_id=0, name="運用担当", email=to_email),
+                            default_sender, subject, body)
+        except Exception:  # noqa: BLE001
+            pass  # メール失敗は申請の成立を妨げない(hq.htmlの一覧が正のデータ源)
+
+    return 200, {"ok": True, "request_id": request_id}
+
+
 _SENDER_OVERRIDE_KEYS = {"name", "email", "postal_code", "prefecture", "city", "block", "building",
                           "department", "position", "last_name", "first_name",
                           "last_name_kana", "first_name_kana", "phone"}
@@ -1705,6 +1772,33 @@ def h_ops_tenant_staff_create(con, tenant_id, data):
     return 200, {"ok": True, "staff_id": res["staff_id"], "api_key": res["api_key"]}
 
 
+def h_ops_plan_change_requests_list(con):
+    """hq.html用: 全テナントのプラン変更申請を新しい順に返す(T53)。
+    件数が今後増えても運用が破綻しないよう直近200件に絞る(必要なら
+    ページングを足すが、β運用の申請件数を考えると当面これで十分)。"""
+    rows = con.execute("""SELECT r.id, r.tenant_id, t.name AS tenant_name, r.staff_id,
+            r.requested_plan, r.message, r.status, r.created_at, r.resolved_at
+        FROM plan_change_requests r JOIN tenants t ON t.id=r.tenant_id
+        ORDER BY r.created_at DESC LIMIT 200""").fetchall()
+    return 200, {"requests": [dict(r) for r in rows]}
+
+
+def h_ops_plan_change_request_resolve(con, request_id, data):
+    """申請を対応済みにする。実際のプラン変更(tenants.plan_name等)は
+    ここでは行わない——本部が別途、顧客との合意内容に応じて手動で更新する
+    (料金体系が未確定のため、金額を伴う変更を自動化しない方針。T53)。"""
+    row = con.execute("SELECT status FROM plan_change_requests WHERE id=?", (request_id,)).fetchone()
+    if not row:
+        return 404, {"error": "申請が見つかりません"}
+    if row["status"] == "done":
+        return 200, {"ok": True}  # 既に対応済み(再クリック等)。冪等に成功扱いにする
+    now = datetime.now().isoformat(timespec="seconds")
+    con.execute("UPDATE plan_change_requests SET status='done', resolved_at=? WHERE id=?",
+                (now, request_id))
+    con.commit()
+    return 200, {"ok": True}
+
+
 # ── HTTPサーバ ──────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def _json(self, status, obj):
@@ -1782,6 +1876,17 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
+        ops_plan_resolve_match = _OPS_PLAN_CHANGE_RESOLVE_PATH_RE.match(path)
+        if ops_plan_resolve_match:
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                st, res = h_ops_plan_change_request_resolve(con, int(ops_plan_resolve_match.group(1)), data)
+                return self._json(st, res)
+            finally:
+                con.close()
+
         send_match = _SEND_PATH_RE.match(path)
         outcome_match = _OUTCOME_PATH_RE.match(path)
         autofill_match = _AUTOFILL_QUEUE_PATH_RE.match(path)
@@ -1796,7 +1901,8 @@ class Handler(BaseHTTPRequestHandler):
         search_log_save_match = _SEARCH_LOG_SAVE_PATH_RE.match(path)
         if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv",
                      "/api/tenant/lists/delete", "/api/tenant/lists/restore",
-                     "/api/tenant/search/filter", "/api/tenant/search/csv") \
+                     "/api/tenant/search/filter", "/api/tenant/search/csv",
+                     "/api/tenant/plan-change-request") \
                 or send_match or outcome_match or autofill_match or note_match \
                 or manual_sent_match or exec_note_match or preview_msg_match \
                 or rename_match or duplicate_match or remove_members_match \
@@ -1820,6 +1926,9 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_search_filter(con, tenant["id"], data)
                 elif path == "/api/tenant/search/csv":
                     st, res = h_tenant_search_csv(con, tenant["id"], data)
+                elif path == "/api/tenant/plan-change-request":
+                    st, res = h_tenant_plan_change_request_create(con, tenant["id"], data,
+                                                                    staff_id=tenant.get("_staff_id"))
                 elif search_log_save_match:
                     st, res = h_tenant_search_log_save(con, tenant["id"],
                                                         int(search_log_save_match.group(1)), data)
@@ -2034,7 +2143,8 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
-        if u.path in ("/api/ops/status", "/api/ops/metrics", "/api/ops/kill-switch", "/api/ops/tenants"):
+        if u.path in ("/api/ops/status", "/api/ops/metrics", "/api/ops/kill-switch", "/api/ops/tenants",
+                       "/api/ops/plan-change-requests"):
             if not verify_ops_bearer(self.headers.get("Authorization")):
                 return self._json(401, {"error": "unauthorized"})
             con = self._con()
@@ -2046,6 +2156,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(st, res)
                 if u.path == "/api/ops/tenants":
                     st, res = h_ops_tenants_list(con)
+                    return self._json(st, res)
+                if u.path == "/api/ops/plan-change-requests":
+                    st, res = h_ops_plan_change_requests_list(con)
                     return self._json(st, res)
                 campaign = qs.get("campaignId", [None])[0]
                 return self._json(200, metrics.compute(con, int(campaign) if campaign else None))
@@ -2067,7 +2180,8 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/announcements"
                 or u.path == "/api/tenant/activity-log"
                 or u.path == "/api/tenant/kill-switch"
-                or u.path == "/api/tenant/dashboard"):
+                or u.path == "/api/tenant/dashboard"
+                or u.path == "/api/tenant/plan-change-request"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -2103,6 +2217,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_kill_switch_status(con, tenant["id"])
                 elif u.path == "/api/tenant/dashboard":
                     st, res = h_tenant_dashboard(con, tenant["id"])
+                elif u.path == "/api/tenant/plan-change-request":
+                    st, res = h_tenant_plan_change_request_get(con, tenant["id"])
                 elif u.path == "/api/tenant/lists":
                     st, res = h_tenant_lists_list(con, tenant["id"], qs)
                 else:
@@ -3194,6 +3310,44 @@ def self_test(port=8899):
       r["quota"]["monthly_send_quota"] == 9999)
     con.execute("UPDATE tenants SET plan_name=NULL, monthly_send_quota=NULL WHERE id=?", (tid_a,))
     con.commit()
+
+    print("\n── プラン変更申請(T53) ──")
+    st, r = post_auth("/api/tenant/plan-change-request", {"requested_plan": "ライト（4,000通/月）¥40,000"})
+    t("認証ヘッダなしのPOST /api/tenant/plan-change-requestは401", st == 401)
+    st, r = post_auth("/api/tenant/plan-change-request", {"message": "本文のみ"}, token=key_a)
+    t("requested_plan未指定は400", st == 400)
+    st, r = post_auth("/api/tenant/plan-change-request",
+                       {"requested_plan": "ライト（4,000通/月）¥40,000", "message": "検討中です"},
+                       token=key_a)
+    t("POST /api/tenant/plan-change-requestで申請が作成できる", bool(st == 200 and r.get("request_id")))
+    st, r = get_auth("/api/tenant/plan-change-request", token=key_a)
+    t("GET /api/tenant/plan-change-requestで直近の申請(pending)が返る",
+      st == 200 and r["request"] is not None
+      and r["request"]["status"] == "pending"
+      and r["request"]["requested_plan"] == "ライト（4,000通/月）¥40,000")
+    st, r = get_auth("/api/tenant/plan-change-request", token=key_b)
+    t("【テナント分離監査】他テナント(key_b)からは自分の申請しか見えない(この時点でNone)",
+      st == 200 and r["request"] is None)
+
+    st, r = get_auth("/api/ops/plan-change-requests")
+    t("認証ヘッダなしのGET /api/ops/plan-change-requestsは401", st == 401)
+    st, r = get_auth("/api/ops/plan-change-requests", token=ops_key)
+    matches = [x for x in r.get("requests", []) if x["tenant_id"] == tid_a and x["status"] == "pending"]
+    t("GET /api/ops/plan-change-requestsにテナント名付きで一覧が出る",
+      st == 200 and len(matches) == 1 and bool(matches[0]["tenant_name"]))
+    plan_request_id = matches[0]["id"]
+
+    st, r = post_auth("/api/ops/plan-change-requests/999999999/resolve", {})
+    t("存在しないIDの対応済み化は認証ヘッダなしなら401", st == 401)
+    st, r = post_auth("/api/ops/plan-change-requests/999999999/resolve", {}, token=ops_key)
+    t("存在しないIDの対応済み化は404", st == 404)
+    st, r = post_auth(f"/api/ops/plan-change-requests/{plan_request_id}/resolve", {}, token=ops_key)
+    t("POST .../resolveで申請を対応済みにできる", st == 200 and r.get("ok"))
+    st, r = post_auth(f"/api/ops/plan-change-requests/{plan_request_id}/resolve", {}, token=ops_key)
+    t("対応済みの申請にもう一度resolveしても冪等に200", st == 200 and r.get("ok"))
+    st, r = get_auth("/api/tenant/plan-change-request", token=key_a)
+    t("対応済みにすると自テナント側の直近申請もstatus=doneに変わる",
+      st == 200 and r["request"]["status"] == "done")
 
     con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (tid_a,))
     con.commit()

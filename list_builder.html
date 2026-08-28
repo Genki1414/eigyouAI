@@ -1001,12 +1001,37 @@ tr.clickable:hover{background:var(--accent-soft)}
 </div>
 
 <div class="imgmodal" id="planChangeModal">
-  <div class="imgmodal-inner" style="max-width:480px">
+  <div class="imgmodal-inner" style="max-width:640px">
     <div class="imgmodal-head">
       <b>プラン変更のご相談</b>
       <button class="ghost" id="planChangeModalClose">閉じる</button>
     </div>
     <p class="hint">申請いただいた内容をもとに、後ほど担当者よりご連絡します。実際のプラン切替は本申請の送信だけでは行われません。</p>
+
+    <details style="margin:10px 0">
+      <summary style="cursor:pointer;font-size:13px;font-weight:700">プラン比較表・他社サービスとの比較を見る</summary>
+      <div style="margin-top:8px;overflow-x:auto">
+        <table style="font-size:12px">
+          <tr><th>プラン</th><th>月間送信数</th><th>月額</th><th>1通あたり目安</th></tr>
+          <tr><td>ミニマム</td><td>500通</td><td>¥8,000</td><td>¥16</td></tr>
+          <tr><td>スターター</td><td>1,000通</td><td>¥13,000</td><td>¥13</td></tr>
+          <tr><td>ライト</td><td>4,000通</td><td>¥40,000</td><td>¥10</td></tr>
+          <tr><td>ベーシック</td><td>10,000通</td><td>¥85,000</td><td>¥8.5</td></tr>
+          <tr><td>プレミアム</td><td>20,000通</td><td>¥150,000</td><td>¥7.5</td></tr>
+        </table>
+      </div>
+      <div style="margin-top:10px;overflow-x:auto">
+        <table style="font-size:12px">
+          <tr><th>サービス</th><th>月額目安</th><th>1通あたり目安</th><th>リスト取得</th><th>備考</th></tr>
+          <tr><td><b>AshiBase(当サービス)</b></td><td>¥8,000〜</td><td>¥7.5〜16</td><td>込み(国交省データ+CSV検索)</td><td>建設業特化</td></tr>
+          <tr><td>MIKOMERU</td><td>¥48,000〜(4,000通)</td><td>約¥12</td><td>込み(30+条件で絞込)</td><td>業界問わず汎用</td></tr>
+          <tr><td>Lead Dynamics</td><td>¥39,000〜</td><td>送信数上限なし(公表)</td><td>要確認</td><td>成功率50〜80%を公表</td></tr>
+          <tr><td>業界相場(その他各社)</td><td>¥10,000〜200,000</td><td>¥10〜20(従量制の場合)</td><td>サービスによる</td><td>成果報酬型は1件¥10,000〜20,000のことも</td></tr>
+        </table>
+      </div>
+      <p class="hint" style="margin-top:6px">※他社の料金・仕様は2026年8月時点の公開情報(各社サイト・比較記事)をもとにした参考値で、変更されている場合があります。正式な金額は各社に直接ご確認ください。</p>
+    </details>
+
     <div style="margin-top:10px">
       <label>希望プラン</label>
       <select id="planChangeSelect">

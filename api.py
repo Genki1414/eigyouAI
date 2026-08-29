@@ -30,9 +30,12 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            キーを見返す手段は無い運用のため、再発行が必要なら
                            手動でDBを更新するかテナントを作り直すこと)
   POST /api/ops/tenants        {"name","sender_email","kind","sender_name",
-                           "sender_address","optout_url"} → 新規テナント作成
+                           "sender_address","optout_url","monthly_send_quota"(任意),
+                           "daily_send_quota"(任意)} → 新規テナント作成
                            (offers.add_tenant())。契約が決まった顧客へ渡す
-                           api_keyはこのレスポンスに一度だけ含まれる
+                           api_keyはこのレスポンスに一度だけ含まれる。
+                           送信上限を渡せば、作成後にDBを直接触る手作業が要らない
+                           (AI入札連携向け。T56)
   POST /api/ops/tenants/<id>/staff  {"name","email","password","role"} →
                            本部担当者が顧客に代わってログイン情報を発行する
                            (offers.register_staff(pre_verified=True)。本部が
@@ -1786,9 +1789,28 @@ def h_ops_tenants_create(con, data):
     sender_name = (data.get("sender_name") or "").strip() or None
     sender_address = (data.get("sender_address") or "").strip()
     optout_url = (data.get("optout_url") or "").strip() or None
+
+    # 任意。指定しなければNULL=既定値のまま(config.FORM_MAX_PER_TENANT_PER_*_DEFAULT)。
+    # 契約のたびに作成後DBを直接触る手作業を無くすため、作成時に渡せるようにした(T56)。
+    def opt_positive_int(key, label):
+        value = data.get(key)
+        if value is None:
+            return None, None
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            return None, f"{label}は正の整数で指定してください"
+        return value, None
+    monthly_send_quota, err = opt_positive_int("monthly_send_quota", "monthly_send_quota")
+    if err:
+        return 400, {"error": err}
+    daily_send_quota, err = opt_positive_int("daily_send_quota", "daily_send_quota")
+    if err:
+        return 400, {"error": err}
+
     tenant_id, api_key = offers.add_tenant(con, name, sender_email, kind=kind,
                                             sender_name=sender_name, sender_address=sender_address,
-                                            optout_url=optout_url)
+                                            optout_url=optout_url,
+                                            monthly_send_quota=monthly_send_quota,
+                                            daily_send_quota=daily_send_quota)
     return 200, {"ok": True, "tenant_id": tenant_id, "api_key": api_key}
 
 
@@ -4102,6 +4124,30 @@ def self_test(port=8899):
       st == 200 and bool(r.get("tenant_id")) and bool(r.get("api_key")))
     hq_tenant_id = r["tenant_id"]
     hq_tenant_key = r["api_key"]
+
+    st, r = post_auth("/api/ops/tenants",
+                      {"name": "テスト送信上限指定テナント", "sender_email": "hq-quota-test@example.co.jp",
+                       "monthly_send_quota": 500, "daily_send_quota": 50},
+                      token=ops_key)
+    t("POST /api/ops/tenantsでmonthly/daily_send_quotaを指定して作成できる(T56)",
+      st == 200 and bool(r.get("tenant_id")))
+    quota_tenant_id = r["tenant_id"]
+    quota_tenant_row = con.execute(
+        "SELECT monthly_send_quota, daily_send_quota FROM tenants WHERE id=?", (quota_tenant_id,)).fetchone()
+    t("作成時に指定したmonthly/daily_send_quotaがそのままDBに入る",
+      quota_tenant_row["monthly_send_quota"] == 500 and quota_tenant_row["daily_send_quota"] == 50)
+
+    st, r = post_auth("/api/ops/tenants",
+                      {"name": "テスト", "sender_email": "hq-quota-bad@example.co.jp",
+                       "monthly_send_quota": 0},
+                      token=ops_key)
+    t("monthly_send_quotaが0以下は400", st == 400)
+    st, r = post_auth("/api/ops/tenants",
+                      {"name": "テスト", "sender_email": "hq-quota-bad2@example.co.jp",
+                       "monthly_send_quota": "500"},
+                      token=ops_key)
+    t("monthly_send_quotaが文字列は400", st == 400)
+
     st, r = get_auth("/api/ops/tenants", token=ops_key)
     t("GET /api/ops/tenantsに作成したテナントが出る(api_keyは含まれない)",
       st == 200 and any(x["id"] == hq_tenant_id for x in r["tenants"])

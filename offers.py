@@ -130,18 +130,23 @@ def generate_api_key():
 
 
 def add_tenant(con, name, sender_email, kind="client", sender_name=None, sender_address="",
-               optout_url=None):
+               optout_url=None, monthly_send_quota=None, daily_send_quota=None):
     """他社に販売するテナントを追加する。api_keyはここで1回だけ生成し、
     呼び出し側(CLI)が画面に表示する。DBには平文で保持する(現状の他の秘密情報
-    の扱いと同水準。将来ハッシュ化するなら移行スクリプトが要る)。"""
+    の扱いと同水準。将来ハッシュ化するなら移行スクリプトが要る)。
+
+    monthly_send_quota/daily_send_quotaは任意(未指定ならNULL=既定値。
+    senders.py._check_quota()参照)。契約のたびに作成後DBを直接触る手作業を
+    無くすため、作成時に渡せるようにしている(AI入札連携向け。T56)。"""
     now = datetime.now().isoformat(timespec="seconds")
     api_key = generate_api_key()
     cur = con.execute("""INSERT INTO tenants
-        (name,kind,sender_name,sender_email,sender_address,optout_url,api_key,created_at)
-        VALUES (?,?,?,?,?,?,?,?)""",
+        (name,kind,sender_name,sender_email,sender_address,optout_url,api_key,
+         monthly_send_quota,daily_send_quota,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (name, kind, sender_name or name, sender_email, sender_address,
          optout_url or f"mailto:{sender_email}",
-         api_key, now))
+         api_key, monthly_send_quota, daily_send_quota, now))
     tid = cur.lastrowid
     # target_lists.send_list()がcampaigns.offer_id経由でテナントを解決するため、
     # 最低1件のオファーが無いと送信できない。target_ruleは呼び出し側で使わない

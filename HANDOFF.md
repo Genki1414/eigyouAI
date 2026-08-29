@@ -3074,6 +3074,15 @@ AI入札側で人力管理せざるを得なかった問題——を解消する
 非依存の確認>)。SQLite側の`api.py test`(351/351)・`senders.py test`・
 `test_pipeline.py`(47/47)・`test_concurrency.py`を全て実行し回帰なしを確認。
 
+**追記**: 同じ設計書の「B. テナント作成時に送信上限を渡せるようにする」も同時に解消した。
+`POST /api/ops/tenants`が任意項目`monthly_send_quota`/`daily_send_quota`(共に正の整数)を
+受け取れるようにし、`offers.add_tenant()`にキーワード引数として追加、`tenants`テーブルへ
+そのままINSERTする(列は既存。`senders.py._check_quota()`が読む)。未指定ならNULLのまま
+(既定値)で、既存の呼び出し元(CLI等)には影響しない。不正な値(0以下・文字列等)は400。
+契約のたびに「テナントを作ったあとDBを直接触って上限を設定する」手作業が不要になる。
+`api.py test`に3件追加(quota指定での作成・DBへそのまま入ること・0以下と文字列の400)し、
+`api.py test`(355/355)含め全スイートを再実行して回帰なしを確認。
+
 ---
 
 ## 3. やってはいけないこと

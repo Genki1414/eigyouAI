@@ -9,16 +9,30 @@
 <style>
 :root{
   --concrete:#EFF1F2; --surface:#FFFFFF; --ink:#16191D; --steel:#6E7880;
-  --line:#DDE1E4; --accent:#B4441F; --accent-soft:#FBEAE4;
+  --line:#DDE1E4; --accent:#4F8FEF; --accent-soft:#EAF2FE;
   --win:#1E7A4D; --warn:#B4441F; --mono:'IBM Plex Mono',monospace;
+  --sidebar-fg:#C7CCD6; --sidebar-fg-dim:#8A93A6;
 }
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:var(--concrete);color:var(--ink);font-family:'IBM Plex Sans JP',sans-serif;font-size:14px;line-height:1.6}
-.stripe{height:4px;background:var(--accent)}
-header{background:var(--ink);color:#fff;padding:16px 24px}
-header b{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:17px}
-header small{display:block;font-family:var(--mono);font-size:11px;color:#C7CCD6;margin-top:2px}
-.wrap{max-width:900px;margin:0 auto;padding:20px 20px 60px}
+html,body{height:100%}
+body{background:var(--concrete);color:var(--ink);font-family:'IBM Plex Sans JP',sans-serif;font-size:14px;line-height:1.6;
+  display:flex;flex-direction:column}
+.stripe{height:4px;background:var(--accent);flex-shrink:0}
+.shell{display:flex;flex:1;min-height:0}
+
+/* サイドバー(list_builder.htmlと同じ見た目に揃える。ページは1つだけなのでnav項目は無い) */
+.sidebar{width:220px;background:var(--ink);color:var(--sidebar-fg);flex-shrink:0;display:flex;flex-direction:column}
+.sidebar .brand{padding:18px 16px 14px;border-bottom:1px solid rgba(255,255,255,.1)}
+.sidebar .brand b{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:15px;color:#fff;display:block}
+.sidebar .brand small{font-size:10px;color:var(--sidebar-fg-dim);letter-spacing:.14em}
+.sidebar .foot{padding:12px 16px;margin-top:auto;border-top:1px solid rgba(255,255,255,.1);font-size:11px;color:var(--sidebar-fg-dim)}
+
+/* メイン */
+.main-wrap{flex:1;display:flex;flex-direction:column;min-width:0;overflow-y:auto}
+.topbar{background:var(--surface);border-bottom:1px solid var(--line);padding:14px 24px;
+  display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.topbar h1{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:18px}
+.content{flex:1;padding:20px 24px 60px;max-width:900px;width:100%}
 h2{font-family:'Zen Kaku Gothic New';font-weight:700;font-size:15px;margin:26px 0 10px;display:flex;align-items:center;gap:8px}
 h2:first-child{margin-top:0}
 h2::before{content:"";width:4px;height:16px;background:var(--accent)}
@@ -34,25 +48,40 @@ button.ghost{background:var(--surface);color:var(--ink);border:1px solid var(--l
 button:disabled{opacity:.4;cursor:not-allowed}
 .result{margin-top:10px;padding:10px 12px;border-radius:6px;font-size:13px;font-family:var(--mono);white-space:pre-wrap;word-break:break-all}
 .result.ok{background:#E7F5EC;color:var(--win)}
-.result.err{background:var(--accent-soft);color:var(--warn)}
+.result.err{background:#FBEAE4;color:var(--warn)}
 .status{font-family:var(--mono);font-size:11px;font-weight:600;padding:5px 12px;border-radius:99px;display:inline-block}
 .status.on{background:#E7F5EC;color:var(--win)}
-.status.off{background:var(--accent-soft);color:var(--warn)}
+.status.off{background:#FBEAE4;color:var(--warn)}
 table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-top:6px}
 th{background:var(--concrete);font-size:11px;color:var(--steel);text-align:left;padding:8px 10px}
 td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
 .hint{font-size:12px;color:var(--steel);margin-bottom:10px}
 .gated{display:none}
 .gated.show{display:block}
+@media(max-width:800px){
+  .shell{flex-direction:column}
+  .sidebar{width:100%}
+  .sidebar .foot{display:none}
+  .row{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
 <div class="stripe"></div>
-<header>
-  <b>ヒラケル本部</b>
-  <small>契約テナントの作成・ログイン情報の代行発行(社内運用専用。顧客向け画面には一切リンクしていません)</small>
-</header>
-<div class="wrap">
+<div class="shell">
+<div class="sidebar">
+  <div class="brand">
+    <b>HIRAKERU</b>
+    <small>本部専用</small>
+  </div>
+  <div class="foot">list_builder.html等の顧客向け画面とは<br>完全に切り離しています</div>
+</div>
+<div class="main-wrap">
+<div class="topbar">
+  <h1>テナント管理</h1>
+  <span class="status off" id="connStatus">未接続</span>
+</div>
+<div class="content">
 
   <h2>接続</h2>
   <div class="card">
@@ -68,7 +97,6 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
       </div>
     </div>
     <button id="btnConnect">接続</button>
-    <span class="status off" id="connStatus" style="margin-left:10px">未接続</span>
   </div>
 
   <div class="gated" id="gated">
@@ -160,6 +188,8 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
     </div>
 
   </div>
+</div>
+</div>
 </div>
 
 <script>

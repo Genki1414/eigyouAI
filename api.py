@@ -218,6 +218,11 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            senders.py._check_quota()が実際にブロック判定へ
                            使う数字と同じ計算(dashboardはカレンダー月・
                            成功数のみで意図的に別物)。AI入札連携(T55)向け
+  GET  /api/tenant/trades          営業AI側の業種語彙を返す([{"code","label"}])。
+                           config.TARGET_TRADESをそのまま返す。テナントには
+                           依存しない(認証はされるが中身は共通)。AI入札連携向け:
+                           今まではこちら側に語彙を返す手段が無く、AI入札部側で
+                           業種の対応表を人力で維持していた唯一の理由だった(T56)
   GET  /api/tenant/plan-change-request   自テナントの直近のプラン変更申請
                            (無ければnull)。pending中は画面側でボタンを
                            「申請中」表示に切り替えるために使う(T53)
@@ -1492,6 +1497,21 @@ def h_tenant_quota_get(con, tenant_id):
     return 200, {"quota": db.get_quota_status(con, tenant_id)}
 
 
+def h_tenant_trades_get():
+    """AI入札連携向け。営業AI側の業種語彙を返す(T56)。
+    docs等で言及されてきた「唯一、本当に無いもの」——AI入札側が業種の対応表
+    (「電気 = denki」等)を人力で維持している唯一の理由が、営業AI側に語彙を
+    返す手段が無いことだった。config.TARGET_TRADESをそのまま返すだけの軽量API。
+    テナントに依存しない値なので、引数にtenant_idを取らない(認証はされるが
+    中身はどのテナントでも同じ)。"""
+    import config as C
+    labels_by_code = {}
+    for label, code in C.TARGET_TRADES.items():
+        labels_by_code.setdefault(code, []).append(label)
+    trades = [{"code": code, "label": "・".join(labels)} for code, labels in labels_by_code.items()]
+    return 200, {"trades": trades}
+
+
 def h_tenant_plan_change_request_get(con, tenant_id):
     """自テナントの直近1件の申請状態を返す(T52のプラン表示ウィジェットが、
     pending中は「申請中」ボタンに切り替えるために使う。過去の全履歴は
@@ -2236,7 +2256,8 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/kill-switch"
                 or u.path == "/api/tenant/dashboard"
                 or u.path == "/api/tenant/plan-change-request"
-                or u.path == "/api/tenant/quota"):
+                or u.path == "/api/tenant/quota"
+                or u.path == "/api/tenant/trades"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -2274,6 +2295,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_dashboard(con, tenant["id"])
                 elif u.path == "/api/tenant/quota":
                     st, res = h_tenant_quota_get(con, tenant["id"])
+                elif u.path == "/api/tenant/trades":
+                    st, res = h_tenant_trades_get()
                 elif u.path == "/api/tenant/plan-change-request":
                     st, res = h_tenant_plan_change_request_get(con, tenant["id"])
                 elif u.path == "/api/tenant/lists":
@@ -3452,6 +3475,20 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/quota", token=key_b)
     t("【テナント分離監査】他テナント(key_b)のquota-purchaseは自分のquotaに影響しない",
       st == 200 and r["quota"]["addon_quota_30d"] == 0)
+
+    print("\n── 業種語彙(AI入札連携。T56) ──")
+    st, r = get_auth("/api/tenant/trades")
+    t("認証ヘッダなしのGET /api/tenant/tradesは401", st == 401)
+    st, r = get_auth("/api/tenant/trades", token=key_a)
+    trade_codes = {t_["code"] for t_ in r.get("trades", [])}
+    t("GET /api/tenant/tradesでconfig.TARGET_TRADESの業種コードが返る",
+      st == 200 and trade_codes == {"tobi", "tosou", "kaitai"})
+    tobi_row = next((t_ for t_ in r["trades"] if t_["code"] == "tobi"), None)
+    t("同じコードに複数の表示名(とび/土工)がある業種はまとめて1件になる",
+      tobi_row is not None and "とび" in tobi_row["label"] and "土工" in tobi_row["label"])
+    st, r2 = get_auth("/api/tenant/trades", token=key_b)
+    t("業種語彙はどのテナントで見ても同じ内容(テナントに依存しない共通データ)",
+      st == 200 and {t_["code"] for t_ in r2["trades"]} == trade_codes)
 
     print("\n── 送信除外設定 ──")
     # can_contact()が既にFalseな会社(他テストの副作用で反応済み等)だと

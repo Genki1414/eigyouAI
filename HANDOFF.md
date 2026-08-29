@@ -3043,11 +3043,36 @@ Postgres確認の代わりに、`db.migrate()`後の実Postgres接続に対し�
 
 **AI入札側で今後必要になるもの(未着手・このリポジトリの範囲外)**: Stripe Checkoutの
 UI・決済成功時のwebhookハンドラ(成功後に上記`POST /api/ops/tenants/<id>/quota-purchase`
-を呼ぶ)、および`packages/outreach/adapters/eigyou_ai.ts`の`sendTargetList()`に見つかった
-既存バグ(レスポンスの`payload.sent`/`payload.count`/`payload.requested`を読んでいるが、
-実際のヒラケル側`POST /api/tenant/lists/<id>/send`の応答は`payload.target_count`であり、
-現状では実送信のたびに`PARSE_INVALID`になる)の修正——どちらもユーザーとの合意がまだの
-ため着手していない。
+を呼ぶ)。**`sendTargetList()`の`payload.target_count`不一致バグは、この後のAI入札側の
+作業で修正済み**(T56参照)。
+
+---
+
+### T56. AI入札連携: 業種語彙API(`GET /api/tenant/trades`)を追加(2026-08-28)
+
+T55に続いてAI入札(`Genki1414/AInyusatsu`)側の連携作業を進める中で、先方の設計書
+`docs/reference/営業AI連携_設計.md`「営業AI側に足してほしいもの」に**「唯一、本当に
+無いもの」**として明記されていた項目——AI入札部の業種語彙(電気・清掃・警備…)とヒラケル側
+の業種コード(`tobi`/`tosou`/`kaitai`)の対応表を、ヒラケル側に語彙を返す手段が無いために
+AI入札側で人力管理せざるを得なかった問題——を解消するため実装した。
+
+**やったこと**: `config.TARGET_TRADES`(`{"とび":"tobi","土工":"tobi","塗装":"tosou",
+"解体":"kaitai"}`)をそのまま返すだけの軽量API。`GET /api/tenant/trades`
+(`h_tenant_trades_get`)。テナント認証は必要だが、返す内容はどのテナントでも同じ
+(テナント固有のデータではなく、サービス全体の業種語彙のため)。同じコードに複数の
+表示名がある場合(「とび」と「土工」がどちらも`tobi`)は「・」で連結して1件にまとめる
+(`{"code":"tobi","label":"とび・土工"}`)。
+
+**この時点でTARGET_TRADESが3業種(建設業許可業者のみ)しか無いことは変わっていない**。
+このAPIは語彙を「返す手段」を用意しただけで、業種そのものを増やす作業(MIKOMERUからの
+全業種スクレイピングによるデータ拡張。T54で着手、本稿執筆時点も継続中で本番データには
+未反映)とは別。データ拡張が終わって`TARGET_TRADES`に業種が増えれば、AI入札側は
+コードを変更せずこのAPIから自動で新しい業種を拾えるようになる、という位置づけ。
+
+**テスト**: `api.py test`に4件追加(未認証401・返る業種コードの集合が`TARGET_TRADES`と
+一致・同一コードの複数表示名が1件にまとまる・テナントを問わず同じ内容が返る<テナント
+非依存の確認>)。SQLite側の`api.py test`(351/351)・`senders.py test`・
+`test_pipeline.py`(47/47)・`test_concurrency.py`を全て実行し回帰なしを確認。
 
 ---
 

@@ -20,11 +20,16 @@ body{background:var(--concrete);color:var(--ink);font-family:'IBM Plex Sans JP',
 .stripe{height:4px;background:var(--accent);flex-shrink:0}
 .shell{display:flex;flex:1;min-height:0}
 
-/* サイドバー(list_builder.htmlと同じ見た目に揃える。ページは1つだけなのでnav項目は無い) */
+/* サイドバー(list_builder.htmlと同じ見た目・ナビゲーションの仕組みに揃える) */
 .sidebar{width:220px;background:var(--ink);color:var(--sidebar-fg);flex-shrink:0;display:flex;flex-direction:column}
 .sidebar .brand{padding:18px 16px 14px;border-bottom:1px solid rgba(255,255,255,.1)}
 .sidebar .brand b{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:15px;color:#fff;display:block}
 .sidebar .brand small{font-size:10px;color:var(--sidebar-fg-dim);letter-spacing:.14em}
+.sidebar nav{flex:1;padding:10px 0}
+.navitem{display:block;padding:9px 16px;font-size:13px;color:var(--sidebar-fg);cursor:pointer;
+  border-left:3px solid transparent;user-select:none}
+.navitem:hover{background:rgba(255,255,255,.06);color:#fff}
+.navitem.active{background:rgba(255,255,255,.1);color:#fff;border-left-color:var(--accent);font-weight:700}
 .sidebar .foot{padding:12px 16px;margin-top:auto;border-top:1px solid rgba(255,255,255,.1);font-size:11px;color:var(--sidebar-fg-dim)}
 
 /* メイン */
@@ -33,9 +38,9 @@ body{background:var(--concrete);color:var(--ink);font-family:'IBM Plex Sans JP',
   display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
 .topbar h1{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:18px}
 .content{flex:1;padding:20px 24px 60px;max-width:900px;width:100%}
-h2{font-family:'Zen Kaku Gothic New';font-weight:700;font-size:15px;margin:26px 0 10px;display:flex;align-items:center;gap:8px}
-h2:first-child{margin-top:0}
-h2::before{content:"";width:4px;height:16px;background:var(--accent)}
+/* ページ切替(list_builder.htmlと同じ。1画面に全部並べず、選んだページだけ表示する) */
+.page{display:none}
+.page.active{display:block}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
 label{font-size:12px;font-weight:700;color:var(--steel);display:block;margin-bottom:4px}
 input[type=text],input[type=password],input[type=email],select{
@@ -56,6 +61,7 @@ table{width:100%;border-collapse:collapse;background:var(--surface);border:1px s
 th{background:var(--concrete);font-size:11px;color:var(--steel);text-align:left;padding:8px 10px}
 td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
 .hint{font-size:12px;color:var(--steel);margin-bottom:10px}
+/* 未接続のうちは、接続が要るページのnav項目自体を出さない(押しても中身が無いため) */
 .gated{display:none}
 .gated.show{display:block}
 @media(max-width:800px){
@@ -74,34 +80,42 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
     <b>HIRAKERU</b>
     <small>本部専用</small>
   </div>
+  <nav>
+    <div class="navitem active" data-page="conn">接続</div>
+    <div class="gated" id="navGated">
+      <div class="navitem" data-page="tenantCreate">テナント作成</div>
+      <div class="navitem" data-page="staffCreate">スタッフ代行作成</div>
+      <div class="navitem" data-page="tenantList">テナント一覧</div>
+      <div class="navitem" data-page="planRequests">プラン変更申請</div>
+    </div>
+  </nav>
   <div class="foot">list_builder.html等の顧客向け画面とは<br>完全に切り離しています</div>
 </div>
 <div class="main-wrap">
 <div class="topbar">
-  <h1>テナント管理</h1>
+  <h1 id="pageTitle">接続</h1>
   <span class="status off" id="connStatus">未接続</span>
 </div>
 <div class="content">
 
-  <h2>接続</h2>
-  <div class="card">
-    <div class="hint">環境変数 SALES_ENGINE_API_KEY と同じ値を入力してください(Stock Factory連携APIキーと同じもの)。</div>
-    <div class="row">
-      <div>
-        <label>APIサーバURL</label>
-        <input type="text" id="apiBase" placeholder="https://ashibase.jp">
+  <div class="page active" data-page="conn">
+    <div class="card">
+      <div class="hint">環境変数 SALES_ENGINE_API_KEY と同じ値を入力してください(Stock Factory連携APIキーと同じもの)。</div>
+      <div class="row">
+        <div>
+          <label>APIサーバURL</label>
+          <input type="text" id="apiBase" placeholder="https://ashibase.jp">
+        </div>
+        <div>
+          <label>SALES_ENGINE_API_KEY</label>
+          <input type="password" id="apiKey">
+        </div>
       </div>
-      <div>
-        <label>SALES_ENGINE_API_KEY</label>
-        <input type="password" id="apiKey">
-      </div>
+      <button id="btnConnect">接続</button>
     </div>
-    <button id="btnConnect">接続</button>
   </div>
 
-  <div class="gated" id="gated">
-
-    <h2>テナント作成</h2>
+  <div class="page" data-page="tenantCreate">
     <div class="card">
       <div class="hint">契約が決まった顧客の環境を作成します。作成後に表示される api_key は一度しか表示されません(list_builder.htmlへのログインに必要な値として、そのまま顧客へ共有してください)。</div>
       <div class="row">
@@ -134,8 +148,9 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
       <button id="btnCreateTenant">テナントを作成</button>
       <div class="result" id="tenantResult" style="display:none"></div>
     </div>
+  </div>
 
-    <h2>スタッフアカウントの代行作成</h2>
+  <div class="page" data-page="staffCreate">
     <div class="card">
       <div class="hint">顧客本人と電話等で本人確認済みであることを前提に、本部が代わってログイン情報を発行します。メール認証は経由せず、その場で発行した api_key・パスワードがそのまま使えます。</div>
       <label>テナント *</label>
@@ -166,8 +181,9 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
       <button id="btnCreateStaff">アカウントを発行</button>
       <div class="result" id="staffResult" style="display:none"></div>
     </div>
+  </div>
 
-    <h2>テナント一覧</h2>
+  <div class="page" data-page="tenantList">
     <div class="card">
       <button class="ghost" id="btnRefreshTenants">再読込</button>
       <table id="tenantTable" style="display:none">
@@ -175,8 +191,9 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
         <tbody id="tenantTbody"></tbody>
       </table>
     </div>
+  </div>
 
-    <h2>プラン変更申請</h2>
+  <div class="page" data-page="planRequests">
     <div class="card">
       <div class="hint">list_builder.htmlのプラン表示から届いた相談です。対応後は「対応済みにする」を押してください
         (実際のプラン切替=tenants.plan_name等の更新は、ここではなく顧客との合意後に別途手動で行ってください)。</div>
@@ -186,8 +203,8 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
         <tbody id="planRequestTbody"></tbody>
       </table>
     </div>
-
   </div>
+
 </div>
 </div>
 </div>
@@ -199,6 +216,23 @@ let API = "", KEY = "";
 $("apiBase").value = localStorage.getItem("ashibase_hq_api_base") ||
   (location.protocol.startsWith("http") && location.port ? location.origin : "");
 $("apiKey").value = localStorage.getItem("ashibase_hq_api_key") || "";
+
+// ── ナビゲーション(単一ページ内の切替。list_builder.htmlと同じ仕組み) ──
+const PAGE_TITLES = {
+  conn: "接続",
+  tenantCreate: "テナント作成",
+  staffCreate: "スタッフアカウントの代行作成",
+  tenantList: "テナント一覧",
+  planRequests: "プラン変更申請",
+};
+function goPage(pageId) {
+  document.querySelectorAll(".navitem").forEach(n => n.classList.toggle("active", n.dataset.page === pageId));
+  document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.dataset.page === pageId));
+  $("pageTitle").textContent = PAGE_TITLES[pageId];
+}
+document.querySelectorAll(".navitem").forEach(item => {
+  item.addEventListener("click", () => goPage(item.dataset.page));
+});
 
 async function call(path, opts) {
   const res = await fetch(API.replace(/\/$/, "") + path, {
@@ -270,11 +304,13 @@ async function doConnect() {
     await refreshPlanRequests();
     $("connStatus").textContent = "接続済み";
     $("connStatus").className = "status on";
-    $("gated").classList.add("show");
+    $("navGated").classList.add("show");
+    goPage("tenantCreate");
   } catch (e) {
     $("connStatus").textContent = "接続失敗: " + e.message;
     $("connStatus").className = "status off";
-    $("gated").classList.remove("show");
+    $("navGated").classList.remove("show");
+    goPage("conn");
   }
 }
 $("btnConnect").addEventListener("click", doConnect);

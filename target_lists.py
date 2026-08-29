@@ -72,7 +72,7 @@ MAX_LIST_SIZE = 20000
 MAX_CSV_ROWS = 20000
 
 # フィルタ項目の許可リスト。顧客からの入力を直接SQLへ混ぜないための唯一の入口。
-_ALLOWED_TRADES = set(C.TARGET_TRADES.values())  # {"tobi","tosou","kaitai"}
+_ALLOWED_TRADES = set(C.TARGET_TRADES.values())  # config.TARGET_TRADESの値(コード)一覧
 _ALLOWED_RANKS = {"S", "A", "B", "C"}
 _ALLOWED_PREFS = {
     "北海道", "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県",

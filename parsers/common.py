@@ -9,7 +9,7 @@ import config as C
 
 # 建設業許可 29業種区分（建設業法 別表第一）のコード → 正式名称。
 # 都道府県名簿によっては「05」「5」のような数値コードで業種を表すため、
-# 一度この表を経由してから config.TARGET_TRADES(とび/土工/塗装/解体)へ収束させる。
+# 一度この表を経由してから config.TARGET_TRADES(対象業種のキーワード表)へ収束させる。
 TRADE_CODE_NAMES = {
     "01": "土木一式工事", "02": "建築一式工事", "03": "大工工事", "04": "左官工事",
     "05": "とび・土工・コンクリート工事", "06": "石工事", "07": "屋根工事", "08": "電気工事",
@@ -41,13 +41,13 @@ ABBREV_TO_CODE = {abbrev: f"{i:02d}" for i, abbrev in enumerate(TRADE_ABBREV_ORD
 
 
 def category_from_abbrev(abbrev: str) -> str | None:
-    """1文字略号("と"/"塗"/"解" 等) → tobi/tosou/kaitai。対象外業種・非略号はNone。"""
+    """1文字略号("と"/"塗"/"解" 等) → config.TARGET_TRADESの業種コード。対象外業種・非略号はNone。"""
     code = ABBREV_TO_CODE.get((abbrev or "").strip())
     return category_from_code(code) if code else None
 
 
 def category_from_code(code) -> str | None:
-    """業種コード(2桁 or 素の数値。"05"/"5"/5 等)→ tobi/tosou/kaitai。対象外業種はNone。"""
+    """業種コード(2桁 or 素の数値。"05"/"5"/5 等)→ config.TARGET_TRADESの業種コード。対象外業種はNone。"""
     if code is None:
         return None
     s = str(code).strip()
@@ -63,7 +63,7 @@ def category_from_code(code) -> str | None:
 
 
 def category_from_text(raw: str) -> str | None:
-    """業種名・略号のテキスト表記 → tobi/tosou/kaitai。対象外業種はNone。"""
+    """業種名・略号のテキスト表記 → config.TARGET_TRADESの業種コード。対象外業種はNone。"""
     s = (raw or "").strip()
     if not s:
         return None
@@ -88,8 +88,8 @@ def normalize_trades(raw_values) -> str:
     """
     raw_values: 1社分の業種を表す生トークンのリスト
       （"とび・土工工事業" のような業種名、"05" のようなコード、いずれも可）。
-    tobi/tosou/kaitai に変換し、重複を除いてカンマ区切りで返す。対象業種が
-    無ければ空文字列（呼び出し側で対象外として除外する）。
+    config.TARGET_TRADESの業種コードに変換し、重複を除いてカンマ区切りで返す。
+    対象業種が無ければ空文字列（呼び出し側で対象外として除外する）。
     """
     found = set()
     for v in raw_values or []:

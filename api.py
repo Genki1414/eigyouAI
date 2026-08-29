@@ -3502,9 +3502,10 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/trades")
     t("認証ヘッダなしのGET /api/tenant/tradesは401", st == 401)
     st, r = get_auth("/api/tenant/trades", token=key_a)
+    import config as C
     trade_codes = {t_["code"] for t_ in r.get("trades", [])}
     t("GET /api/tenant/tradesでconfig.TARGET_TRADESの業種コードが返る",
-      st == 200 and trade_codes == {"tobi", "tosou", "kaitai"})
+      st == 200 and trade_codes == set(C.TARGET_TRADES.values()))
     tobi_row = next((t_ for t_ in r["trades"] if t_["code"] == "tobi"), None)
     t("同じコードに複数の表示名(とび/土工)がある業種はまとめて1件になる",
       tobi_row is not None and "とび" in tobi_row["label"] and "土工" in tobi_row["label"])

@@ -34,6 +34,7 @@ parsers/tokyo.py — 東京都「建設業許可業者名簿」Excelパーサー
 """
 import re
 
+import config as C
 from . import common
 
 PREF_NAME = "東京都"
@@ -165,6 +166,6 @@ def parse(path):
     print(f"  {PREF_NAME}: 読込{n_in}行 / 対象業種{n_target}件"
           f" ({'横持ち(略号)' if wide_format else '縦持ち'}形式で解釈)")
     if n_in > 0 and n_target == 0:
-        print(f"警告: {path} から対象業種(とび・土工/塗装/解体)の会社が1件も取れませんでした。"
+        print(f"警告: {path} から対象業種({'/'.join(C.TARGET_TRADES.keys())})の会社が1件も取れませんでした。"
               f"業種列の形式・表記を確認してください。ヘッダ検出結果: {cols}"
               f" / 横持ち候補列: {trade_cols}")

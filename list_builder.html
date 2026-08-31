@@ -1262,6 +1262,7 @@ async function doConnect() {
     refreshHomeStats();
     refreshDashboard();
     refreshKillSwitch();
+    refreshTrades();
     $("autofillHint").textContent = "拡張機能をインストール済みなら「拡張機能と連携する」を押してください。";
   } catch (e) {
     connected = false;
@@ -1291,6 +1292,26 @@ async function refreshKillSwitch() {
   } catch (e) {
     killSwitchStopped = false;
     banner.style.display = "none";
+  }
+}
+
+// 業種チップをconfig.TARGET_TRADESの内容(GET /api/tenant/trades。T56)から動的に作る。
+// 以前は「とび・土工/塗装/解体」の3つを直書きしていたため、config.py側で業種を
+// 増やしてもここには反映されなかった(2026-08-29発見)。取れなくても致命的エラーには
+// せず、直書きの3業種のまま使わせる(フィルタ自体は動く)。
+async function refreshTrades() {
+  try {
+    const { trades } = await call("/api/tenant/trades");
+    if (!trades || !trades.length) return;
+    const wrap = $("fTrades");
+    const checked = new Set([...wrap.querySelectorAll("input:checked")].map(c => c.value));
+    const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    wrap.innerHTML = trades.map(t => {
+      const on = checked.has(t.code);
+      return `<label class="chip${on ? " on" : ""}"><input type="checkbox" value="${esc(t.code)}"${on ? " checked" : ""}>${esc(t.label)}</label>`;
+    }).join("");
+  } catch (e) {
+    // 3業種のまま使わせる
   }
 }
 

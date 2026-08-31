@@ -1506,12 +1506,20 @@ def h_tenant_trades_get():
     (「電気 = denki」等)を人力で維持している唯一の理由が、営業AI側に語彙を
     返す手段が無いことだった。config.TARGET_TRADESをそのまま返すだけの軽量API。
     テナントに依存しない値なので、引数にtenant_idを取らない(認証はされるが
-    中身はどのテナントでも同じ)。"""
+    中身はどのテナントでも同じ)。
+
+    group(config.TARGET_TRADE_GROUPS)も含める(2026-08-29追加。list_builder.html
+    の業種チップをmikomeruと同じグループ単位で開閉できるようにするため)。
+    未登録のコードは「その他」にする(将来コードを増やしてグループ登録を
+    忘れても、この画面自体は壊れないようにするため)。"""
     import config as C
     labels_by_code = {}
     for label, code in C.TARGET_TRADES.items():
         labels_by_code.setdefault(code, []).append(label)
-    trades = [{"code": code, "label": "・".join(labels)} for code, labels in labels_by_code.items()]
+    trades = [
+        {"code": code, "label": "・".join(labels), "group": C.TARGET_TRADE_GROUPS.get(code, "その他")}
+        for code, labels in labels_by_code.items()
+    ]
     return 200, {"trades": trades}
 
 
@@ -3509,6 +3517,9 @@ def self_test(port=8899):
     tobi_row = next((t_ for t_ in r["trades"] if t_["code"] == "tobi"), None)
     t("同じコードに複数の表示名(とび/土工)がある業種はまとめて1件になる",
       tobi_row is not None and "とび" in tobi_row["label"] and "土工" in tobi_row["label"])
+    t("各業種にgroup(config.TARGET_TRADE_GROUPS)が付く", tobi_row is not None and tobi_row["group"] == "建設・工事")
+    unknown_group_count = sum(1 for t_ in r["trades"] if t_["group"] == "その他")
+    t("TARGET_TRADE_GROUPSに登録漏れが無い(「その他」が0件)", unknown_group_count == 0)
     st, r2 = get_auth("/api/tenant/trades", token=key_b)
     t("業種語彙はどのテナントで見ても同じ内容(テナントに依存しない共通データ)",
       st == 200 and {t_["code"] for t_ in r2["trades"]} == trade_codes)

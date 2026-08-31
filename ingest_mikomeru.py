@@ -31,11 +31,14 @@ _ZEN2HAN_DIGIT = str.maketrans("０１２３４５６７８９，", "0123456789,
 # 国交省名簿のような許可情報ではなく事業内容の自己申告文言なので、あくまで参考値。
 # 「電気工事」は「電気通信工事」(別業種)と誤って一致しないよう、単に「電気」
 # ではなく「電気工事」で判定する(config.py TARGET_TRADESと同じ考え方)。
+# 「電気設備工事」も追加(2026-08-29: 実データで確認したところ、mikomeruの電気工事業者は
+# 「電気工事」ではなくほぼ全て「電気設備工事」「産業用電気設備工事」という表記だった。
+# 後者は前者を含むため1つの追加で両方拾える)。
 TRADE_KEYWORDS = {
     "tobi": ["とび", "土工"],
     "kaitai": ["解体"],
     "tosou": ["塗装"],
-    "denki": ["電気工事"],
+    "denki": ["電気工事", "電気設備工事"],
     "zouen": ["造園"],
 }
 
@@ -145,17 +148,24 @@ def main(csv_path):
 
         rep_id = find_representative(con, name_norm, pref)
         if rep_id:
-            cur = con.execute("SELECT website_url, has_website FROM companies WHERE id=?",
+            cur = con.execute("SELECT website_url, has_website, trades FROM companies WHERE id=?",
                                (rep_id,)).fetchone()
             new_website = cur["website_url"] or website_url
             new_has_website = 1 if (cur["has_website"] == 1 or website_url) else cur["has_website"]
+            # trades も既存レコード更新のたびに合わせる(足すだけで既存分は消さない)。
+            # TRADE_KEYWORDSを直したあとの再取込で、既存社の業種判定も追いつくようにするため
+            # (以前はここでtradesを一切更新しておらず、初回INSERT時の判定のまま固定されていた)
+            existing_trades = {t for t in (cur["trades"] or "").split(",") if t}
+            csv_trades = {t for t in (map_trades(r.get("業種")) or "").split(",") if t}
+            merged_trades = ",".join(sorted(existing_trades | csv_trades)) or None
             con.execute("""UPDATE companies SET
                 website_url=?, has_website=?,
                 contact_url=COALESCE(NULLIF(contact_url,''), ?),
                 has_contact_form=COALESCE(has_contact_form, ?),
-                corporate_no=COALESCE(NULLIF(corporate_no,''), ?)
+                corporate_no=COALESCE(NULLIF(corporate_no,''), ?),
+                trades=?
                 WHERE id=?""",
-                (new_website, new_has_website, contact_url, has_form, corporate_no, rep_id))
+                (new_website, new_has_website, contact_url, has_form, corporate_no, merged_trades, rep_id))
             updated += 1
             continue
 

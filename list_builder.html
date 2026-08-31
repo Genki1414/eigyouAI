@@ -802,9 +802,7 @@ tr.clickable:hover{background:var(--accent-soft)}
         <h2>共有マスタから条件で絞り込む <span>FILTER</span></h2>
         <div class="card">
           <div id="filterInputs">
-          <label>エリア(クリックで管内の都道府県をまとめて選択/解除)</label>
-          <div class="chips" id="fAreas"></div>
-          <label style="margin-top:10px">都道府県(複数選択可)</label>
+          <label>エリア・都道府県(地方名クリックで開閉、地方名のチェックで管内の都道府県をまとめて選択/解除)</label>
           <div class="chips" id="fPrefs"></div>
           <label style="margin-top:10px">資本金の上限</label>
           <div class="chips" id="fCapital">
@@ -1152,27 +1150,29 @@ const AREAS = [
   ["四国", ["徳島県", "香川県", "愛媛県", "高知県"]],
   ["九州・沖縄", ["福岡県", "佐賀県", "長崎県", "熊本県", "大分県", "宮崎県", "鹿児島県", "沖縄県"]],
 ];
-const areasWrap = document.getElementById("fAreas");
 const prefsWrap = document.getElementById("fPrefs");
 
-AREAS.forEach(([label, prefs]) => {
-  const chip = document.createElement("label");
-  chip.className = "chip";
-  chip.dataset.prefs = prefs.join(",");
-  chip.innerHTML = `<input type="checkbox">${label}`;
-  areasWrap.appendChild(chip);
-  prefs.forEach(p => {
-    const pchip = document.createElement("label");
-    pchip.className = "chip";
-    pchip.innerHTML = `<input type="checkbox" value="${p}">${p}`;
-    prefsWrap.appendChild(pchip);
-  });
-});
+// 業種(#fTrades)と同じ開閉式に統一(2026-08-31)。地方名チップ自体が
+// 「管内の都道府県を全選択/全解除」を兼ねているので、業種の「全選択」ボタンとは違い
+// 見出し内にチェックボックス付きチップとして置く。見出しの残り(件数バッジ・
+// 開閉矢印)をクリックした時だけ開閉し、地方名チップのクリックは開閉に波及させない
+prefsWrap.innerHTML = AREAS.map(([label, prefs]) => {
+  const prefChips = prefs.map(p => `<label class="chip"><input type="checkbox" value="${p}">${p}</label>`).join("");
+  return `<div class="tradegroup">
+    <div class="tradegroup-head">
+      <label class="chip areachip" data-prefs="${prefs.join(",")}"><input type="checkbox">${label}</label>
+      <span class="tradegroup-count">${prefs.length}</span>
+      <span class="tradegroup-toggle">▼</span>
+    </div>
+    <div class="tradegroup-body">${prefChips}</div>
+  </div>`;
+}).join("");
 
 function syncAreaChips() {
-  areasWrap.querySelectorAll(".chip").forEach(areaChip => {
+  prefsWrap.querySelectorAll(".tradegroup").forEach(group => {
+    const areaChip = group.querySelector(".areachip");
     const prefs = areaChip.dataset.prefs.split(",");
-    const allOn = prefs.every(p => prefsWrap.querySelector(`input[value="${CSS.escape(p)}"]`).checked);
+    const allOn = prefs.every(p => group.querySelector(`.tradegroup-body input[value="${CSS.escape(p)}"]`).checked);
     areaChip.querySelector("input").checked = allOn;
     areaChip.classList.toggle("on", allOn);
   });
@@ -1183,27 +1183,33 @@ function syncAreaChips() {
 // "click"を自前でも拾うと二重トグルで見た目上何も起きなくなるため、
 // 実際にchecked状態が変わった時だけ1回発火する"change"だけを使う。
 
-// エリアチップ: チェックの変化で管内の都道府県チェックを一括ON/OFFへ揃える
-areasWrap.addEventListener("change", e => {
-  const chip = e.target.closest(".chip");
-  if (!chip) return;
-  const turnOn = e.target.checked;
-  chip.classList.toggle("on", turnOn);
-  chip.dataset.prefs.split(",").forEach(p => {
-    const pbox = prefsWrap.querySelector(`input[value="${CSS.escape(p)}"]`);
-    if (pbox.checked !== turnOn) {
-      pbox.checked = turnOn;
-      pbox.closest(".chip").classList.toggle("on", turnOn);
-    }
-  });
-});
-
-// 都道府県チップ: 個別でも選択でき、エリアチップの見た目(全選択/一部選択)を追従させる
+// 地方チップ・都道府県チップどちらのchangeもここに来る。地方チップなら管内の
+// 都道府県チェックを一括ON/OFFへ揃え、都道府県チップなら地方チップの見た目
+// (全選択/一部選択)を追従させる
 prefsWrap.addEventListener("change", e => {
   const chip = e.target.closest(".chip");
   if (!chip) return;
   chip.classList.toggle("on", e.target.checked);
-  syncAreaChips();
+  if (chip.classList.contains("areachip")) {
+    const turnOn = e.target.checked;
+    const group = chip.closest(".tradegroup");
+    chip.dataset.prefs.split(",").forEach(p => {
+      const pbox = group.querySelector(`.tradegroup-body input[value="${CSS.escape(p)}"]`);
+      if (pbox.checked !== turnOn) {
+        pbox.checked = turnOn;
+        pbox.closest(".chip").classList.toggle("on", turnOn);
+      }
+    });
+  } else {
+    syncAreaChips();
+  }
+});
+
+// 見出しクリックで地方ブロックを開閉(地方名チップ自体のクリックは選択操作なので除外)
+prefsWrap.addEventListener("click", e => {
+  if (e.target.closest(".areachip")) return;
+  const head = e.target.closest(".tradegroup-head");
+  if (head) head.closest(".tradegroup").classList.toggle("open");
 });
 
 // 都道府県以外の既存チップ(業種・ランク・その他条件)は単純トグルのまま
@@ -2279,7 +2285,7 @@ async function refreshOtherLog() {
 $("btnPrintManual").addEventListener("click", () => window.print());
 
 function currentFilters() {
-  const prefs = [...prefsWrap.querySelectorAll("input:checked")].map(c => c.value);
+  const prefs = [...prefsWrap.querySelectorAll(".tradegroup-body input:checked")].map(c => c.value);
   const trades = [...document.querySelectorAll("#fTrades input:checked")].map(c => c.value);
   const ranks = [...document.querySelectorAll("#fRanks input:checked")].map(c => c.value);
   const f = {};

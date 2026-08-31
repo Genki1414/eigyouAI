@@ -21,14 +21,210 @@ TRACK_BASE_URL = os.environ.get("TRACK_BASE_URL", "https://ashibase.jp")
 # 誤って重ならない粒度で書くこと(例: 「電気工事」は22番「電気通信工事」には
 # 一致しない。「電気」だけだと一致してしまうため不可)。
 #
-# 【AI入札連携(AInyusatsu)向けに電気・造園を追加(2026-08-29)】
-# AI入札部が必要とする業種(docs参照)のうち、建設業許可29業種と1:1で
-# 対応するのはこの2つだけ。他(清掃・警備・情報処理・廃棄物処理・給食等)は
-# 建設業許可の枠外の業種で、この名簿には登録が無い。データソースの選定は
-# 別途必要(eigyouAI HANDOFF.md「5. 連絡すべき判断」)。
+# 【mikomeruの業種分類を全件登録(2026-08-29、ユーザー指示)】
+# 最初はAI入札連携(AInyusatsu)向けに電気・造園・空調の3つだけを追加したが、
+# 「スクショした業種を全て追加」との指示で、mikomeruの「業種で絞り込む」画面に
+# 出ている分類(建設・工事/自動車・乗り物/機械関連サービス/電気製品/機械製造/製造/
+# 食品/生活用品/外食/小売の10グループ・176項目)をここに登録した。
+# mikomeruの分類名の大半は建設業許可29業種(parsers/common.py TRADE_CODE_NAMES)には
+# 存在しない語彙のため、国交省名簿からは拾えず、mikomeruの取込
+# (ingest_mikomeru.py)経由でのみ値が入る。ここに登録するのは、コードを
+# 「対象」として_ALLOWED_TRADESと/api/tenant/tradesの語彙に載せるため。
+# コード名はカタカナ・漢字部分をローマ字化して機械的に付けたもの(可読性より
+# 一意性を優先。対応表を書くのは本部で、コードそのものを人が読む場面は少ない)。
+# なお「電気設備工事」「産業用電気設備工事」「とび・土工工事」「解体工事」
+# 「造園・庭園設計工事」はそれぞれ既存の denki/tobi/kaitai/zouen に部分一致
+# するため、重複コードを新設していない(zouenのみキーワードを1つ追加)。
+# まだ「運輸・物流/人材系/医療・福祉・バイオ/広告/商社関連」以降のグループは
+# 未登録(スクリーンショットが届き次第、追加すること)。
+#
+# 清掃・警備・情報処理・廃棄物処理・給食等、AI入札部が必要とする業種のうち
+# mikomeruにも存在しないものは引き続き対象外。別データソースの選定が必要
+# (eigyouAI HANDOFF.md「5. 連絡すべき判断」)。
 TARGET_TRADES = {
     "とび": "tobi", "土工": "tobi", "塗装": "tosou", "解体": "kaitai",
-    "電気工事": "denki", "造園工事": "zouen",
+    "電気工事": "denki", "造園工事": "zouen", "空調設備工事": "kucho",
+
+    # 建設・工事
+    "土木・インフラ工事": "doboku",
+    "衛生設備工事": "eiseisetsubikouj",
+    "プラント設備工事": "purantosetsubiko",
+    "住宅・オフィス向け設備工事": "juutaku",
+    "ビル建設": "birukensetsu",
+    "通信設備工事": "tsuushinsetsubik",
+    "建築専門工事": "kenchikusenmonko",
+    "交通関連工事": "koutsuukanrenkou",
+    "商業施設・公共施設建設": "shougyoushisetsu",
+    "建築設計・施工管理": "kenchikusekkei",
+    "総合土木工事": "sougoudobokukouj",
+    "窯業系建材製造": "yougyoukeikenzai",
+    "注文住宅建築": "chuumonjuutakuke",
+    "住宅リフォーム・改修工事": "juutakurifoomu",
+    "木材・建材製造": "mokuzai",
+    "建造物建築・設計": "kenzoubutsukench",
+    "総合建設・ゼネコン": "sougoukensetsu",
+    "金属系建材製造": "kinzokukeikenzai",
+    "事業用リフォーム": "jigyouyourifoomu",
+    "樹脂系建材製造": "jushikeikenzaise",
+    "分譲型住宅建築": "bunjoukatajuutak",
+    "インテリアデザイン・空間設計": "interiadezain",
+    "リフォーム": "rifoomu",
+    "太陽光パネル設置": "taiyoukoupanerus",
+    "河川・港湾工事": "kasen",
+    "マンション建築・施工": "manshonkenchiku",
+    "燃料タンク工事": "nenryoutankukouj",
+    # 自動車・乗り物
+    "自動車部品・カーアクセサリー製造": "jidoushabuhin",
+    "自動車製造": "jidoushaseizou",
+    "ゴム製品・タイヤ製造": "gomuseihin",
+    "自動車整備・修理": "jidoushaseibi",
+    "二輪車・バイク製造": "nirinsha",
+    "レンタカー・リースサービス": "rentakaa",
+    "自動車関連サービス": "jidoushakanrensa",
+    "宇宙開発・宇宙産業": "uchuukaihatsu",
+    "その他乗り物": "sonohokanorimono",
+    # 機械関連サービス
+    "機械レンタル・リース": "kikairentaru",
+    "プラントエンジニアリング": "purantoenjiniari",
+    "機械修理": "kikaishuuri",
+    "機械設計": "kikaisekkei",
+    "その他機械関連サービス": "sonohokakikaikan",
+    # 電気製品
+    "家電製品製造": "kadenseihinseizo",
+    "音響・映像機器製造": "onkyou",
+    "照明器具製造": "shoumeikiguseizo",
+    "その他電気製品製造": "sonohokadenkisei",
+    # 機械製造
+    "電子部品製造": "denshibuhinseizo",
+    "試験機製造": "shikenkiseizou",
+    "工具製造": "kouguseizou",
+    "印刷機械製造": "insatsukikaiseiz",
+    "産業用ロボット・オートメーション機器製造": "sangyouyourobott",
+    "建設機械製造": "kensetsukikaisei",
+    "半導体・半導体関連装置製造": "handoutai",
+    "工作機械製造": "kousakukikaiseiz",
+    "空調機": "kuuchouki",
+    "金型製造": "kanagataseizou",
+    "センサー・計測機器製造": "sensaa",
+    "精密機器製造": "seimitsukikiseiz",
+    "発電・電力設備製造": "hatsuden",
+    "農業・漁業機械製造": "nougyou",
+    "動力装置製造": "douryokusouchise",
+    "アミューズメント機器製造": "amyuuzumentokiki",
+    "水処理機械製造": "mizushorikikaise",
+    "エレベーター・エスカレーター製造": "erebeetaa",
+    "自動販売機・自動サービス機": "jidouhanbaiki",
+    "食品加工機械製造": "shokuhinkakoukik",
+    "厨房機器関連製造": "chuuboukikikanre",
+    "交通機器製造": "koutsuukikiseizo",
+    "ポンプ製造": "ponpuseizou",
+    "化学機械製造": "kagakukikaiseizo",
+    "溶接機械製造": "yousetsukikaisei",
+    "プラスチック成形機械製造": "purasuchikkuseik",
+    "光学機器・レンズ製造": "kougakukiki",
+    "非金属加工機械製造": "hikinzokukakouki",
+    "ボイラー製造": "boiraaseizou",
+    "その他機械製造": "sonohokakikaisei",
+    # 製造
+    "金属製品製造": "kinzokuseihinsei",
+    "鉄鋼製造": "tekkouseizou",
+    "防災・防犯機器": "bousai",
+    "金属部品製造": "kinzokubuhinseiz",
+    "電線・ケーブル製造": "densen",
+    "包装資材製造": "housoushizaiseiz",
+    "ガラス製品製造": "garasuseihinseiz",
+    "繊維製造": "seniseizou",
+    "非鉄金属製造": "hitetsukinzokuse",
+    "金属加工請負": "kinzokukakouukeo",
+    "電池製品製造": "denchiseihinseiz",
+    "製紙・パルプ製造": "seishi",
+    "パイプ・バルブ製造": "paipu",
+    "作業関連用品製造": "sagyoukanrenyouh",
+    "プラスチック包装資材製造": "purasuchikkuhous",
+    "ステンレス製品製造": "sutenresuseihins",
+    "皮革製品製造": "hikakuseihinseiz",
+    "その他製品製造": "sonohokaseihinse",
+    # 食品
+    "健康食品製造": "kenkoushokuhinse",
+    "酒・ワイン製造販売": "sake",
+    "飲料製造": "inryouseizou",
+    "缶詰・レトルト・冷凍食品製造": "kanzume",
+    "水産製造・販売関連": "suisanseizou",
+    "食肉製造・販売関連": "shokunikuseizou",
+    "和菓子製造": "wagashiseizou",
+    "農業関連": "nougyoukanren",
+    "米飯・惣菜製造": "beihan",
+    "調味料製造": "choumiryouseizou",
+    "菓子製造全般": "kashiseizouzenpa",
+    "コーヒー製造・販売": "koohiiseizou",
+    "洋菓子製造": "yougashiseizou",
+    "パン製造": "panseizou",
+    "乳製品": "nyuuseihin",
+    "麺類製造": "menruiseizou",
+    "製粉・食用油製造": "seifun",
+    "漬物・煮物・大豆製造": "tsukemono",
+    "その他食品製造全般": "sonohokashokuhin",
+    # 生活用品
+    "日用品・雑貨製造販売": "nichiyouhin",
+    "オフィス用品・オフィス家具": "ofisuyouhin",
+    "タバコ製造": "tabakoseizou",
+    "眼鏡・コンタクトレンズ製造": "megane",
+    "スポーツ用品製造": "supootsuyouhinse",
+    "家具製造": "kaguseizou",
+    "洗面用品製品製造": "senmenyouhinseih",
+    "玩具・ホビー製造": "gangu",
+    "ギフト・お土産": "gifuto",
+    "乳幼児用品製造": "nyuuyoujiyouhins",
+    "雑貨・インテリア製造": "zakka",
+    "文房具・オフィス用品製造": "bunbougu",
+    "店舗家具・什器製造": "tenpokagu",
+    "仏具・宗教用品": "butsugu",
+    "美術品・工芸品": "bijutsuhin",
+    "輸入雑貨販売": "yunyuuzakkahanba",
+    "その他生活用品全般": "sonotashoukatsuy",
+    # 外食
+    "和食・家庭料理": "washoku",
+    "寿司・海鮮料理関連": "sushi",
+    "デリバリー・中食サービス": "deribarii",
+    "ファストフード": "fasutofuudo",
+    "居酒屋・バー": "izakaya",
+    "カフェ・喫茶店": "kafe",
+    "給食・食堂": "kyuushoku",
+    "ファミリーレストラン": "famiriiresutoran",
+    "洋食・西洋料理": "youshoku",
+    "麺類店": "menruimise",
+    "肉料理専門店": "nikuryourisenmon",
+    "アジアン・エスニック料理": "ajian",
+    "その他外食": "sonohokagaishoku",
+    # 小売
+    "自社型オンラインストア": "jishakataonrains",
+    "医薬品販売": "iyakuhinhanbai",
+    "スーパーマーケット": "suupaamaaketto",
+    "アパレルショップ": "aparerushoppu",
+    "小売店舗・施設": "kouritenho",
+    "ガソリンスタンド": "gasorinsutando",
+    "古本・リサイクルショップ": "furuhon",
+    "食品関連": "shokuhinkanren",
+    "中古車販売": "chuukoshahanbai",
+    "eコマース・オンラインモール": "ekomaasu",
+    "自動車部品・カーアクセサリー販売": "jidoushabuhin2",
+    "自動車・自転車販売": "jidousha",
+    "化粧品販売": "keshouhinhanbai",
+    "書籍・マルチメディア販売": "shoseki",
+    "家具・インテリア販売": "kagu",
+    "スポーツ用品販売": "supootsuyouhinha",
+    "作業関連用品販売": "sagyoukanrenyouh2",
+    "新車販売": "shinshahanbai",
+    "フラワーショップ・花屋": "furawaashoppu",
+    "眼鏡・コンタクトレンズ販売": "megane2",
+    "乳製品宅配": "nyuuseihintakuha",
+    "パソコン・スマホ周辺機器販売": "pasokon",
+    "ジュエリー・アクセサリーショップ": "juerii",
+    "美容グッズ販売": "biyouguzzuhanbai",
+    "コンビニ": "konbini",
+    "百貨店": "hyakkaten",
+    "子供服関連ショップ": "kodomofukukanren",
+    "その他小売": "sonohokakouri",
 }
 
 # ── スコアリング V1 ────────────────────────

@@ -885,7 +885,10 @@ tr.clickable:hover{background:var(--accent-soft)}
             <label class="chip"><input type="checkbox" id="fContact">問い合わせフォームURL確定済みのみ</label>
           </div>
           </div>
-          <div class="btnrow"><button id="btnRunFilterSearch" disabled>🔍 検索</button></div>
+          <div class="btnrow" style="align-items:center">
+            <button id="btnRunFilterSearch" disabled>🔍 検索</button>
+            <span id="filterLiveCount" class="hint" style="margin-top:0"></span>
+          </div>
           <div id="previewResult"></div>
           <div class="btnrow" id="filterSaveRow" style="display:none">
             <button id="btnOpenSaveFilterModal">📋 リスト保存</button>
@@ -1144,6 +1147,7 @@ function goPage(pageId) {
   if (pageId === "sendlog") { populateSendLogExecListFilter(); refreshSendLogExecutions(); }
   if (pageId === "sendlog-detail") refreshSendLog();
   if (pageId === "searchlog") { $("searchLogDetailWrap").innerHTML = ""; refreshSearchLog(); }
+  if (pageId === "filter") updateFilterLiveCount();
   if (pageId === "exclude-list") refreshExclusions();
   if (pageId === "suppression") refreshSuppression();
   if (pageId === "tmpl-body-list") refreshTemplates();
@@ -2463,6 +2467,34 @@ async function runFilterSearch() {
   }
 }
 $("btnRunFilterSearch").addEventListener("click", runFilterSearch);
+
+// 選択中の条件で該当件数を検索ボタンの横にリアルタイム表示する(2026-09-09、
+// ユーザー要望)。runFilterSearch()(検索ボタン)側は結果テーブル・
+// 「リスト保存」への導線を兼ねる本検索なのでそのまま残し、こちらは件数だけを
+// 軽量に取得するPOST /api/tenant/lists/preview(保存もsearch_logへの記録もしない)
+// を使う。連続してチェックを変更する場合に備えデバウンス(300ms)し、応答が
+// 古い順に返ってきても最後の選択内容の結果だけを表示するようseqで判定する。
+let filterLiveCountTimer = null, filterLiveCountSeq = 0;
+async function updateFilterLiveCount() {
+  if (!connected) return;
+  const el = $("filterLiveCount");
+  const filters = currentFilters();
+  const seq = ++filterLiveCountSeq;
+  el.textContent = "件数を計算中…";
+  try {
+    const r = await call("/api/tenant/lists/preview", { method: "POST", body: JSON.stringify({ filters }) });
+    if (seq !== filterLiveCountSeq) return;
+    el.textContent = `該当 ${r.count_before_cap.toLocaleString()}件` +
+      (r.capped ? `(上限20,000件のため実際に保存されるのは20,000社)` : "");
+  } catch (e) {
+    if (seq !== filterLiveCountSeq) return;
+    el.textContent = "";
+  }
+}
+$("filterInputs").addEventListener("change", () => {
+  clearTimeout(filterLiveCountTimer);
+  filterLiveCountTimer = setTimeout(updateFilterLiveCount, 300);
+});
 
 $("btnDownloadCsvTemplate").addEventListener("click", () => {
   const tab = document.querySelector('input[name="csvTab"]:checked')?.value || "name";

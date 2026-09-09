@@ -161,10 +161,11 @@ CACもチャネル別成績も出せない = 売り物にならない。
   GET  /api/tenant/suppression    自テナントが過去に送信したことのある企業のうち
                            配信停止(suppression)済みの一覧(T74。全テナント共通の
                            テーブルをそのまま見せると他テナントの顧客情報が漏れる
-                           ため、自テナント送信実績のある企業に絞り込む)
-  POST /api/tenant/suppression/remove  {"company_id"} → 担当者による代行解除
-                           (電話等で本人から申し出があった場合の運用を想定。
-                           h_optout_undo()と同じ削除処理)
+                           ため、自テナント送信実績のある企業に絞り込む)。閲覧専用
+                           ——解除は本人(POST /api/optout/undo)からのみでき、
+                           テナント側から解除するAPIは意図的に用意していない
+                           (T75。送信側が自分の都合で配信停止を解除できてしまうと
+                           特定電子メール法の配信停止規定が骨抜きになるため)
   GET  /api/tenant/templates      自テナントの送信文章テンプレート一覧
   POST /api/tenant/templates           {"name","subject","body"} → 保存
   POST /api/tenant/templates/delete    {"template_id"} → 削除
@@ -513,8 +514,11 @@ def h_optout_undo(con, data):
     識別方法(touch_id/company_id/email)はh_optout()と揃えてある。
     未送信分の取消(touches DELETE)はh_optout()側の処理であり、解除しても
     過去に取り消した予定が自動的に復活するわけではない(取り消し後に
-    改めてリストへ追加すれば送れる、という設計。h_tenant_suppression_remove()
-    <担当者による代行解除>も同じこの関数を呼ぶ)。"""
+    改めてリストへ追加すれば送れる、という設計)。2026-09-09(T75)追記:
+    この解除は本人からの申し出でのみ成立すべきなので、公開エンドポイント
+    (この関数)以外に呼び出し経路を作らない——テナント側(担当者)が代行で
+    解除できるAPIは意図的に用意しない(送信側が自分の都合で解除できてしまうと
+    特定電子メール法の配信停止規定が骨抜きになるため)。"""
     tid, cid, _ = resolve_touch(con, data.get("touch_id"), data.get("company_id"),
                                 data.get("email"))
     if not cid:
@@ -551,68 +555,66 @@ def h_optout_page(con, qs):
     company_name = row["name"] or ""
     already = con.execute("SELECT 1 FROM suppression WHERE company_id=?", (cid,)).fetchone()
     payload = json.dumps({"touch_id": touch_id, "company_id": company_id, "email": email})
-
-    if already:
-        return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
-<title>ヒラケル — 配信停止</title>{_OPTOUT_PAGE_STYLE}</head>
-<body><div class="card">
-<h1>✓ 配信停止済みです</h1>
-<p class="msg ok">{html.escape(company_name)} 様は既に配信停止の設定が完了しています。
-今後の連絡は届きません。</p>
-<p style="margin-top:18px;font-size:12px;color:#888">誤って停止した場合や、また連絡を
-受け取りたい場合はこちらから解除できます。</p>
-<button id="btn" onclick="doUndo()">配信停止を解除する</button>
-<p id="msg" class="msg"></p>
-<script>
-async function doUndo() {{
-  const btn = document.getElementById("btn"), msg = document.getElementById("msg");
-  btn.disabled = true;
-  try {{
-    const res = await fetch("/api/optout/undo", {{method: "POST",
-      headers: {{"Content-Type": "application/json"}}, body: JSON.stringify({payload})}});
-    const data = await res.json();
-    if (res.ok && data.ok) {{
-      msg.className = "msg ok"; msg.textContent = "配信停止を解除しました。今後また連絡が届くようになります。";
-      btn.style.display = "none";
-    }} else {{
-      msg.className = "msg err"; msg.textContent = data.error || "処理に失敗しました";
-      btn.disabled = false;
-    }}
-  }} catch (e) {{
-    msg.className = "msg err"; msg.textContent = "通信に失敗しました。時間をおいて再度お試しください";
-    btn.disabled = false;
-  }}
-}}
-</script>
-</div></body></html>"""
+    # 2026-09-09: 以前は「確認画面」と「解除画面」を別々のHTMLとして返しており、
+    # ボタンを押した後は同じページ内で完結させず(=そのボタンをhideするだけ)、
+    # 「停止した直後にその場で解除したい/解除した直後にその場でまた停止したい」
+    # 場合に再読み込みが必要になっていた(ユーザー報告により発覚)。stop/undo
+    # 両方の文言と挙動を1つのページに持たせ、doAction()実行後にmode変数を
+    # 切り替えてrender()し直すことで、再読み込みなしで両方向に行き来できる
+    # ようにした。
+    copy_data = json.dumps({
+        "stop": {"title": "配信停止の確認",
+                 "desc": f"{company_name} 様への今後のご連絡を停止します。よろしいですか？",
+                 "btn": "配信を停止する"},
+        "undo": {"title": "✓ 配信停止済みです",
+                 "desc": (f"{company_name} 様は既に配信停止の設定が完了しています。"
+                          "今後の連絡は届きません。誤って停止した場合や、また連絡を"
+                          "受け取りたい場合は下のボタンから解除できます。"),
+                 "btn": "配信停止を解除する"},
+    }, ensure_ascii=False)
+    initial_mode = "undo" if already else "stop"
 
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
-<title>ヒラケル — 配信停止の確認</title>{_OPTOUT_PAGE_STYLE}</head>
+<title>ヒラケル — 配信停止</title>{_OPTOUT_PAGE_STYLE}</head>
 <body><div class="card">
-<h1>配信停止の確認</h1>
-<p>{html.escape(company_name)} 様への今後のご連絡を停止します。よろしいですか？</p>
-<button id="btn" onclick="doOptout()">配信を停止する</button>
+<h1 id="title"></h1>
+<p id="desc"></p>
+<button id="btn" onclick="doAction()"></button>
 <p id="msg" class="msg"></p>
 <script>
-async function doOptout() {{
+const PAYLOAD = {payload};
+const COPY = {copy_data};
+let mode = "{initial_mode}";
+function render() {{
+  document.getElementById("title").textContent = COPY[mode].title;
+  document.getElementById("desc").textContent = COPY[mode].desc;
+  document.getElementById("btn").textContent = COPY[mode].btn;
+}}
+async function doAction() {{
   const btn = document.getElementById("btn"), msg = document.getElementById("msg");
   btn.disabled = true;
+  const url = mode === "stop" ? "/api/optout" : "/api/optout/undo";
   try {{
-    const res = await fetch("/api/optout", {{method: "POST",
-      headers: {{"Content-Type": "application/json"}}, body: JSON.stringify({payload})}});
+    const res = await fetch(url, {{method: "POST",
+      headers: {{"Content-Type": "application/json"}}, body: JSON.stringify(PAYLOAD)}});
     const data = await res.json();
     if (res.ok && data.ok) {{
-      msg.className = "msg ok"; msg.textContent = "配信を停止しました。今後の連絡は届きません。";
-      btn.style.display = "none";
+      msg.className = "msg ok";
+      msg.textContent = mode === "stop"
+        ? "配信を停止しました。今後の連絡は届きません。"
+        : "配信停止を解除しました。今後また連絡が届くようになります。";
+      mode = mode === "stop" ? "undo" : "stop";
+      render();
     }} else {{
       msg.className = "msg err"; msg.textContent = data.error || "処理に失敗しました";
-      btn.disabled = false;
     }}
   }} catch (e) {{
     msg.className = "msg err"; msg.textContent = "通信に失敗しました。時間をおいて再度お試しください";
+  }} finally {{
     btn.disabled = false;
   }}
 }}
+render();
 </script>
 </div></body></html>"""
 
@@ -1195,22 +1197,6 @@ def h_tenant_suppression_list(con, tenant_id, qs):
         FROM suppression s LEFT JOIN companies c ON c.id = s.company_id
         WHERE {where} ORDER BY s.created_at DESC""", params).fetchall()
     return 200, {"suppression": [dict(r) for r in rows]}
-
-
-def h_tenant_suppression_remove(con, tenant_id, data):
-    """担当者による配信停止の代行解除。電話等で本人から「また連絡してほしい」
-    という申し出があった場合の運用を想定(h_optout_undo()と同じ削除処理)。
-    他テナントの顧客まで勝手に解除できてしまわないよう、自テナントが過去に
-    送信したことのある企業(h_tenant_suppression_listと同じ判定)に限定する。"""
-    company_id = data.get("company_id")
-    if not isinstance(company_id, int):
-        return 400, {"error": "company_idは必須です"}
-    if not con.execute("SELECT 1 FROM form_send_log WHERE tenant_id=? AND company_id=?",
-                       (tenant_id, company_id)).fetchone():
-        return 404, {"error": "自テナントが送信した記録のある企業のみ解除できます"}
-    n = con.execute("DELETE FROM suppression WHERE company_id=?", (company_id,)).rowcount
-    con.commit()
-    return 200, {"ok": True, "removed": bool(n)}
 
 
 _EXCLUDE_CSV_NAME_COLS = {"name", "会社名", "企業名", "法人名", "商号"}
@@ -2294,19 +2280,6 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
-        if path == "/api/tenant/suppression/remove":
-            con = self._con()
-            try:
-                tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
-                if not tenant:
-                    return self._json(401, {"error": "unauthorized"})
-                st, res = h_tenant_suppression_remove(con, tenant["id"], data)
-                return self._json(st, res)
-            except Exception as e:  # noqa: BLE001
-                return self._json(500, {"error": str(e)[:200]})
-            finally:
-                con.close()
-
         if path == "/api/tenant/scheduled-sends/cancel":
             con = self._con()
             try:
@@ -2760,8 +2733,8 @@ def self_test(port=8899):
     print("\n── 配信停止 ──")
     print("  (T73: GETは確認画面を返すだけで、ボタンを押す<POST>まで実際には停止しない)")
     st, body = get(f"/api/optout?company_id={cid}")
-    t("GET /api/optoutは確認画面(HTML)を返す",
-      st == 200 and "配信を停止する" in body.decode("utf-8"))
+    t("GET /api/optoutは確認画面(HTML)を返す(stopモードで初期表示)",
+      st == 200 and 'mode = "stop"' in body.decode("utf-8"))
     t("GETを開いただけではまだsuppressionに入らない(プリフェッチ対策)",
       con.execute("SELECT COUNT(*) FROM suppression WHERE company_id=?", (cid,)).fetchone()[0] == 0)
     st, body = get("/api/optout?company_id=999999999")
@@ -2778,8 +2751,8 @@ def self_test(port=8899):
       con.execute("SELECT COUNT(*) FROM touches WHERE company_id=? AND sent_at IS NULL",
                   (cid,)).fetchone()[0] == 0, f"取消前{before}件")
     st, body = get(f"/api/optout?company_id={cid}")
-    t("停止済み企業がGETを開くと「既に配信停止済み」画面になる",
-      st == 200 and "配信停止済みです" in body.decode("utf-8"))
+    t("停止済み企業がGETを開くと「既に配信停止済み」画面になる(undoモードで初期表示)",
+      st == 200 and 'mode = "undo"' in body.decode("utf-8"))
     allowed, why = db.can_contact(con, cid)
     t("以後 can_contact が拒否する", (not allowed) and "配信停止" in why)
 
@@ -2791,16 +2764,16 @@ def self_test(port=8899):
     t("解除前提の下準備: suppressionに入っている",
       con.execute("SELECT COUNT(*) FROM suppression WHERE company_id=?", (undo_cid,)).fetchone()[0] == 1)
     st, body = get(f"/api/optout?company_id={undo_cid}")
-    t("停止済み企業のGET画面に「解除する」ボタンがある",
-      st == 200 and "配信停止を解除する" in body.decode("utf-8"))
+    t("停止済み企業のGET画面はundoモードで初期表示される(解除する導線がある)",
+      st == 200 and 'mode = "undo"' in body.decode("utf-8"))
     st, r = post("/api/optout/undo", {"company_id": undo_cid})
     t("POST /api/optout/undoで解除できる", st == 200 and r.get("ok"))
     t("解除後はsuppressionから消える",
       con.execute("SELECT COUNT(*) FROM suppression WHERE company_id=?", (undo_cid,)).fetchone()[0] == 0)
     st, body = get(f"/api/optout?company_id={undo_cid}")
     body_text = body.decode("utf-8")
-    t("解除後のGETは通常の確認画面に戻る(既に停止済み画面ではない)",
-      st == 200 and "配信を停止する" in body_text and "配信停止を解除する" not in body_text)
+    t("解除後のGETは通常の確認画面に戻る(stopモードで初期表示。既に停止済み画面ではない)",
+      st == 200 and 'mode = "stop"' in body_text)
     allowed_undo, _ = db.can_contact(con, undo_cid)
     t("解除後はcan_contact()が再びTrueを返す", allowed_undo is True)
 
@@ -3972,15 +3945,13 @@ def self_test(port=8899):
     t("送信実績のない他テナントには出ない(顧客情報の越境防止)",
       st == 200 and all(s["company_id"] != supp_company_id for s in r.get("suppression", [])))
 
-    st, r = post_auth("/api/tenant/suppression/remove", {"company_id": "not-an-int"}, token=key_a)
-    t("company_idが整数でないと400(配信停止の代行解除)", st == 400)
-    st, r = post_auth("/api/tenant/suppression/remove", {"company_id": supp_company_id}, token=key_b)
-    t("送信実績のないテナントは代行解除できない(404)", st == 404)
+    # T75(ユーザー指摘): 「システム側(送信側)で配信停止の解除ができてはだめ」
+    # ——配信停止の解除は本人(POST /api/optout/undo)からのみ成立させる設計に
+    # 修正し、テナント側からの代行解除エンドポイント自体を撤廃した。回帰防止に
+    # 「そもそも存在しない」ことをテストで固定しておく。
     st, r = post_auth("/api/tenant/suppression/remove", {"company_id": supp_company_id}, token=key_a)
-    t("POST /api/tenant/suppression/removeで担当者が代行解除できる", st == 200 and r.get("ok"))
-    t("解除後はsuppressionから消える",
-      con.execute("SELECT COUNT(*) FROM suppression WHERE company_id=?",
-                  (supp_company_id,)).fetchone()[0] == 0)
+    t("テナント側からの配信停止解除APIは存在しない(T75。本人以外は解除できない)",
+      st == 404)
 
     con.execute("DELETE FROM form_send_log WHERE company_id=? AND tenant_id=?", (supp_company_id, tid_a))
     con.execute("DELETE FROM suppression WHERE company_id=?", (supp_company_id,))

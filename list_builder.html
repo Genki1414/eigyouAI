@@ -624,9 +624,9 @@ tr.clickable:hover{background:var(--accent-soft)}
         <h2>配信停止一覧 <span>SUPPRESSED</span></h2>
         <div class="card">
           <p class="hint">御社が送信したことのある企業のうち、配信停止(オプトアウト)の
-            申し出があった企業の一覧です。ここには登録できません(配信停止は本人からの
-            申し出でのみ成立します)。電話等で本人から「また連絡してほしい」と
-            申し出があった場合のみ、「解除」で再度送信できるようにできます。</p>
+            申し出があった企業の一覧です(閲覧専用)。配信停止の登録・解除はいずれも
+            本人からの申し出でのみ成立するため、この画面から操作することはできません
+            (解除は本人がメール等の配信停止リンクを開いて行います)。</p>
           <div class="row" style="margin-top:10px">
             <div>
               <label>会社名で絞り込み</label>
@@ -1927,27 +1927,13 @@ async function refreshSuppression() {
     const q = $("suppQuery").value.trim();
     const r = await call("/api/tenant/suppression" + (q ? `?q=${encodeURIComponent(q)}` : ""));
     if (!r.suppression.length) { el.innerHTML = `<div class="empty">配信停止中の企業はありません</div>`; return; }
-    el.innerHTML = `<table><tr><th>会社名</th><th>都道府県</th><th>理由</th><th>設定日時</th><th></th></tr>` +
+    el.innerHTML = `<table><tr><th>会社名</th><th>都道府県</th><th>理由</th><th>設定日時</th></tr>` +
       r.suppression.map(x => `<tr><td>${x.company_name || "—"}</td><td>${x.pref || "—"}</td>
         <td>${SUPPRESSION_REASON_LABELS[x.reason] || x.reason || "—"}</td>
-        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.created_at}</td>
-        <td><button class="ghost suppRemoveBtn" data-id="${x.company_id}">解除</button></td></tr>`).join("") +
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.created_at}</td></tr>`).join("") +
       `</table>`;
-    el.querySelectorAll(".suppRemoveBtn").forEach(btn => {
-      btn.addEventListener("click", () => removeSuppression(Number(btn.dataset.id)));
-    });
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
-  }
-}
-
-async function removeSuppression(companyId) {
-  if (!confirm("この企業の配信停止を解除しますか？(本人からの申し出があった場合のみ操作してください)")) return;
-  try {
-    await call("/api/tenant/suppression/remove", { method: "POST", body: JSON.stringify({ company_id: companyId }) });
-    await refreshSuppression();
-  } catch (e) {
-    $("suppListWrap").innerHTML = `<div class="result err">${e.message}</div>`;
   }
 }
 $("suppQuery").addEventListener("input", () => {

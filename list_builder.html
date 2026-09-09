@@ -1406,11 +1406,12 @@ async function refreshTrades() {
         return `<label class="chip${on ? " on" : ""}"><input type="checkbox" value="${esc(t.code)}"${on ? " checked" : ""}>${esc(t.label)}</label>`;
       }).join("");
       const openNow = items.some(t => checked.has(t.code));
+      const allOn = items.every(t => checked.has(t.code));
       return `<div class="tradegroup${openNow ? " open" : ""}">
         <div class="tradegroup-head">
           <span class="tradegroup-name">${esc(g)}</span>
           <span class="tradegroup-count">${items.length}</span>
-          <button type="button" class="ghost tradegroup-selectall">全選択</button>
+          <button type="button" class="ghost tradegroup-selectall">${allOn ? "全解除" : "全選択"}</button>
           <span class="tradegroup-toggle">▼</span>
         </div>
         <div class="tradegroup-body">${chips}</div>
@@ -1421,24 +1422,37 @@ async function refreshTrades() {
   }
 }
 
-// グループ見出しクリックで開閉、「全選択」でグループ内チェックを一括ON。
+// グループ見出しクリックで開閉、「全選択」でグループ内チェックを一括ON
+// (既に全部ONなら「全解除」として一括OFFへ切り替わるトグル)。
 // #fTrades自体に委譲しているのでrefreshTrades()が中身を作り直しても効き続ける
+function syncTradeSelectAllLabel(group) {
+  const boxes = [...group.querySelectorAll(".tradegroup-body input[type=checkbox]")];
+  const allOn = boxes.length > 0 && boxes.every(cb => cb.checked);
+  group.querySelector(".tradegroup-selectall").textContent = allOn ? "全解除" : "全選択";
+}
 $("fTrades").addEventListener("click", e => {
   const selectBtn = e.target.closest(".tradegroup-selectall");
   if (selectBtn) {
     e.preventDefault();
     e.stopPropagation();
-    const body = selectBtn.closest(".tradegroup").querySelector(".tradegroup-body");
-    body.querySelectorAll("input[type=checkbox]").forEach(cb => {
-      if (!cb.checked) {
-        cb.checked = true;
+    const group = selectBtn.closest(".tradegroup");
+    const boxes = [...group.querySelectorAll(".tradegroup-body input[type=checkbox]")];
+    const allOn = boxes.length > 0 && boxes.every(cb => cb.checked);
+    boxes.forEach(cb => {
+      if (cb.checked === allOn) {
+        cb.checked = !allOn;
         cb.dispatchEvent(new Event("change", { bubbles: true }));
       }
     });
+    syncTradeSelectAllLabel(group);
     return;
   }
   const head = e.target.closest(".tradegroup-head");
   if (head) head.closest(".tradegroup").classList.toggle("open");
+});
+$("fTrades").addEventListener("change", e => {
+  const group = e.target.closest(".tradegroup");
+  if (group) syncTradeSelectAllLabel(group);
 });
 
 function refreshHomeStats() {

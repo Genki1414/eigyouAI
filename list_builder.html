@@ -25,17 +25,33 @@ body{background:var(--concrete);color:var(--ink);font-family:'IBM Plex Sans JP',
 .sidebar .brand b{font-family:'Zen Kaku Gothic New';font-weight:900;font-size:15px;color:#fff;display:block}
 .sidebar .brand small{font-size:10px;color:var(--sidebar-fg-dim);letter-spacing:.14em}
 .sidebar nav{flex:1;padding:10px 0}
-.navgroup-label{font-size:12px;font-weight:700;color:var(--sidebar-fg);letter-spacing:.03em;padding:14px 16px 4px}
+.navgroup-label{font-size:12px;font-weight:700;color:var(--sidebar-fg);letter-spacing:.03em;padding:14px 16px 4px;
+  display:flex;align-items:center;gap:7px}
+.navgroup-step{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;
+  border-radius:5px;background:var(--accent);color:#fff;font-size:10px;font-weight:700;font-family:var(--mono)}
 .navitem{display:block;padding:9px 16px;font-size:13px;color:var(--sidebar-fg);cursor:pointer;
   border-left:3px solid transparent;user-select:none}
 .navitem:hover{background:rgba(255,255,255,.06);color:#fff}
 .navitem.active{background:rgba(255,255,255,.1);color:#fff;border-left-color:var(--accent);font-weight:700}
-/* MIKOMERUの「送信文章テンプレート ▾ > テンプレート一覧/テンプレート登録」のような
-   親見出し+子ページ2つの構成を、既存のフラットなnavitemリストの中で表現する
+/* 親見出し+子ページ2つの構成を、既存のフラットなnavitemリストの中で表現する
    (アコーディオンの開閉は実装しない。子は常に表示、親はクリック不可の見出しとして扱う) */
 .navsub-label{font-size:12px;color:var(--sidebar-fg-dim);padding:8px 16px 2px;margin-top:2px}
 .navitem.navsub{padding-left:28px;font-size:12px}
 .sidebar .foot{padding:12px 16px;border-top:1px solid rgba(255,255,255,.1);font-size:11px;color:var(--sidebar-fg-dim)}
+
+/* AI営業社員の稼働状況ウィジェット(2026-09-09、メニューの独自色付け)。
+   ダッシュボードの今月実績(refreshDashboard)とKill Switch状態(refreshKillSwitch)を
+   そのままここにも反映する。新しいAPIは呼ばず、既存の2つの定期更新に相乗りする */
+.ai-status{margin:14px 16px 2px;padding:11px 12px;background:rgba(255,255,255,.05);
+  border:1px solid rgba(255,255,255,.12);border-radius:10px;display:flex;gap:9px;align-items:flex-start}
+.ai-status-avatar{width:32px;height:32px;border-radius:50%;background:var(--accent);flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:15px}
+.ai-status-body{min-width:0;flex:1}
+.ai-status-name{font-size:11px;font-weight:700;color:#fff;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.ai-status-badge{font-size:9px;font-weight:700;padding:2px 7px;border-radius:99px;letter-spacing:.02em}
+.ai-status-badge.on{background:rgba(30,122,77,.3);color:#7BE8AC}
+.ai-status-badge.off{background:rgba(180,68,31,.3);color:#FFB48F}
+.ai-status-metric{font-size:11px;color:var(--sidebar-fg-dim);margin-top:4px;font-family:var(--mono)}
 
 /* メイン */
 .main-wrap{flex:1;display:flex;flex-direction:column;min-width:0;overflow-y:auto}
@@ -177,33 +193,42 @@ tr.clickable:hover{background:var(--accent-soft)}
 <div class="shell">
   <aside class="sidebar">
     <div class="brand"><b>HIRAKERU</b></div>
+    <div class="ai-status" id="aiStatusWidget">
+      <div class="ai-status-avatar">🤖</div>
+      <div class="ai-status-body">
+        <div class="ai-status-name">AI営業社員 <span class="ai-status-badge" id="aiStatusBadge">―</span></div>
+        <div class="ai-status-metric" id="aiStatusMetric">未接続</div>
+      </div>
+    </div>
     <nav>
-      <div class="navitem" data-page="autosend">🚀 自動送信</div>
       <div class="navitem active" data-page="home">ダッシュボード</div>
-      <div class="navitem" data-page="tutorial">🎓 チュートリアル</div>
-      <div class="navgroup-label">① 会社情報</div>
+      <div class="navgroup-label"><span class="navgroup-step">1</span>対象を選ぶ</div>
       <div class="navitem" data-page="filter">リスト取得</div>
       <div class="navitem" data-page="csv">CSV検索</div>
       <div class="navitem" data-page="searchlog">CSV検索ログ</div>
       <div class="navitem" data-page="lists">保存済みリスト</div>
-      <div class="navgroup-label">② 送信準備</div>
+      <div class="navgroup-label"><span class="navgroup-step">2</span>文面を準備する</div>
       <div class="navsub-label">送信文章テンプレート</div>
       <div class="navitem navsub" data-page="tmpl-body-list">テンプレート一覧</div>
       <div class="navitem navsub" data-page="tmpl-body-add">テンプレート登録</div>
       <div class="navsub-label">送信元テンプレート</div>
       <div class="navitem navsub" data-page="tmpl-sender-list">テンプレート一覧</div>
       <div class="navitem navsub" data-page="tmpl-sender-add">テンプレート登録</div>
+      <div class="navgroup-label"><span class="navgroup-step">3</span>自動で送る</div>
+      <div class="navitem" data-page="autosend">🚀 自動送信</div>
       <div class="navsub-label">送信除外設定</div>
       <div class="navitem navsub" data-page="exclude-add">登録</div>
       <div class="navitem navsub" data-page="exclude-list">一覧</div>
       <div class="navitem" data-page="sendlog">自動送信ログ</div>
-      <div class="navgroup-label">その他</div>
+      <div class="navgroup-label">チームで運用</div>
       <div class="navsub-label">担当者管理</div>
       <div class="navitem navsub" data-page="staff-list">担当者一覧</div>
       <div class="navitem navsub" data-page="staff-add">担当者登録</div>
       <div class="navitem navsub" data-page="staff-pending">承認待ち一覧</div>
       <div class="navitem" data-page="news">お知らせ一覧</div>
       <div class="navitem" data-page="otherlog">その他ログ</div>
+      <div class="navgroup-label">設定・サポート</div>
+      <div class="navitem" data-page="tutorial">🎓 チュートリアル</div>
       <div class="navitem" data-page="manual">マニュアルDL</div>
       <div class="navitem" data-page="conn">接続設定</div>
       <div class="navitem" id="navLogout" data-page="home">ログアウト</div>
@@ -1310,6 +1335,22 @@ async function refreshKillSwitch() {
     killSwitchStopped = false;
     banner.style.display = "none";
   }
+  updateAiStatusBadge();
+}
+
+// サイドバーの「AI営業社員」ステータス表示(2026-09-09)。新規APIは呼ばず、
+// 既存のKill Switch状態(killSwitchStopped)とダッシュボード実績(refreshDashboard)
+// に相乗りして描画するだけ
+function updateAiStatusBadge() {
+  const badge = $("aiStatusBadge");
+  if (!connected) { badge.textContent = "―"; badge.className = "ai-status-badge"; return; }
+  if (killSwitchStopped) {
+    badge.textContent = "停止中";
+    badge.className = "ai-status-badge off";
+  } else {
+    badge.textContent = "稼働中";
+    badge.className = "ai-status-badge on";
+  }
 }
 
 // 業種チップをconfig.TARGET_TRADESの内容(GET /api/tenant/trades。T56)から動的に作る。
@@ -1398,6 +1439,9 @@ async function refreshDashboard() {
     bar.style.width = `${pct}%`;
     bar.classList.toggle("warn", pct >= 90);
     refreshPlanChangeStatus();
+    $("aiStatusMetric").textContent =
+      `今月 ${d.this_month.success.toLocaleString()} / ${q.monthly_send_quota.toLocaleString()} 件送信`;
+    updateAiStatusBadge();
     $("dashThisMonth").innerHTML = `
       <div class="statcard" data-target="sendlog"><b>${d.this_month.targeted_companies.toLocaleString()}</b><span>営業対象企業数</span></div>
       <div class="statcard" data-target="sendlog"><b>${d.this_month.attempts.toLocaleString()}</b><span>送信試行数</span></div>

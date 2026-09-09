@@ -884,6 +884,9 @@ def h_tenant_send_log_autofill_queue(con, tenant_id, log_id):
         return 400, {"error": "元の送信文章を復元できませんでした。件名・本文は手動で"
                                "入力してください", "url": url}
 
+    import config as C
+    import senders as S
+
     tn = con.execute("""SELECT sender_name, sender_email, sender_address, optout_url,
         sender_last_name, sender_first_name, sender_last_name_kana, sender_first_name_kana,
         sender_postal_code, sender_prefecture, sender_city, sender_block, sender_building,
@@ -891,7 +894,7 @@ def h_tenant_send_log_autofill_queue(con, tenant_id, log_id):
     sender_name = (tn["sender_name"] if tn else None) or "ヒラケル"
     sender_email = (tn["sender_email"] if tn else None) or "info@ashibase.jp"
     sender_address = (tn["sender_address"] if tn else None) or ""
-    optout_url = (tn["optout_url"] if tn else None) or "https://ashibase.jp/optout"
+    optout_url = S.optout_link((tn["optout_url"] if tn else None) or C.OPTOUT_URL, row["company_id"])
     sender_last_name = (tn["sender_last_name"] if tn else None) or sender_name
     sender_first_name = (tn["sender_first_name"] if tn else None) or ""
     sender_postal_code = (tn["sender_postal_code"] if tn else None) or ""
@@ -1226,6 +1229,7 @@ def _send_staff_verification_email(con, tenant_id, name, email, verify_token):
     完了させる。_notify_completion()と同じ「ログにだけ残す」方針)。
     戻り値: 送信できたかどうか(bool)。"""
     import senders
+    import config as C
     verify_url = f"{API_PUBLIC_URL}/verify/staff/{verify_token}"
     subject = "【ヒラケル】担当者登録の確認"
     body = (f"{name} 様\n\n"
@@ -1235,7 +1239,7 @@ def _send_staff_verification_email(con, tenant_id, name, email, verify_token):
             f"{verify_url}\n\n"
             f"心当たりがない場合は、このメールを破棄してください。")
     default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
-                                     address="", optout_url="https://ashibase.jp/optout")
+                                     address="", optout_url=C.OPTOUT_URL)
     mailer = senders.MailSender(con, dry_run=False)
     try:
         mailer._deliver(senders.Recipient(company_id=0, name=name, email=email),
@@ -1318,6 +1322,7 @@ def _send_password_reset_email(con, name, email, reset_token):
     方針)。ここは戻り値を使わない — 呼び出し元(h_password_reset_request)は
     メール列挙攻撃を防ぐため送信成否に関わらず常に同じ応答を返すため。"""
     import senders
+    import config as C
     reset_url = f"{API_PUBLIC_URL}/reset-password/{reset_token}"
     subject = "【ヒラケル】パスワード再設定のご案内"
     body = (f"{name} 様\n\n"
@@ -1328,7 +1333,7 @@ def _send_password_reset_email(con, name, email, reset_token):
             f"心当たりがない場合は、このメールを破棄してください"
             f"(このメールを開くだけでパスワードが変更されることはありません)。")
     default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
-                                     address="", optout_url="https://ashibase.jp/optout")
+                                     address="", optout_url=C.OPTOUT_URL)
     mailer = senders.MailSender(con, dry_run=False)
     try:
         mailer._deliver(senders.Recipient(company_id=0, name=name, email=email),
@@ -1576,6 +1581,7 @@ def h_tenant_plan_change_request_create(con, tenant_id, data, staff_id=None):
     if to_email:
         try:
             import senders
+            import config as C
             tenant_row = con.execute("SELECT name FROM tenants WHERE id=?", (tenant_id,)).fetchone()
             tenant_name = tenant_row["name"] if tenant_row else f"tenant#{tenant_id}"
             subject = f"【ヒラケル】プラン変更のご相談({tenant_name})"
@@ -1585,7 +1591,7 @@ def h_tenant_plan_change_request_create(con, tenant_id, data, staff_id=None):
                     f"補足:\n{message or '(記載なし)'}\n\n"
                     f"hq.htmlの「プラン変更申請」から対応してください。")
             default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
-                                             address="", optout_url="https://ashibase.jp/optout")
+                                             address="", optout_url=C.OPTOUT_URL)
             mailer = senders.MailSender(con, dry_run=False)
             mailer._deliver(senders.Recipient(company_id=0, name="運用担当", email=to_email),
                             default_sender, subject, body)

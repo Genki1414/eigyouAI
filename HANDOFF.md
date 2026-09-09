@@ -3650,6 +3650,56 @@ MIKOMERUのような『実行中の送信を後から取り消す』状態を持
 
 ---
 
+### T70. 配信停止(オプトアウト)URLが機能していなかった不具合を修正(2026-09-09)
+
+ユーザーから「配信停止URLが動いてない状況だね」と報告。調査したところ、
+実際に本番で使われる可能性のある配信停止URLに、根の深い不具合が2つ重なって
+いた。
+
+**不具合①: 専用の環境変数が読まれていなかった**: `.env.example`には
+`OPTOUT_URL=https://ashibase.jp/optout`という設定項目が用意されていたが、
+実際にはどのPythonコードからもこの環境変数を読んでいなかった(`grep`で
+確認)。かわりに`senders.py`・`api.py`・`offers.py`・`monitor.py`・
+`target_lists.py`の計8箇所で、`"https://ashibase.jp/optout"`という文字列が
+個別にハードコードされていた。`ashibase.jp`は実際の公開ドメイン
+`app.ashibase.jp`の取り違え(`app.`が抜けている)、`/optout`は実際の
+エンドポイントである`/api/optout`の取り違えで、そもそも本番で正しいドメイン・
+パスに設定し直す手段が無かった。
+
+**不具合②: 誰の配信停止か特定するパラメータが付いていなかった**:
+`api.py h_optout()`は`touch_id`/`company_id`/`email`のいずれかが無いと
+誰を`suppression`に登録すればよいか特定できない設計だが、配信停止URLは
+どのチャネル・どのテナントでも常に同じ固定文字列がそのまま使われており、
+company_id等のクエリパラメータが一切付与されていなかった。**仮に①のドメイン・
+パスが正しくても、この②のせいでURLを踏んでも配信停止できない状態だった**
+(`h_optout()`がcompany_id等を特定できず404/エラーになる)。
+
+**修正**:
+- `config.py`に`API_PUBLIC_URL`(api.pyの同名定数と同じ環境変数を読む)と、
+  そこから自動的に`/api/optout`という正しいパスを組み立てる`OPTOUT_URL`を追加。
+  8箇所のハードコードをすべて`C.OPTOUT_URL`(またはファイルの既存の別名
+  `_config`)に置き換えた。
+- `senders.py`に`optout_link(base_url, company_id)`ヘルパーを追加(基本の
+  URLに`?company_id=`または`&company_id=`を付与)。`BaseSender`/`SmsSender`/
+  `FormSender`の`footer()`が受け取る引数に送信先(`Recipient`。company_idを
+  持つ)を追加し、実際に送るその会社のcompany_idを配信停止URLへ埋め込むように
+  した。`FaxSender`は返信ベースの配信停止案内のままなので変更なし(引数だけ
+  シグネチャ統一のため追加)。
+
+**あえて変更していない箇所**: `offers.add_tenant()`(テナント作成時に
+`optout_url`未指定なら`mailto:{sender_email}`を既定値にする設計)はそのまま
+残した。これはメール返信ベースの配信停止という別方式であり、今回見つかった
+「ドメイン・パスの取り違え」「識別パラメータが無い」というバグとは無関係の
+意図的な設計のため。
+
+**確認**: `senders.py test`に「配信停止URLにcompany_idが付与される」検証を
+追加(実際に`FormSender.footer()`を呼び、生成された文字列に`company_id=424242`
+が含まれることを確認)。既存の「送信者情報の自動付与」テストも全チャネルで
+回帰なし。`api.py test`(367/367)・`test_pipeline.py`(42/42)・
+`test_concurrency.py`で回帰なし。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

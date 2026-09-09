@@ -146,6 +146,7 @@ def _send_alert_email(con, to_email, due_alerts):
     (T33/T34の_send_..._email系と違い、こちらは戻り値で成否を返す設計。
     メール送信に失敗した場合はクールダウンを進めず、次回すぐ再送を試みたいため)。"""
     import senders
+    import config as _config
     icon = "🔴" if any(level == "critical" for _, level, _, _ in due_alerts) else "🟡"
     subject = f"【ヒラケル監視】{icon} 異常を検知しました({len(due_alerts)}件)"
     lines = []
@@ -154,7 +155,7 @@ def _send_alert_email(con, to_email, due_alerts):
         lines.append(f"{badge} {title}\n{detail}\n")
     body = "\n".join(lines)
     default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
-                                     address="", optout_url="https://ashibase.jp/optout")
+                                     address="", optout_url=_config.OPTOUT_URL)
     mailer = senders.MailSender(con, dry_run=False)
     mailer._deliver(senders.Recipient(company_id=0, name="運用担当", email=to_email),
                     default_sender, subject, body)

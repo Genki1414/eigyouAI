@@ -15,6 +15,19 @@ OUT_DIR = BASE / "out"
 # (api.py LP_URLと同じ考え方)。
 TRACK_BASE_URL = os.environ.get("TRACK_BASE_URL", "https://ashibase.jp")
 
+# api.py側のverify/staff・reset-passwordリンクと同じ環境変数(値はEIGYOUAI_DOMAIN
+# <Caddyfileの実際の公開ドメイン>と揃える。本番は app.ashibase.jp)。
+API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://ashibase.jp")
+
+# 特定電子メール法上必須の配信停止URL。2026-09-09発覚: 専用のOPTOUT_URL環境変数を
+# 想定していたコード(.env.example)はあったが、どのPythonコードからも参照されて
+# おらず、senders.py/api.pyの複数箇所で"https://ashibase.jp/optout"という
+# プレースホルダのドメイン・パスがハードコードされたまま使われていた
+# (ashibase.jpは実際の公開ドメインapp.ashibase.jpの取り違え、/optoutは実際の
+# エンドポイントである/api/optoutの取り違えで、クリックしても機能しない状態
+# だった)。API_PUBLIC_URLから自動的に正しいパスを組み立てる形に修正した。
+OPTOUT_URL = os.environ.get("OPTOUT_URL", f"{API_PUBLIC_URL}/api/optout")
+
 # ── 対象業種 ──────────────────────────────
 # 建設業許可29業種(parsers/common.py TRADE_CODE_NAMES)のうち、ここに書いた
 # キーワードが業種名に含まれるものだけを対象にする。キーワードは他の業種名と
@@ -942,7 +955,7 @@ SENDER_INFO = {
     "name": "ヒラケル",
     "address": "（本番: 登記上の住所を記載）",
     "email": "info@ashibase.jp",
-    "optout_url": "https://ashibase.jp/optout",
+    "optout_url": OPTOUT_URL,
 }
 # T44(2026-08-25): 1社あたりの生涯接触上限(旧MAX_LIFETIME_TOUCHES=6)・
 # 最短再接触間隔(旧MIN_TOUCH_INTERVAL_DAYS=10日)は、100社×月4,000通規模へ

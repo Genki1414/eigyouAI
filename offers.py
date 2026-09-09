@@ -29,6 +29,8 @@ import json
 import secrets
 from datetime import datetime, timedelta
 
+import config as C
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tenants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,7 +76,7 @@ CREATE TABLE IF NOT EXISTS staff (
 SEED_TENANT = dict(
     name="自社（AshiBase）", kind="own",
     sender_name="AshiBase（足場ベース）", sender_email="info@ashibase.jp",
-    sender_address="（本番: 登記上の住所）", optout_url="https://ashibase.jp/optout")
+    sender_address="（本番: 登記上の住所）", optout_url=C.OPTOUT_URL)
 
 SEED_OFFERS = [
     dict(name="AI積算ツール（無料）", price_yen=0,

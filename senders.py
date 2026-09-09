@@ -77,6 +77,16 @@ class Sender:
     position: str = ""
 
 
+def optout_link(base_url: str, company_id: int) -> str:
+    """配信停止URLに、対象企業を一意に特定するcompany_idをクエリパラメータとして
+    付与する。api.py h_optout()はtouch_id/company_id/emailのいずれかが無いと
+    誰の配信停止か特定できない(2026-09-09: これを付与しておらず、リンクを
+    踏んでもオプトアウトが機能していなかった不具合を修正)。テナントが独自の
+    optout_urlに既にクエリ文字列を含めていた場合にも対応する(?/&の使い分け)。"""
+    sep = "&" if "?" in base_url else "?"
+    return f"{base_url}{sep}company_id={company_id}"
+
+
 # ── 基底クラス ──────────────────────────────
 class BaseSender:
     channel = "base"
@@ -97,10 +107,10 @@ class BaseSender:
         """宛先が使えるか。使えない理由を返す（Noneなら可）"""
         raise NotImplementedError
 
-    def footer(self, sender: Sender) -> str:
+    def footer(self, sender: Sender, to: Recipient) -> str:
         """全チャネル共通の送信者表示。ここで強制するので文面側の漏れが起きない。"""
         return (f"\n\n──────────\n{sender.name}\n{sender.address}\n"
-                f"{sender.email}\n配信停止: {sender.optout_url}")
+                f"{sender.email}\n配信停止: {optout_link(sender.optout_url, to.company_id)}")
 
     def send(self, to: Recipient, sender: Sender, subject, body, idem_key) -> SendResult:
         # 1. 宛先の検証(無効な宛先はそもそも「試行」として占有しない)
@@ -125,7 +135,7 @@ class BaseSender:
         self.rl.acquire()
 
         # 4. 送信（一時エラーのみ再試行）
-        full_body = body + self.footer(sender)
+        full_body = body + self.footer(sender, to)
         try:
             res = R.retry(lambda: self._deliver(to, sender, subject, full_body),
                           attempts=4, job=f"{self.channel}:{to.name}")
@@ -208,8 +218,9 @@ class FaxSender(BaseSender):
             return f"FAX番号形式不正: {to.fax}"
         return None
 
-    def footer(self, sender):
-        # FAXは用紙1枚に収める必要があるので簡潔に
+    def footer(self, sender, to):
+        # FAXは用紙1枚に収める必要があるので簡潔に。返信での配信停止依頼なので
+        # optout_urlは使わない(toは他チャネルとの呼び出しシグネチャ統一のためだけ)
         return (f"\n\n{sender.name} / {sender.email}\n"
                 f"今後の送付が不要な場合は、本紙にその旨ご記入のうえご返信ください。")
 
@@ -243,8 +254,8 @@ class SmsSender(BaseSender):
                               permanent=True)
         return super().send(to, sender, subject, body, idem_key)
 
-    def footer(self, sender):
-        return f"\n{sender.name}\n停止:{sender.optout_url}"
+    def footer(self, sender, to):
+        return f"\n{sender.name}\n停止:{optout_link(sender.optout_url, to.company_id)}"
 
     def _deliver(self, to, sender, subject, body):
         if self.dry_run:
@@ -417,10 +428,11 @@ class FormSender(BaseSender):
             return f"URL形式不正: {to.contact_url}"
         return None
 
-    def footer(self, sender):
+    def footer(self, sender, to):
         # フォーム自体に会社名等の専用欄があるため、他チャネルより署名を簡潔にするが、
         # 送信者表示と配信停止手段は他チャネルと同様に必須で載せる
-        return f"\n\n{sender.name} / {sender.email}\n今後のご連絡が不要な場合: {sender.optout_url}"
+        return (f"\n\n{sender.name} / {sender.email}\n今後のご連絡が不要な場合: "
+                f"{optout_link(sender.optout_url, to.company_id)}")
 
     def _deliver(self, to, sender, subject, body):
         if self.dry_run:
@@ -675,7 +687,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
                      or "ヒラケル"),
             email=_ov("email", s["sender_email"] or "info@ashibase.jp"),
             address=s["sender_address"] or "",
-            optout_url=s["optout_url"] or "https://ashibase.jp/optout",
+            optout_url=s["optout_url"] or C.OPTOUT_URL,
             last_name=_ov("last_name", s["sender_last_name"] or ""),
             first_name=_ov("first_name", s["sender_first_name"] or ""),
             last_name_kana=_ov("last_name_kana", s["sender_last_name_kana"] or ""),
@@ -747,6 +759,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
 if __name__ == "__main__":
     import sys
     import db
+    import config as C
 
     con = db.connect(); db.migrate(con)
 
@@ -771,11 +784,15 @@ if __name__ == "__main__":
             print(f"  {'✓' if ok else '✗'} {cls.channel:<6} {why or '送信可'}")
 
         print("\n── 送信者情報の自動付与 ──")
-        s = Sender("ヒラケル", "info@ashibase.jp", "東京都...", "https://ashibase.jp/optout")
+        s = Sender("ヒラケル", "info@ashibase.jp", "東京都...", C.OPTOUT_URL)
+        test_recipient = Recipient(company_id=424242, name="テスト株式会社")
         for cls in (MailSender, FaxSender, SmsSender, FormSender):
-            f = cls(con).footer(s)
+            f = cls(con).footer(s, test_recipient)
             has = all(k in f for k in ("ヒラケル",)) and ("optout" in f or "ご返信" in f)
             print(f"  {'✓' if has else '✗'} {cls.channel:<6} 送信者表示と停止手段あり")
+        form_footer = FormSender(con).footer(s, test_recipient)
+        print(f"  {'✓' if 'company_id=424242' in form_footer else '✗'} "
+              f"配信停止URLにcompany_idが付与される(T70)")
 
         print("\n── メール送信(SendGrid実装。T29) ──")
         import os as _os

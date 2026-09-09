@@ -12,7 +12,10 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            2026-09-09からワンクリック即時停止ではなく確認画面を
                            挟む(セキュリティ製品のリンク自動プリフェッチによる
                            意図しない配信停止を防ぐため)。画面上のボタンから
-                           上記POSTを叩いて初めて実際に停止する
+                           上記POSTを叩いて初めて実際に停止する。既に配信停止済み
+                           なら「解除する」ボタンも同じ画面に出す(T74)
+  POST /api/optout/undo  配信停止の解除       → suppression から削除(本人がその場で
+                           気が変わった場合用。上記の「解除する」ボタンから呼ばれる)
   GET  /t/<touch_id>  開封・クリック計測    → responded=1 してLPへリダイレクト
   GET  /track/click/<token>  MIKOMERUの「URLアクセスの記録」相当。テナントの送信文章
                            中のURLがクリックされたことを記録し、本来のURLへ302
@@ -155,6 +158,13 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            タブ相当)。商号一致で照合できた行だけ除外される
                            除外はテナント別(tenant_exclusions)。全テナント共通の
                            法令対応suppressionとは別物で、can_contact()が両方を見る
+  GET  /api/tenant/suppression    自テナントが過去に送信したことのある企業のうち
+                           配信停止(suppression)済みの一覧(T74。全テナント共通の
+                           テーブルをそのまま見せると他テナントの顧客情報が漏れる
+                           ため、自テナント送信実績のある企業に絞り込む)
+  POST /api/tenant/suppression/remove  {"company_id"} → 担当者による代行解除
+                           (電話等で本人から申し出があった場合の運用を想定。
+                           h_optout_undo()と同じ削除処理)
   GET  /api/tenant/templates      自テナントの送信文章テンプレート一覧
   POST /api/tenant/templates           {"name","subject","body"} → 保存
   POST /api/tenant/templates/delete    {"template_id"} → 削除
@@ -495,6 +505,26 @@ def h_optout(con, data):
                  "message": "配信を停止しました"}
 
 
+def h_optout_undo(con, data):
+    """配信停止の解除。POST /api/optout/undo(公開・h_optoutと対の処理)。
+    2026-09-09(ユーザー要望): 誤って停止した場合や、後で気が変わって連絡を
+    また受け取りたい場合に、本人がその場で解除できるようにした
+    (h_optout_page()の「配信停止を解除する」ボタンから呼ばれる)。
+    識別方法(touch_id/company_id/email)はh_optout()と揃えてある。
+    未送信分の取消(touches DELETE)はh_optout()側の処理であり、解除しても
+    過去に取り消した予定が自動的に復活するわけではない(取り消し後に
+    改めてリストへ追加すれば送れる、という設計。h_tenant_suppression_remove()
+    <担当者による代行解除>も同じこの関数を呼ぶ)。"""
+    tid, cid, _ = resolve_touch(con, data.get("touch_id"), data.get("company_id"),
+                                data.get("email"))
+    if not cid:
+        return 404, {"error": "該当する会社が特定できませんでした"}
+    n = con.execute("DELETE FROM suppression WHERE company_id=?", (cid,)).rowcount
+    con.commit()
+    return 200, {"ok": True, "company_id": cid, "removed": bool(n),
+                 "message": "配信停止を解除しました"}
+
+
 def h_optout_page(con, qs):
     """GET /api/optout(公開)。2026-09-09: 以前はこのGETを開いた時点でh_optout()を
     呼び即時停止していたが、企業向けセキュリティ製品がメール内リンクを安全性確認の
@@ -520,14 +550,42 @@ def h_optout_page(con, qs):
 </div></body></html>"""
     company_name = row["name"] or ""
     already = con.execute("SELECT 1 FROM suppression WHERE company_id=?", (cid,)).fetchone()
+    payload = json.dumps({"touch_id": touch_id, "company_id": company_id, "email": email})
+
     if already:
         return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <title>ヒラケル — 配信停止</title>{_OPTOUT_PAGE_STYLE}</head>
-<body><div class="card"><h1>✓ 配信停止済みです</h1>
+<body><div class="card">
+<h1>✓ 配信停止済みです</h1>
 <p class="msg ok">{html.escape(company_name)} 様は既に配信停止の設定が完了しています。
-今後の連絡は届きません。</p></div></body></html>"""
+今後の連絡は届きません。</p>
+<p style="margin-top:18px;font-size:12px;color:#888">誤って停止した場合や、また連絡を
+受け取りたい場合はこちらから解除できます。</p>
+<button id="btn" onclick="doUndo()">配信停止を解除する</button>
+<p id="msg" class="msg"></p>
+<script>
+async function doUndo() {{
+  const btn = document.getElementById("btn"), msg = document.getElementById("msg");
+  btn.disabled = true;
+  try {{
+    const res = await fetch("/api/optout/undo", {{method: "POST",
+      headers: {{"Content-Type": "application/json"}}, body: JSON.stringify({payload})}});
+    const data = await res.json();
+    if (res.ok && data.ok) {{
+      msg.className = "msg ok"; msg.textContent = "配信停止を解除しました。今後また連絡が届くようになります。";
+      btn.style.display = "none";
+    }} else {{
+      msg.className = "msg err"; msg.textContent = data.error || "処理に失敗しました";
+      btn.disabled = false;
+    }}
+  }} catch (e) {{
+    msg.className = "msg err"; msg.textContent = "通信に失敗しました。時間をおいて再度お試しください";
+    btn.disabled = false;
+  }}
+}}
+</script>
+</div></body></html>"""
 
-    payload = json.dumps({"touch_id": touch_id, "company_id": company_id, "email": email})
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <title>ヒラケル — 配信停止の確認</title>{_OPTOUT_PAGE_STYLE}</head>
 <body><div class="card">
@@ -1117,6 +1175,42 @@ def h_tenant_exclusions_remove(con, tenant_id, data):
         return 400, {"error": "company_idは必須です"}
     db.unexclude_for_tenant(con, tenant_id, company_id)
     return 200, {"ok": True}
+
+
+def h_tenant_suppression_list(con, tenant_id, qs):
+    """配信停止(suppression)一覧。2026-09-09(ユーザー要望): 「どこが配信停止に
+    なってるか確認できるようにしたい」に対応。suppressionはtenant_exclusionsと
+    異なり全テナント共通のテーブル(法令対応。特定のテナントの持ち物ではない)
+    なので、そのまま全件見せると他テナントの顧客情報が漏れてしまう。
+    そのため「自テナントが過去に一度でも送信したことのある企業
+    (form_send_log.tenant_id=?で判定)」に絞り込んで返す。"""
+    name_q = (qs.get("q", [""])[0] or "").strip()
+    where = "s.company_id IN (SELECT DISTINCT company_id FROM form_send_log WHERE tenant_id=?)"
+    params = [tenant_id]
+    if name_q:
+        where += " AND c.name LIKE ?"
+        params.append(f"%{name_q}%")
+    rows = con.execute(f"""SELECT s.company_id, c.name company_name, c.pref, s.reason,
+            s.source, s.note, s.created_at
+        FROM suppression s LEFT JOIN companies c ON c.id = s.company_id
+        WHERE {where} ORDER BY s.created_at DESC""", params).fetchall()
+    return 200, {"suppression": [dict(r) for r in rows]}
+
+
+def h_tenant_suppression_remove(con, tenant_id, data):
+    """担当者による配信停止の代行解除。電話等で本人から「また連絡してほしい」
+    という申し出があった場合の運用を想定(h_optout_undo()と同じ削除処理)。
+    他テナントの顧客まで勝手に解除できてしまわないよう、自テナントが過去に
+    送信したことのある企業(h_tenant_suppression_listと同じ判定)に限定する。"""
+    company_id = data.get("company_id")
+    if not isinstance(company_id, int):
+        return 400, {"error": "company_idは必須です"}
+    if not con.execute("SELECT 1 FROM form_send_log WHERE tenant_id=? AND company_id=?",
+                       (tenant_id, company_id)).fetchone():
+        return 404, {"error": "自テナントが送信した記録のある企業のみ解除できます"}
+    n = con.execute("DELETE FROM suppression WHERE company_id=?", (company_id,)).rowcount
+    con.commit()
+    return 200, {"ok": True, "removed": bool(n)}
 
 
 _EXCLUDE_CSV_NAME_COLS = {"name", "会社名", "企業名", "法人名", "商号"}
@@ -2200,6 +2294,19 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
+        if path == "/api/tenant/suppression/remove":
+            con = self._con()
+            try:
+                tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
+                if not tenant:
+                    return self._json(401, {"error": "unauthorized"})
+                st, res = h_tenant_suppression_remove(con, tenant["id"], data)
+                return self._json(st, res)
+            except Exception as e:  # noqa: BLE001
+                return self._json(500, {"error": str(e)[:200]})
+            finally:
+                con.close()
+
         if path == "/api/tenant/scheduled-sends/cancel":
             con = self._con()
             try:
@@ -2284,6 +2391,8 @@ class Handler(BaseHTTPRequestHandler):
                 st, res = h_paid(con, data, self.headers.get("X-Signature"), raw)
             elif path == "/api/optout":
                 st, res = h_optout(con, data)
+            elif path == "/api/optout/undo":
+                st, res = h_optout_undo(con, data)
             elif path == "/api/login":
                 st, res = h_login(con, data)
             elif path == "/api/password-reset/request":
@@ -2392,6 +2501,7 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/autofill/pending"
                 or u.path == "/api/tenant/scheduled-sends"
                 or u.path == "/api/tenant/exclusions"
+                or u.path == "/api/tenant/suppression"
                 or u.path == "/api/tenant/companies/search"
                 or u.path == "/api/tenant/templates"
                 or u.path == "/api/tenant/sender-templates"
@@ -2421,6 +2531,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_scheduled_sends_list(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/exclusions":
                     st, res = h_tenant_exclusions_list(con, tenant["id"])
+                elif u.path == "/api/tenant/suppression":
+                    st, res = h_tenant_suppression_list(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/companies/search":
                     st, res = h_tenant_companies_search(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/templates":
@@ -2670,6 +2782,27 @@ def self_test(port=8899):
       st == 200 and "配信停止済みです" in body.decode("utf-8"))
     allowed, why = db.can_contact(con, cid)
     t("以後 can_contact が拒否する", (not allowed) and "配信停止" in why)
+
+    print("  (T74: 配信停止は本人がその場で解除できる。cidは以降のテストに使うので別会社で検証)")
+    undo_cid = next(row["id"] for row in con.execute(
+        "SELECT id FROM companies WHERE dedup_of IS NULL AND id != ?", (cid,)).fetchall()
+        if db.can_contact(con, row["id"])[0])
+    post("/api/optout", {"company_id": undo_cid})
+    t("解除前提の下準備: suppressionに入っている",
+      con.execute("SELECT COUNT(*) FROM suppression WHERE company_id=?", (undo_cid,)).fetchone()[0] == 1)
+    st, body = get(f"/api/optout?company_id={undo_cid}")
+    t("停止済み企業のGET画面に「解除する」ボタンがある",
+      st == 200 and "配信停止を解除する" in body.decode("utf-8"))
+    st, r = post("/api/optout/undo", {"company_id": undo_cid})
+    t("POST /api/optout/undoで解除できる", st == 200 and r.get("ok"))
+    t("解除後はsuppressionから消える",
+      con.execute("SELECT COUNT(*) FROM suppression WHERE company_id=?", (undo_cid,)).fetchone()[0] == 0)
+    st, body = get(f"/api/optout?company_id={undo_cid}")
+    body_text = body.decode("utf-8")
+    t("解除後のGETは通常の確認画面に戻る(既に停止済み画面ではない)",
+      st == 200 and "配信を停止する" in body_text and "配信停止を解除する" not in body_text)
+    allowed_undo, _ = db.can_contact(con, undo_cid)
+    t("解除後はcan_contact()が再びTrueを返す", allowed_undo is True)
 
     print("\n── Stock Factory連携（運用API） ──")
     global SALES_ENGINE_API_KEY
@@ -3815,6 +3948,42 @@ def self_test(port=8899):
     t("解除後はcan_contact()が再びTrueを返す", allowed_after is True)
 
     con.execute("DELETE FROM tenant_exclusions WHERE tenant_id IN (?,?)", (tid_a, tid_b))
+    con.commit()
+
+    print("\n── 配信停止一覧(テナント側での確認。T74) ──")
+    supp_company_id = next(row["id"] for row in con.execute(
+        "SELECT id FROM companies WHERE dedup_of IS NULL AND id NOT IN (?,?)",
+        (cid, undo_cid)).fetchall() if db.can_contact(con, row["id"])[0])
+    now_supp = datetime.now().isoformat(timespec="seconds")
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, started_at, status)
+        VALUES (?,?,?,?)""", (supp_company_id, tid_a, now_supp, "SUCCESS"))
+    con.commit()
+    st, r = get_auth("/api/tenant/suppression")
+    t("認証ヘッダなしのGET /api/tenant/suppressionは401", st == 401)
+    st, r = get_auth("/api/tenant/suppression", token=key_a)
+    t("まだ配信停止していない企業は出ない",
+      st == 200 and all(s["company_id"] != supp_company_id for s in r.get("suppression", [])))
+
+    db.suppress(con, supp_company_id, "optout", source="web")
+    st, r = get_auth("/api/tenant/suppression", token=key_a)
+    t("自テナントが送信したことのある配信停止企業が一覧に出る",
+      st == 200 and any(s["company_id"] == supp_company_id for s in r.get("suppression", [])))
+    st, r = get_auth("/api/tenant/suppression", token=key_b)
+    t("送信実績のない他テナントには出ない(顧客情報の越境防止)",
+      st == 200 and all(s["company_id"] != supp_company_id for s in r.get("suppression", [])))
+
+    st, r = post_auth("/api/tenant/suppression/remove", {"company_id": "not-an-int"}, token=key_a)
+    t("company_idが整数でないと400(配信停止の代行解除)", st == 400)
+    st, r = post_auth("/api/tenant/suppression/remove", {"company_id": supp_company_id}, token=key_b)
+    t("送信実績のないテナントは代行解除できない(404)", st == 404)
+    st, r = post_auth("/api/tenant/suppression/remove", {"company_id": supp_company_id}, token=key_a)
+    t("POST /api/tenant/suppression/removeで担当者が代行解除できる", st == 200 and r.get("ok"))
+    t("解除後はsuppressionから消える",
+      con.execute("SELECT COUNT(*) FROM suppression WHERE company_id=?",
+                  (supp_company_id,)).fetchone()[0] == 0)
+
+    con.execute("DELETE FROM form_send_log WHERE company_id=? AND tenant_id=?", (supp_company_id, tid_a))
+    con.execute("DELETE FROM suppression WHERE company_id=?", (supp_company_id,))
     con.commit()
 
     print("\n── 送信文章テンプレート ──")

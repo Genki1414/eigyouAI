@@ -3409,9 +3409,13 @@ async function renderSendForm(container, id) {
           rEl.innerHTML = `<div class="result err">${err.message}</div>`;
           return;
         }
+        const blockedReasons = sr.stats.blocked_by_reason || {};
+        const blockedDetail = Object.entries(blockedReasons).map(([reason, n]) => `${reason}${n}`).join("・");
         rEl.innerHTML = `<div class="result ok">対象${sr.target_count.toLocaleString()}社` +
           `${sr.cancelled_recent ? `(過去送信対象キャンセルで${sr.cancelled_recent}社除外)` : ""} / ` +
-          `送信${sr.stats.sent} 失敗${sr.stats.failed} ガードで中止${sr.stats.blocked} 配信停止${sr.stats.suppressed}` +
+          `送信${sr.stats.sent} 失敗${sr.stats.failed} ` +
+          `ガードで中止${sr.stats.blocked}${blockedDetail ? `(${blockedDetail})` : ""} ` +
+          `配信停止${sr.stats.suppressed}` +
           `${sr.stats.stopped ? ` Kill Switchで中止${sr.stats.stopped}` : ""}</div>`;
         await refreshLists();
       };

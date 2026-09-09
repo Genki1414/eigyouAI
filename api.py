@@ -4383,6 +4383,9 @@ def self_test(port=8899):
         t("配信停止済み会社へのsendはブロックされる(can_contact()バイパスなし)",
           st == 200 and r.get("ok") and "ガードで中止1" in (r.get("details") or ""),
           f"details={r.get('details')}")
+        t("T76: ブロック理由の内訳(配信停止リストによるものと分かる)が表示される",
+          st == 200 and "配信停止リスト1" in (r.get("details") or ""),
+          f"details={r.get('details')}")
         t("実際には送信されていない(sent_atが立っていない)",
           con.execute("SELECT sent_at FROM touches WHERE campaign_id=?",
                       (test_cid,)).fetchone()[0] is None)

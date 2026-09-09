@@ -3935,6 +3935,44 @@ list_builder.htmlの配信停止一覧の「解除」ボタン)がまさにこ�
 
 ---
 
+### T76. 「ガードで中止」の件数に理由の内訳を表示(2026-09-09)
+
+ユーザーが実際に配信停止済みの企業へ送信テストを行い、「配信停止中の会社
+には送れないようになってるのは確認できた」上で、「配信停止中のため何件
+中止みたいな表示にしたい」と要望。従来は`can_contact()`にブロックされた
+件数(`stats['blocked']`)の合計しか分からず、配信停止(suppression)による
+ものか、テナント除外設定によるものか、重複レコードによるものかが画面から
+区別できなかった。
+
+**修正**: `senders.py`の`send_campaign()`に`stats['blocked_by_reason']`
+(`db.can_contact()`が返す理由文字列ごとの件数を集計する辞書。例:
+`{"配信停止リスト": 1}`)を追加。ワーカースレッドが返す`blocked`の
+outcomeに`reason`を持たせ、集計ループでカウントする。
+
+- `senders.py`: `send_campaign()`実行後の`print()`が
+  `ガードで中止1(配信停止リスト1)`のように内訳を括弧書きで表示するように
+  なった。
+- `run.py`: `run_op("send")`の`details`文字列も同様に内訳を含めた
+  (Stock Factory運用API/ops画面向け)。
+- `target_lists.py`: `_notify_completion()`(送信完了メール通知)にも内訳の
+  行を追加。
+- `list_builder.html`: 自動送信の結果表示(`対象X社 / 送信X 失敗X
+  ガードで中止X(...) 配信停止X`)に、`stats.blocked_by_reason`から組み立てた
+  内訳を追加。
+
+`stats`はAPIレスポンス(`POST /api/tenant/lists/<id>/send`等)へそのまま
+含まれる既存の設計のため、`blocked_by_reason`もAPI側の変更なしにフロント
+まで届く。
+
+**確認**: `api.py test`の「配信停止済み会社へのsendはブロックされる」テスト
+に「配信停止リスト1」が`details`に含まれることを確認するアサーションを追加。
+`api.py test`(384/384)・`test_pipeline.py`(42/42)・`test_concurrency.py`
+(全項目パス)。`list_builder.html`はPlaywrightで実際に配信停止済み企業を
+含むリストへ送信し、結果表示が`ガードで中止1(配信停止リスト1)`となることを
+目視確認(検証用のテナント・リスト・Kill Switch状態は検証後に元へ復元済み)。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

@@ -855,12 +855,15 @@ def _notify_completion(con, tenant_id, list_name, target_count, stats):
     if not recipients:
         return
 
+    blocked_lines = "".join(f"  内訳 - {reason}: {n}\n"
+                             for reason, n in (stats.get("blocked_by_reason") or {}).items())
     subject = f"【ヒラケル】送信完了: {list_name}"
     body = (f"リスト「{list_name}」への送信が完了しました。\n\n"
             f"対象企業数: {target_count}\n"
             f"送信成功: {stats.get('sent', 0)}\n"
             f"失敗: {stats.get('failed', 0)}\n"
             f"ガードで中止: {stats.get('blocked', 0)}\n"
+            f"{blocked_lines}"
             f"配信停止: {stats.get('suppressed', 0)}\n"
             f"Kill Switchで中止: {stats.get('stopped', 0)}\n")
     default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",

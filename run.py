@@ -267,9 +267,13 @@ def run_op(con, step, campaign_id=None, dry_run=False):
             if stats is None:  # 送信対象なし
                 return {"ok": True, "step": step, "affected_count": 0,
                         "details": f"Step{target_step}: 送信対象がありません"}
+            blocked_by_reason = stats.get("blocked_by_reason") or {}
+            blocked_detail = "".join(f"・{reason}{n}" for reason, n in blocked_by_reason.items())
             return {"ok": True, "step": step, "affected_count": stats["sent"],
                     "details": f"Step{target_step}: 送信{stats['sent']} / 失敗{stats['failed']} / "
-                               f"ガードで中止{stats['blocked']} / 配信停止{stats['suppressed']} / "
+                               f"ガードで中止{stats['blocked']}"
+                               f"{f'({blocked_detail[1:]})' if blocked_detail else ''} / "
+                               f"配信停止{stats['suppressed']} / "
                                f"Kill Switchで中止{stats.get('stopped', 0)}"
                                + ("（dryRun）" if dry_run else "")}
 

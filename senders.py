@@ -618,7 +618,13 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
         q += " LIMIT ?"; p.append(limit)
     rows = con.execute(q, p).fetchall()
 
-    stats = {"sent": 0, "failed": 0, "blocked": 0, "suppressed": 0, "stopped": 0}
+    # blocked_by_reason: 「ガードで中止」の内訳(db.can_contact()が返すwhy文字列
+    # <配信停止リスト/テナント除外設定/重複レコード>ごとの件数)。2026-09-09
+    # (ユーザー要望): 「配信停止中のため何件中止」のように理由が分かる表示に
+    # したい、という指摘を受けて追加。以前はblockedの合計数しか分からず、
+    # 配信停止によるものかテナント除外設定によるものか画面から区別できなかった。
+    stats = {"sent": 0, "failed": 0, "blocked": 0, "suppressed": 0, "stopped": 0,
+              "blocked_by_reason": {}}
     if not rows:
         print("送信対象がありません（文面未生成）")
         return stats
@@ -684,7 +690,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
         if not allowed:
             con_t.execute("UPDATE touches SET note=? WHERE id=?", (f"送信中止: {why}", r["tid"]))
             con_t.commit()
-            return {"kind": "blocked"}
+            return {"kind": "blocked", "reason": why}
 
         # Kill Switch: 異常検知時に管理者が停止していれば実送信はここで止める
         # (dry_runは実サイトへ触れないので対象外。kill_switch_cli.py参照)。
@@ -763,14 +769,19 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
             stats[outcome["kind"]] += 1
             if outcome["kind"] == "sent":
                 cost += outcome["cost"]
+            elif outcome["kind"] == "blocked":
+                reason = outcome.get("reason") or "不明"
+                stats["blocked_by_reason"][reason] = stats["blocked_by_reason"].get(reason, 0) + 1
             elif outcome.get("suppressed"):
                 stats["suppressed"] += 1
 
     con.execute("UPDATE campaigns SET cost_yen = COALESCE(cost_yen,0) + ? WHERE id=?",
                 (cost, campaign_id))
     con.commit()
+    blocked_detail = "".join(f"・{reason}{n}" for reason, n in stats["blocked_by_reason"].items())
     print(f"  送信 {stats['sent']} / 失敗 {stats['failed']} / "
-          f"ガードで中止 {stats['blocked']} / 恒久エラーで配信停止 {stats['suppressed']} / "
+          f"ガードで中止 {stats['blocked']}{f'({blocked_detail[1:]})' if blocked_detail else ''} / "
+          f"恒久エラーで配信停止 {stats['suppressed']} / "
           f"Kill Switchで中止 {stats['stopped']}")
     print(f"  実費 {cost:,}円")
     return stats

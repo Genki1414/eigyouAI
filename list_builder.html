@@ -1661,7 +1661,7 @@ async function refreshSendLogExecutions() {
     if (!execs.length) { el.innerHTML = `<div class="empty">該当する自動送信ログがありません</div>`; return; }
     el.innerHTML = `<table><tr><th>ID</th><th>担当者(ID)</th><th>会社名</th><th>姓</th><th>名</th>
         <th>メールアドレス</th><th>送信文章</th><th>備考</th><th>送信成功/総数</th>
-        <th>URLクリック数</th><th>最新クリック日時</th><th>実行日時</th><th>キャンセル</th></tr>` +
+        <th>URLクリック数</th><th>最新クリック日時</th><th>実行日時</th></tr>` +
       execs.map(x => { const escSubject = (x.subject || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
         const escBody = (x.body || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
         return `<tr>
@@ -1681,9 +1681,9 @@ async function refreshSendLogExecutions() {
         <td>${x.click_count.toLocaleString()}</td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.last_clicked_at || "—"}</td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at || "—"}</td>
-        <td>—</td></tr>
+        </tr>
         <tr id="body-${x.list_id}" class="execBodyRow" style="display:none">
-          <td colspan="12" style="background:var(--concrete)">
+          <td colspan="11" style="background:var(--concrete)">
             <div style="font-size:11px;color:var(--steel);font-weight:700;margin-bottom:4px">件名</div>
             <div style="font-size:13px;margin-bottom:10px">${escSubject || "—"}</div>
             <div style="font-size:11px;color:var(--steel);font-weight:700;margin-bottom:4px">本文</div>

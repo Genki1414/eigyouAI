@@ -14,6 +14,10 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            中のURLがクリックされたことを記録し、本来のURLへ302
                            リダイレクトする(senders.rewrite_tracked_links()参照)
   GET  /health        死活監視
+  GET  /chrome_extension.zip  「ヒラケル自動入力アシスト」拡張機能一式をzipで配布
+                           (chrome_extension/フォルダをその場でzip化。認証不要の
+                           静的配布物。list_builder.htmlのマニュアルDL・自動送信ログ
+                           詳細ページからリンクされる)
 
   ── Stock Factory連携(社長のRuntimeから叩く運用API。Authorization: Bearer必須) ──
   GET  /api/ops/status     run.py statusと同等のJSON
@@ -266,6 +270,7 @@ import sqlite3
 import sys
 import threading
 import urllib.parse
+import zipfile
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -320,6 +325,20 @@ _OPS_PLAN_CHANGE_RESOLVE_PATH_RE = re.compile(r"^/api/ops/plan-change-requests/(
 _STATIC_PAGES = {"/list_builder.html": "list_builder.html", "/": "list_builder.html",
                   "/hq.html": "hq.html"}
 _BASE_DIR = Path(__file__).parent
+
+
+def _build_chrome_extension_zip():
+    """chrome_extension/フォルダをその場でzip化して返す(bytes)。
+    マニュアルDL・自動送信ログ詳細ページの「拡張機能をダウンロード」から
+    GET /chrome_extension.zip 経由で叩かれる。ビルド済みzipを別途管理する
+    手間を省くため、常にリポジトリの現状から生成する(2026-09-09)。"""
+    src = _BASE_DIR / "chrome_extension"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(src.rglob("*")):
+            if f.is_file():
+                zf.write(f, arcname=f"chrome_extension/{f.relative_to(src)}")
+    return buf.getvalue()
 
 
 # ── 冪等性 ──────────────────────────────────
@@ -2204,6 +2223,15 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return self.wfile.write(body)
 
+        if u.path == "/chrome_extension.zip":
+            body = _build_chrome_extension_zip()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="chrome_extension.zip"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
+
         shot_match = _SCREENSHOT_PATH_RE.match(u.path)
         if shot_match:
             con = self._con()
@@ -3334,6 +3362,8 @@ def self_test(port=8899):
     t("送信元テンプレート未指定時はテナントのsender_nameから姓を補う",
       ex["sender_last_name"] == "test-tenant-A" and ex["sender_email"] == "a@example.co.jp")
     t("送信文章(件名)が反映される", ex["subject"] == "T22件名")
+    t("送信文章(本文)が全文で反映される(T67: 以前は60文字プレビューだった)",
+      ex["body"] == "T22本文")
     t("成功/失敗/フォームなし/総数が正しく集計される",
       ex["success"] == 1 and ex["no_form"] == 1 and ex["failed"] == 0 and ex["total"] == 2)
     t("URLクリック数が集計される", ex["click_count"] == 3)

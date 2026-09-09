@@ -942,7 +942,7 @@ def list_send_executions(con, tenant_id, list_id=None, date_from=None, date_to=N
             "company_name": r["tenant_name"], "sender_last_name": sender_last,
             "sender_first_name": sender_first, "sender_email": sender_email,
             "subject": (sample["subject"] if sample else "") or "",
-            "body_preview": ((sample["body"] if sample else "") or "")[:60],
+            "body": (sample["body"] if sample else "") or "",
             "success": counts["success"] or 0, "failed": counts["failed"] or 0,
             "no_form": counts["no_form"] or 0, "total": counts["total"] or 0,
             "click_count": clicks["clicks"] or 0, "last_clicked_at": clicks["last_clicked_at"],

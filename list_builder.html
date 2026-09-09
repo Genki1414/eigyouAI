@@ -400,10 +400,14 @@ tr.clickable:hover{background:var(--accent-soft)}
             対象企業のフォームが新しいタブで開く→そのタブで拡張機能のアイコンをクリック、で
             入力欄が自動で埋まります(送信ボタンは人が確認して押してください。取り消せない操作を
             自動化はしません)。
-            <br>初回のみ、<code>chrome_extension</code>フォルダをChromeの
+            <br>初回のみ、下の「拡張機能をダウンロード」で入手したフォルダをChromeの
             <code>chrome://extensions</code>(デベロッパーモード→パッケージ化されていない拡張機能を
             読み込む)から読み込んでおいてください(詳しくは「マニュアルDL」参照)。</p>
           <div class="btnrow" style="margin-top:8px">
+            <a id="btnDownloadExtension" href="#" style="font-family:'IBM Plex Sans JP',sans-serif;
+              font-size:13px;font-weight:700;border-radius:6px;padding:9px 18px;cursor:pointer;
+              background:var(--surface);color:var(--ink);border:1px solid var(--line);
+              text-decoration:none;display:inline-block">⬇ 拡張機能をダウンロード(.zip)</a>
             <button id="btnConnectExtension" class="ghost">拡張機能と連携する</button>
           </div>
           <p class="hint" id="autofillHint">接続すると準備できます。</p>
@@ -784,8 +788,9 @@ tr.clickable:hover{background:var(--accent-soft)}
             (フォームは見つかったが自動判定できなかった場合の補助機能で、
             対象企業ごとに1件・10分間だけ有効です)。</p>
           <ol>
-            <li>初回のみ: サーバー配布物の<code>chrome_extension</code>フォルダを展開し、
-              Chromeの<code>chrome://extensions</code>で「デベロッパーモード」をONにしてから
+            <li>初回のみ: 「自動送信ログ」の各リストの詳細画面にある
+              「⬇ 拡張機能をダウンロード(.zip)」から入手し、展開したフォルダをChromeの
+              <code>chrome://extensions</code>で「デベロッパーモード」をONにしてから
               「パッケージ化されていない拡張機能を読み込む」で読み込みます。</li>
             <li>「自動送信ログ」ページの「拡張機能と連携する」ボタンを1回押します
               (このブラウザのAPI接続情報が拡張機能へ渡されます)。</li>
@@ -1306,6 +1311,7 @@ async function doConnect() {
     refreshKillSwitch();
     refreshTrades();
     $("autofillHint").textContent = "拡張機能をインストール済みなら「拡張機能と連携する」を押してください。";
+    $("btnDownloadExtension").href = `${API}/chrome_extension.zip`;
   } catch (e) {
     connected = false;
     setConnStatus("接続失敗: " + e.message, "off");
@@ -1656,7 +1662,9 @@ async function refreshSendLogExecutions() {
     el.innerHTML = `<table><tr><th>ID</th><th>担当者(ID)</th><th>会社名</th><th>姓</th><th>名</th>
         <th>メールアドレス</th><th>送信文章</th><th>備考</th><th>送信成功/総数</th>
         <th>URLクリック数</th><th>最新クリック日時</th><th>実行日時</th><th>キャンセル</th></tr>` +
-      execs.map(x => `<tr>
+      execs.map(x => { const escSubject = (x.subject || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+        const escBody = (x.body || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+        return `<tr>
         <td><a href="#" class="execIdLink" data-id="${x.list_id}" data-name="${(x.list_name || "").replace(/"/g, "&quot;")}">${x.list_id}</a></td>
         <td>${x.staff_name ? `${x.staff_name}(${x.staff_id})` : "—"}</td>
         <td>${x.company_name || "—"}</td>
@@ -1664,7 +1672,8 @@ async function refreshSendLogExecutions() {
         <td>${x.sender_first_name || "—"}</td>
         <td style="font-size:11px">${x.sender_email || "—"}</td>
         <td style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-          title="${(x.subject || "").replace(/"/g, "&quot;")}">${x.subject || "—"}</td>
+          title="${escSubject}">${x.subject || "—"}
+          ${x.subject || x.body ? `<br><a href="#" class="execBodyToggle" data-for="body-${x.list_id}">文面を見る</a>` : ""}</td>
         <td><input type="text" class="execNoteInput" data-id="${x.list_id}"
           value="${(x.send_note || "").replace(/"/g, "&quot;")}" placeholder="例: 中国 解体土木プラント"
           style="font-size:11px;padding:4px 6px;width:120px"></td>
@@ -1672,12 +1681,28 @@ async function refreshSendLogExecutions() {
         <td>${x.click_count.toLocaleString()}</td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.last_clicked_at || "—"}</td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at || "—"}</td>
-        <td>—</td></tr>`).join("") +
+        <td>—</td></tr>
+        <tr id="body-${x.list_id}" class="execBodyRow" style="display:none">
+          <td colspan="12" style="background:var(--concrete)">
+            <div style="font-size:11px;color:var(--steel);font-weight:700;margin-bottom:4px">件名</div>
+            <div style="font-size:13px;margin-bottom:10px">${escSubject || "—"}</div>
+            <div style="font-size:11px;color:var(--steel);font-weight:700;margin-bottom:4px">本文</div>
+            <div style="font-size:13px;white-space:pre-wrap">${escBody || "—"}</div>
+          </td></tr>`; }).join("") +
       `</table>`;
     el.querySelectorAll(".execIdLink").forEach(a => {
       a.addEventListener("click", (e) => {
         e.preventDefault();
         goSendLogDetail(Number(a.dataset.id), a.dataset.name);
+      });
+    });
+    el.querySelectorAll(".execBodyToggle").forEach(a => {
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        const row = document.getElementById(a.dataset.for);
+        const opening = row.style.display === "none";
+        row.style.display = opening ? "" : "none";
+        a.textContent = opening ? "文面を閉じる" : "文面を見る";
       });
     });
     el.querySelectorAll(".execNoteInput").forEach(inp => {

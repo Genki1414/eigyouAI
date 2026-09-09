@@ -295,7 +295,7 @@ tr.clickable:hover{background:var(--accent-soft)}
 
         <div class="card step">
           <h3>1. 会社情報でリストを用意する</h3>
-          <p>「リスト取得」で都道府県・業種・スコアランク等の条件を選ぶと、該当件数が
+          <p>「リスト取得」で都道府県・業種等の条件を選ぶと、該当件数が
             自動で表示されます。名前を付けて保存すると「保存済みリスト」に残ります。
             自社で持っている企業リストがあれば「CSV検索」から取り込むこともできます
             (テンプレートは「CSV検索」ページからダウンロードできます)。</p>
@@ -752,7 +752,7 @@ tr.clickable:hover{background:var(--accent-soft)}
             結果を確認してから「リスト保存」で確定させます。</p>
           <ol>
             <li><b>共有マスタから条件で絞り込む</b>(「リスト取得」ページ):
-              都道府県・業種・スコアランク・資本金の上限などの条件を選び、[検索]を押すと
+              都道府県・業種・資本金の上限などの条件を選び、[検索]を押すと
               該当件数と結果一覧が表示されます。「リスト保存」で新規リストとして作成するか、
               既存のリストに追加するかを選べます。</li>
             <li><b>CSVで検索する</b>(「CSV検索」ページ): 「会社名で検索」「URLで検索」
@@ -868,8 +868,12 @@ tr.clickable:hover{background:var(--accent-soft)}
             <label class="chip"><input type="checkbox" value="tosou">塗装</label>
             <label class="chip"><input type="checkbox" value="kaitai">解体</label>
           </div>
-          <label style="margin-top:10px">スコアランク</label>
-          <div class="chips" id="fRanks">
+          <!-- 2026-09-09: スコアリング機能が現状使えないため一時的に非表示
+               (ユーザー指示。使えるようになったらこのdisplay:noneを外す。
+               label/.chipsに独自のdisplay指定がありhidden属性だけでは
+               効かないため、明示的にstyleへdisplay:noneを書く) -->
+          <label style="margin-top:10px;display:none">スコアランク</label>
+          <div class="chips" id="fRanks" style="display:none">
             <label class="chip"><input type="checkbox" value="S">S</label>
             <label class="chip"><input type="checkbox" value="A">A</label>
             <label class="chip"><input type="checkbox" value="B">B</label>
@@ -2445,8 +2449,8 @@ async function runFilterSearch() {
     const r = await call("/api/tenant/search/filter", { method: "POST", body: JSON.stringify({ filters }) });
     lastFilterSearch = filters;
     const sampleTable = !r.sample.length ? "" :
-      `<table style="margin-top:8px"><tr><th>会社名</th><th>都道府県</th><th>ランク</th></tr>` +
-      r.sample.map(c => `<tr><td>${c.name}</td><td>${c.pref || "—"}</td><td>${c.rank || "—"}</td></tr>`).join("") +
+      `<table style="margin-top:8px"><tr><th>会社名</th><th>都道府県</th></tr>` +
+      r.sample.map(c => `<tr><td>${c.name}</td><td>${c.pref || "—"}</td></tr>`).join("") +
       `</table>` +
       (r.count_before_cap > r.sample.length
         ? `<p class="hint" style="margin-top:4px">先頭${r.sample.length}社を表示(保存前のプレビューのため。全件は保存後に「保存済みリスト」で確認できます)</p>`

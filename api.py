@@ -3043,25 +3043,24 @@ def self_test(port=8899):
                       {"subject": "x", "body": "y"}, token=key_a)
     t("他テナントのリストへは送信できない(404)", st == 404)
 
-    print("\n── リスト再送信ガード(T68: 全社送信済みの場合、実行ログを汚さない) ──")
+    print("\n── リスト再送信(T71: 全社送信済みでも再送信できる。T68のガードは撤廃) ──")
     t68_company = con.execute(
         "SELECT id FROM companies WHERE contact_url IS NOT NULL AND dedup_of IS NULL LIMIT 1").fetchone()
     if t68_company:
         t68_cid = t68_company["id"]
         now_t68 = datetime.now().isoformat(timespec="seconds")
         cur = con.execute("""INSERT INTO target_lists (tenant_id,name,source,company_count,created_at)
-            VALUES (?,?,?,?,?)""", (tid_a, "テストA_T68再送信ガード", "filter", 1, now_t68))
+            VALUES (?,?,?,?,?)""", (tid_a, "テストA_T71再送信", "filter", 1, now_t68))
         t68_list_id = cur.lastrowid
         con.execute("""INSERT INTO target_list_members (list_id, company_id, send_status,
             created_at, updated_at) VALUES (?,?,'PENDING',?,?)""", (t68_list_id, t68_cid, now_t68, now_t68))
         con.commit()
 
         res1 = TL.send_list(con, tid_a, t68_list_id, "T68件名1", "T68本文1", dry_run=True)
-        t("T68: まだ何も送っていないリストへのドライランは正常に受け付けられる",
+        t("T71: まだ何も送っていないリストへのドライランは正常に受け付けられる",
           res1 is not None and "error" not in res1)
 
-        # このテスト環境ではKill Switchが停止中で本番送信はガードに阻まれ
-        # touches.sent_atが立たないため、「実際に送信済み」の状態は直接作って再現する
+        # 「実際に送信済み」の状態を直接作る(本番と同じ形。sent_at・実送信のnoteを持つ)
         t68_campaign_id = con.execute("SELECT campaign_id FROM target_lists WHERE id=?",
                                        (t68_list_id,)).fetchone()["campaign_id"]
         con.execute("""UPDATE touches SET sent_at=?, note='provider_id=form_t68'
@@ -3071,13 +3070,21 @@ def self_test(port=8899):
         before_ts = con.execute("SELECT last_send_started_at FROM target_lists WHERE id=?",
                                  (t68_list_id,)).fetchone()["last_send_started_at"]
 
-        res2 = TL.send_list(con, tid_a, t68_list_id, "T68件名2", "T68本文2", dry_run=False)
-        t("T68: 全社送信済みの状態で本番送信すると分かりやすいエラーになる",
-          res2 is not None and "全社すでに送信済み" in (res2.get("error") or ""))
+        # このテスト環境ではKill Switchが停止中のため、dry_run=Falseを呼んでも
+        # 実チャネルへは触れない(ガードでstopped扱いになるだけ)。ここで検証したいのは
+        # 「全社送信済みでもsend_list()自体はエラーにならず先へ進む」ことと、
+        # 「実行日時・件名/本文が新しい内容に更新される」ことなので、それで十分
+        res2 = TL.send_list(con, tid_a, t68_list_id, "T68件名2(更新後)", "T68本文2(更新後)", dry_run=False)
+        t("T71: 全社送信済みでも本番送信はエラーにならず受け付けられる",
+          res2 is not None and "error" not in res2)
         after_ts = con.execute("SELECT last_send_started_at FROM target_lists WHERE id=?",
                                 (t68_list_id,)).fetchone()["last_send_started_at"]
-        t("T68: 何も新しく送っていないのでlast_send_started_atは更新されない"
-           "(=自動送信ログに偽の実行が残らない)", before_ts == after_ts)
+        t("T71: 再送信するとlast_send_started_atが更新される(新しい実行として記録される)",
+          after_ts is not None and after_ts >= before_ts)
+        updated_touch = con.execute("""SELECT subject, body FROM touches
+            WHERE campaign_id=? AND company_id=? AND step=1""", (t68_campaign_id, t68_cid)).fetchone()
+        t("T71: 送信済みの企業でも再送信時に件名・本文が最新の内容へ更新される",
+          updated_touch["subject"] == "T68件名2(更新後)" and updated_touch["body"] == "T68本文2(更新後)")
 
         con.execute("DELETE FROM touches WHERE campaign_id=?", (t68_campaign_id,))
         con.execute("DELETE FROM campaigns WHERE id=?", (t68_campaign_id,))
@@ -3085,7 +3092,7 @@ def self_test(port=8899):
         con.execute("DELETE FROM target_lists WHERE id=?", (t68_list_id,))
         con.commit()
     else:
-        t("T68リスト再送信ガード", False, "適切な企業が見つからずスキップ")
+        t("T71リスト再送信", False, "適切な企業が見つからずスキップ")
 
     print("\n── 自動送信の新パラメータ(T23: 営業拒否バイパス/送信元上書き/過去送信対象キャンセル) ──")
     st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",

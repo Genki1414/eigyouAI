@@ -544,8 +544,19 @@ def rewrite_tracked_links(con, touch_id, body, base_url):
 # ── 一括送信 ────────────────────────────────
 def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clicks=False,
                    sender_template_id=None, allow_no_solicit=False, sender_override=None):
-    """キャンペーンの未送信分を実際に送る。
+    """キャンペーンの対象企業へ実際に送る。
     campaign.py simulate の本番版がこれ。接触ガードはここでも最終確認する。
+
+    2026-09-09(ユーザー要望): 以前は`touches.sent_at`が既に埋まっている(=
+    過去に送信済みの)行を対象から除外していたが、「同じ企業に何度も送れない」
+    ことの実用性が薄いという指摘を受けて撤廃した。この関数の呼び出し1回ごとに、
+    対象キャンペーン・ステップの全行を(sent_atの有無を問わず)毎回対象にする。
+    誤操作での連打による意図しない二重送信は、下記のrun_nonceを使った
+    idem_keyで防ぐ(=同じ1回の呼び出しの中で同じ会社への重複配信は防ぐが、
+    別の呼び出し<つまり「送信する」を改めて押す>なら再送信できる)。
+    can_contact()(配信停止/オプトアウト・テナント除外・重複レコード)は
+    これとは無関係に、以前と変わらず必ずチェックされる。
+
     track_clicks=Trueなら、本文中のURLをクリック計測リンクへ置き換える
     (MIKOMERUの「URLアクセスの記録」相当。dry_run時は置き換えない=トークンを
     無駄に発行しない)。この設定はcampaigns/touchesへは保存しない——両者は
@@ -601,7 +612,6 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
            LEFT JOIN tenants tn ON tn.id = o.tenant_id
            LEFT JOIN target_lists tl ON tl.campaign_id = t.campaign_id
            WHERE t.campaign_id=? AND t.step=?
-             AND (t.sent_at IS NULL OR t.note LIKE '%provider_id=mock_%')
              AND t.body IS NOT NULL AND t.body != ''"""
     p = [campaign_id, step]
     if limit:
@@ -610,8 +620,16 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
 
     stats = {"sent": 0, "failed": 0, "blocked": 0, "suppressed": 0, "stopped": 0}
     if not rows:
-        print("送信対象がありません（文面未生成、または全て送信済み）")
+        print("送信対象がありません（文面未生成）")
         return stats
+
+    # この呼び出し1回だけに固有のnonce。idem_keyに混ぜることで、「同じ呼び出しの中で
+    # 同じ会社への重複配信を防ぐ」(並列ワーカー間の競合対策。本来の目的)は保ったまま、
+    # 「別の呼び出し(=改めて「送信する」を押す)なら再送信できる」を両立させる
+    # (2026-09-09。以前はcampaign_id+company_id+stepだけがキーで、呼び出しをまたいで
+    # 同じキーになるため、既に送信済みの企業を対象にしても冪等キー一致で黙って
+    # スキップされ、結局再送信できなかった)。
+    run_nonce = uuid.uuid4().hex[:10]
 
     # sender_template_id指定時は、テナントの「有効化」済み送信元の代わりにこのテンプレートを
     # この送信だけに使う。同じ他テナントのIDを渡されても情報が漏れないようtenant_idでも絞る
@@ -710,8 +728,10 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
         # ドライランと本番送信は別の冪等キー空間を使う。同じキーだとドライランが
         # 冪等キーを占有してしまい、その後の本番送信が「送信済み(冪等キー一致)」
         # として何もせず素通りしてしまう(実サイトに一度も送らないまま「完了」扱いになる)。
+        # run_nonceはこの関数呼び出し1回に固有(上部参照)。呼び出しをまたいだ
+        # 再送信をブロックせず、同じ呼び出し内の並列ワーカー間の競合だけを防ぐ。
         key = R.Idempotency.key("send" if not dry_run else "send:dryrun",
-                                 campaign_id, r["company_id"], step)
+                                 campaign_id, r["company_id"], step, run_nonce)
         subject = render_merge_tags(r["subject"], to, sender)
         body = render_merge_tags(r["body"], to, sender)
         if track_clicks and not dry_run:

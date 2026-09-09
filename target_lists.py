@@ -703,12 +703,19 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
     にそのまま委譲する。can_contact()・冪等性・FormSenderのペーシング上限はすべて
     send_campaign()側の仕組みがそのまま効く(ここで独自の送信経路は作らない)。
 
-    二重クリック対策: このリストが初めて送信される時だけ新しいcampaignを作り、
-    以後はtarget_lists.campaign_idに記録した同じcampaignを使い回す。同じ
-    campaign_idへtouchesを追加してもUNIQUE(campaign_id, company_id, step)と
-    INSERT OR IGNOREで重複しない。既に送信済み(sent_at IS NOT NULL)の行は
-    send_campaign()側のWHERE条件で自動的に対象から外れるため、再送信を押しても
-    未送信分だけがもう一度試される(リトライにはなるが二重送信にはならない)。
+    同じリストへ何度でも送信できる(2026-09-09、ユーザー要望によりT68以前の
+    「既に送信済みの企業は自動で除外する」仕様を撤廃): このリストが初めて
+    送信される時だけ新しいcampaignを作り、以後はtarget_lists.campaign_idに
+    記録した同じcampaignを使い回す。以前は既に送信済み(sent_at IS NOT NULL)の
+    行をsend_campaign()側のWHERE条件で自動的に対象から除外していたが、
+    「同じ企業に何度も送れない」ことの実用性が薄いという指摘を受けて撤廃した。
+    ボタンを押すたびにリスト内の全社へ改めて送信する(直前に入力し直した件名・
+    本文があればそちらが使われる)。誤操作での連打による意図しない二重送信は
+    send_campaign()側のidem_key(呼び出しごとに変わるnonceを含む)で防ぐ
+    (=同じ「送信する」1クリックの中での重複は防ぐが、別のクリックなら
+    再送信できる、という設計。詳しくはsend_campaign()のdocstring参照)。
+    can_contact()(配信停止/オプトアウト)はこれとは無関係に、以前と変わらず
+    必ずチェックされる。
 
     allow_no_solicit/sender_overrideはそのままsenders.send_campaign()へ渡す
     (MIKOMERUの「営業拒否サイトへの送信」「送信元テンプレートの内容を送信直前に
@@ -785,15 +792,15 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
 
     now2 = datetime.now().isoformat(timespec="seconds")
     for m in members:
-        # INSERT OR IGNOREだけだと、ドライランで一度作られた行の件名・本文が
-        # 以後上書きされず古いまま残ってしまう(まだ本番送信していない行に限り、
-        # 直前に画面で入力した最新の件名・本文へ更新する)。
+        # 2026-09-09: 以前は「まだ本番送信していない行に限り」件名・本文を
+        # 更新していた(WHERE touches.sent_at IS NULL OR ...)が、既に送信済みの
+        # 企業への再送信を許可した以上、再送信のたびに直前に入力し直した
+        # 最新の件名・本文が使われるべきなので、常に上書きするようにした。
         con.execute("""INSERT INTO touches
             (campaign_id, company_id, channel, variant, step, subject, body)
             VALUES (?,?,'フォーム','A',1,?,?)
             ON CONFLICT(campaign_id, company_id, step) DO UPDATE SET
-                subject=excluded.subject, body=excluded.body
-            WHERE touches.sent_at IS NULL OR touches.note LIKE '%provider_id=mock_%'""",
+                subject=excluded.subject, body=excluded.body""",
             (campaign_id, m["id"], subject, body))
     con.commit()
 
@@ -801,32 +808,19 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
         # 実送信の直前に「処理中」を記録しておく。サーバー再起動等で送信が
         # 途中で止まった場合でも、PROCESSINGのまま残った行=結果不明な行として
         # 後から目視で気づけるようにするため(PENDINGのままだと「未着手」と
-        # 「処理中に落ちた」の区別がつかない)。send_campaign()が今回実際に
-        # 対象とする行(sent_atがまだ無い行)だけに絞る。既に送信済み(SUCCESS等)の
-        # 行まで一律PROCESSINGへ戻すと、今回の対象外なのに更新されないまま
-        # 「処理中」で止まって見えてしまう。
-        pending_ids = {row["company_id"] for row in con.execute(
-            "SELECT company_id FROM touches WHERE campaign_id=? AND step=1 AND sent_at IS NULL",
-            (campaign_id,)).fetchall()}
-        if not pending_ids:
-            # 2026-09-09: このガードが無いと、全社送信済みのリストへ再度「送信」を
-            # 押した際にも自動送信ログの「実行日時」だけが今の時刻に更新されてしまい、
-            # 詳細を開くと古い結果しか無い(=今回は何も新しく送っていないのに、あたかも
-            # 今実行したかのような紛らわしい表示になる)というユーザー報告を受けて追加。
-            # 新規に送信できる対象が無い場合はここで打ち切り、last_send_started_atも
-            # 更新しない(=自動送信ログに新しい実行として残さない)
-            return {"error": "対象企業は全社すでに送信済みです(新たに送信できる企業がありません)。"
-                              "過去の結果は「自動送信ログ」の詳細から確認できます。"}
+        # 「処理中に落ちた」の区別がつかない)。同じ企業への再送信も許可した
+        # ため、既に送信済みかどうかを問わずリストの全メンバーを対象にする。
         con.executemany("""UPDATE target_list_members SET send_status='PROCESSING',
             started_at=?, updated_at=? WHERE list_id=? AND company_id=?""",
-            [(now2, now2, list_id, m["id"]) for m in members if m["id"] in pending_ids])
+            [(now2, now2, list_id, m["id"]) for m in members])
         con.commit()
 
     # 「自動送信ログ」一覧(MIKOMERU同等。1リスト=1実行として集計表示する)用の
     # スナップショット。誰が・どの送信元で・いつ実行したかをtarget_listsへ記録する。
-    # dry_runは常に更新する(動作確認用として何度でも自由に再実行できるべきなので、
-    # 対象が尽きているかの判定はしない)。本番送信は、上のpending_idsチェックを
-    # 通過した(=新たに送信する対象が実在する)場合のみここに到達する。
+    # dry_run/本番どちらでも更新する(押すたびに最新の実行内容へ上書きする。
+    # 同じ企業への再送信を許可した以上、「送信する」を押せば必ず何かしら
+    # 対象になる=毎回が実際の新しい実行になるため、以前のT68のような
+    # 「対象が尽きていたら実行として記録しない」ガードは不要になった)。
     con.execute("""UPDATE target_lists SET sent_by_staff_id=?, sent_sender_template_id=?,
         last_send_started_at=? WHERE id=?""",
         (staff_id, sender_template_id, datetime.now().isoformat(timespec="seconds"), list_id))

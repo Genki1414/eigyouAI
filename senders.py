@@ -202,7 +202,12 @@ class MailSender(BaseSender):
         }).encode("utf-8")
         req = urllib.request.Request(
             "https://api.resend.com/emails", data=payload, method="POST",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+                     # urllibの既定User-Agent("Python-urllib/x.y")だとResend側で
+                     # 403 Forbiddenになることを本番で確認した(curlや明示的な
+                     # User-Agent指定では成功する。ボット判定の一種と思われる)。
+                     # 2026-09-09発覚。
+                     "User-Agent": "eigyouAI/1.0"})
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 result = _json.loads(resp.read())

@@ -3037,6 +3037,50 @@ def self_test(port=8899):
                       {"subject": "x", "body": "y"}, token=key_a)
     t("他テナントのリストへは送信できない(404)", st == 404)
 
+    print("\n── リスト再送信ガード(T68: 全社送信済みの場合、実行ログを汚さない) ──")
+    t68_company = con.execute(
+        "SELECT id FROM companies WHERE contact_url IS NOT NULL AND dedup_of IS NULL LIMIT 1").fetchone()
+    if t68_company:
+        t68_cid = t68_company["id"]
+        now_t68 = datetime.now().isoformat(timespec="seconds")
+        cur = con.execute("""INSERT INTO target_lists (tenant_id,name,source,company_count,created_at)
+            VALUES (?,?,?,?,?)""", (tid_a, "テストA_T68再送信ガード", "filter", 1, now_t68))
+        t68_list_id = cur.lastrowid
+        con.execute("""INSERT INTO target_list_members (list_id, company_id, send_status,
+            created_at, updated_at) VALUES (?,?,'PENDING',?,?)""", (t68_list_id, t68_cid, now_t68, now_t68))
+        con.commit()
+
+        res1 = TL.send_list(con, tid_a, t68_list_id, "T68件名1", "T68本文1", dry_run=True)
+        t("T68: まだ何も送っていないリストへのドライランは正常に受け付けられる",
+          res1 is not None and "error" not in res1)
+
+        # このテスト環境ではKill Switchが停止中で本番送信はガードに阻まれ
+        # touches.sent_atが立たないため、「実際に送信済み」の状態は直接作って再現する
+        t68_campaign_id = con.execute("SELECT campaign_id FROM target_lists WHERE id=?",
+                                       (t68_list_id,)).fetchone()["campaign_id"]
+        con.execute("""UPDATE touches SET sent_at=?, note='provider_id=form_t68'
+            WHERE campaign_id=? AND company_id=? AND step=1""",
+            (now_t68, t68_campaign_id, t68_cid))
+        con.commit()
+        before_ts = con.execute("SELECT last_send_started_at FROM target_lists WHERE id=?",
+                                 (t68_list_id,)).fetchone()["last_send_started_at"]
+
+        res2 = TL.send_list(con, tid_a, t68_list_id, "T68件名2", "T68本文2", dry_run=False)
+        t("T68: 全社送信済みの状態で本番送信すると分かりやすいエラーになる",
+          res2 is not None and "全社すでに送信済み" in (res2.get("error") or ""))
+        after_ts = con.execute("SELECT last_send_started_at FROM target_lists WHERE id=?",
+                                (t68_list_id,)).fetchone()["last_send_started_at"]
+        t("T68: 何も新しく送っていないのでlast_send_started_atは更新されない"
+           "(=自動送信ログに偽の実行が残らない)", before_ts == after_ts)
+
+        con.execute("DELETE FROM touches WHERE campaign_id=?", (t68_campaign_id,))
+        con.execute("DELETE FROM campaigns WHERE id=?", (t68_campaign_id,))
+        con.execute("DELETE FROM target_list_members WHERE list_id=?", (t68_list_id,))
+        con.execute("DELETE FROM target_lists WHERE id=?", (t68_list_id,))
+        con.commit()
+    else:
+        t("T68リスト再送信ガード", False, "適切な企業が見つからずスキップ")
+
     print("\n── 自動送信の新パラメータ(T23: 営業拒否バイパス/送信元上書き/過去送信対象キャンセル) ──")
     st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
                       {"subject": "x", "body": "y", "allow_no_solicit": True}, token=key_a)

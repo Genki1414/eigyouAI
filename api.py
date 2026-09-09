@@ -2644,8 +2644,10 @@ def self_test(port=8899):
         con.execute("DELETE FROM target_list_members WHERE list_id IN (?,?)",
                     (url_list_id, r.get("list_id")))
         con.execute("DELETE FROM target_lists WHERE id IN (?,?)", (url_list_id, r.get("list_id")))
-        con.execute("""DELETE FROM companies WHERE owner_tenant_id=? AND
-            name IN ('URL検索良い会社','URL検索悪い会社')""", (tid_a,))
+        # T64より前提とする挙動が変わり、CSVで新規追加した企業はowner_tenant_id=NULL
+        # (共有マスタ)になるため、テスト名で直接削除する
+        con.execute("""DELETE FROM companies WHERE
+            name IN ('URL検索良い会社','URL検索悪い会社')""")
         con.commit()
     finally:
         _fn_mod.discover_contact_url = orig_discover
@@ -2688,9 +2690,14 @@ def self_test(port=8899):
     st, r = get_auth(f"/api/tenant/lists/{list_a_id}", token=key_b)
     t("逆方向も同様に404", st == 404)
 
-    st, r = post_auth("/api/tenant/lists/preview", {"filters": {"prefs": ["福岡県"]}}, token=key_a)
-    t("他テナントがCSVで持ち込んだ非公開企業はフィルタにも出てこない",
-      st == 200 and not any(s["name"] == "テナントB専用企業" for s in r.get("sample", [])))
+    # previewのsampleは件数上限があり、福岡県だけで既存データが数百件あるため
+    # サンプル抽出漏れで偽陰性になりうる。フィルタ条件のWHERE句自体が正しく
+    # 共有マスタ(owner_tenant_id IS NULL)を拾うことは他の絞り込みテストで
+    # 既に検証済みなので、ここではDBの状態を直接見て「他テナントがCSVで持ち込んだ
+    # 新規企業がowner_tenant_id=NULL(共有マスタ)になっている」ことを確認する
+    b_company = con.execute("SELECT owner_tenant_id FROM companies WHERE name='テナントB専用企業'").fetchone()
+    t("他テナントがCSVで持ち込んだ新規企業は共有マスタ(owner_tenant_id=NULL)になる(T64)",
+      b_company is not None and b_company["owner_tenant_id"] is None)
 
     print("\n── 保存済みリスト管理(MIKOMERU同等UI: 編集/複製/個別削除/ソフト削除/復元) ──")
     # list_a_id/list_b_idは以降の送信テスト等で厳密な状態を前提にされているため、
@@ -2755,11 +2762,30 @@ def self_test(port=8899):
     csv_text_own = "会社名,URL\nT26編集テスト株式会社,https://t26-before.example.co.jp/\n"
     st, r = post_auth("/api/tenant/lists/csv",
                       {"name": "T26編集テスト用リスト", "csv": csv_text_own}, token=key_a)
-    t("編集テスト用に自社の非公開企業をCSVで1件追加", st == 200 and r.get("new_companies") == 1)
+    t("編集テスト用に新規企業をCSVで1件追加", st == 200 and r.get("new_companies") == 1)
     own_list_id = r["list_id"]
     st, r = get_auth(f"/api/tenant/lists/{own_list_id}", token=key_a)
-    own_company_id = r["members"][0]["id"]
-    t("追加した企業はeditable=true(自テナントの非公開データ)", r["members"][0]["editable"] is True)
+    csv_added_company_id = r["members"][0]["id"]
+    t("CSVで新規追加した企業は共有マスタ扱いなのでeditable=false(T64)",
+      r["members"][0]["editable"] is False)
+    st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{csv_added_company_id}",
+                      {"contact_url": "https://hijack.example.com/"}, token=key_a)
+    t("CSVで追加した企業(=共有マスタ)は追加した本人でも編集できない(400, T64)", st == 400)
+
+    # update_member_company()の「自テナントの非公開データ(owner_tenant_id=自分)は
+    # 編集できる」パスは、T64より前にCSVで追加された既存データ向けに残っている。
+    # T64以降はこの経路で新規に非公開データが作られないため、直接INSERTして
+    # レガシーデータを模擬し、このパス自体は生きていることを検証する
+    own_company_id = con.execute("""INSERT INTO companies
+        (name, name_norm, owner_tenant_id, data_source, website_url) VALUES (?,?,?,?,?)""",
+        ("T26編集テスト株式会社(レガシー非公開)", db.normalize_name("T26編集テスト株式会社(レガシー非公開)"),
+         tid_a, "customer_upload", "https://t26-before.example.co.jp/")).lastrowid
+    con.execute("""INSERT INTO target_list_members (list_id, company_id, send_status, created_at, updated_at)
+        VALUES (?,?,'PENDING',datetime('now'),datetime('now'))""", (own_list_id, own_company_id))
+    con.commit()
+    st, r = get_auth(f"/api/tenant/lists/{own_list_id}", token=key_a)
+    t("レガシーな非公開データ(owner_tenant_id=自分)はeditable=true",
+      any(m["id"] == own_company_id and m["editable"] is True for m in r["members"]))
 
     st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{own_company_id}",
                       {"name": "", "contact_url": "https://t26-after.example.co.jp/"}, token=key_a)
@@ -2774,13 +2800,14 @@ def self_test(port=8899):
       and r["company"]["phone"] == "03-9999-0000")
     st, r = get_auth(f"/api/tenant/lists/{own_list_id}", token=key_a)
     t("編集内容がリスト表示にも反映される",
-      st == 200 and r["members"][0]["contact_url"] == "https://t26-after.example.co.jp/")
+      st == 200 and any(m["id"] == own_company_id
+                         and m["contact_url"] == "https://t26-after.example.co.jp/" for m in r["members"]))
     st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{own_company_id}",
                       {"contact_url": "https://hijack.example.com/"}, token=key_b)
     t("他テナントは編集できない(404)", st == 404)
     con.execute("DELETE FROM target_list_members WHERE list_id=?", (own_list_id,))
     con.execute("DELETE FROM target_lists WHERE id=?", (own_list_id,))
-    con.execute("DELETE FROM companies WHERE id=?", (own_company_id,))
+    con.execute("DELETE FROM companies WHERE id IN (?,?)", (own_company_id, csv_added_company_id))
     con.commit()
 
     st, r = post_auth("/api/tenant/lists/delete", {"list_ids": [dup_list_id]}, token=key_a)
@@ -2836,8 +2863,8 @@ def self_test(port=8899):
     sc_company = con.execute("""SELECT name, pref FROM companies
         WHERE dedup_of IS NULL AND owner_tenant_id IS NULL AND pref IS NOT NULL LIMIT 1""").fetchone()
     # 2行目は会社名列が空(=会社名を特定できない行)なので「会社不明」扱いになる。
-    # 存在しない社名を入れても(ヒラケルの意図的な設計上)非公開企業として新規作成
-    # されてしまい「会社不明」にはならないため、skipped_rowsを狙って再現するには
+    # 存在しない社名を入れても(ヒラケルの意図的な設計上)共有マスタの新規企業として
+    # 作成されてしまい「会社不明」にはならないため、skipped_rowsを狙って再現するには
     # 会社名そのものを空にする必要がある
     csv_search_text = f"会社名,都道府県\n{sc_company['name']},{sc_company['pref']}\n,東京都\n"
     st, r = post_auth("/api/tenant/search/csv",
@@ -3541,8 +3568,8 @@ def self_test(port=8899):
     t("2文字以上の検索で企業が引ける",
       st == 200 and any(c["id"] == excl_company_id for c in r.get("companies", [])))
     st, r = get_auth("/api/tenant/companies/search?q=" + urllib.parse.quote("テナントB専用"), token=key_a)
-    t("【テナント分離監査】他テナントの非公開企業は除外設定の検索にも出てこない",
-      st == 200 and all(c["name"] != "テナントB専用企業" for c in r.get("companies", [])))
+    t("他テナントがCSVで持ち込んだ新規企業は共有マスタ化しているので除外設定の検索にも出る(T64)",
+      st == 200 and any(c["name"] == "テナントB専用企業" for c in r.get("companies", [])))
 
     st, r = post_auth("/api/tenant/exclusions", {"company_id": "not-an-int"}, token=key_a)
     t("company_idが整数でないと400", st == 400)
@@ -3971,6 +3998,10 @@ def self_test(port=8899):
     con.execute("DELETE FROM target_list_members WHERE list_id IN (?,?)", (list_a_id, list_b_id))
     con.execute("DELETE FROM target_lists WHERE id IN (?,?)", (list_a_id, list_b_id))
     con.execute("DELETE FROM companies WHERE owner_tenant_id IN (?,?)", (tid_a, tid_b))
+    # T64以降、CSVで新規追加された企業はowner_tenant_id=NULL(共有マスタ)になるため
+    # 上の行では消えない。テスト名で個別に消す(次回実行時に「既存マッチ」してしまい
+    # new_companiesが0になる誤検知を防ぐ)
+    con.execute("DELETE FROM companies WHERE name='テナントB専用企業'")
     con.execute("DELETE FROM offers WHERE tenant_id IN (?,?)", (tid_a, tid_b))
     con.execute("DELETE FROM tenants WHERE id IN (?,?)", (tid_a, tid_b))
     con.commit()

@@ -5,9 +5,16 @@ target_lists.py — テナントごとの送信先リスト作成
   1. フィルタ型: 共有マスタ(companies)から条件で絞り込んでスナップショット保存
   2. CSV型: 顧客が自分の企業リストをアップロードして取り込む
 
-companies.owner_tenant_id: NULL=全テナント共有の国交省/mikomeru由来マスタ。
-値あり=そのテナントがCSVで持ち込んだ非公開データ(他テナントには一切見えない)。
+companies.owner_tenant_id: NULL=全テナント共有の国交省/mikomeru/CSV由来マスタ。
+値あり=そのテナント固有の非公開データ(他テナントには一切見えない)。
 フィルタ・一覧・詳細のすべてでこの境界を必ず通すこと(他テナント漏洩の防止)。
+
+【2026-09-09変更】CSVで持ち込んだ会社のうち、既存データと一致しなかった
+(=真に新規の)会社は、以前は持ち込んだテナント専用の非公開データ
+(owner_tenant_id=そのテナント)として追加していたが、ユーザー要望により
+owner_tenant_id=NULLの共有マスタとして追加するよう変更した(名簿の登録数を
+テナントの利用を通じて増やしていく方針)。既存データにマッチした場合は
+そのレコード(公開/非公開いずれもあり得る)にそのまま寄せるだけで変更しない。
 
 api.pyの /api/tenant/* エンドポイントがこのモジュールを呼ぶ。CLIは検証用。
   python3 target_lists.py list --api-key <key>
@@ -186,6 +193,7 @@ _PREF_COLS = ["pref", "都道府県", "県"]
 _PHONE_COLS = ["phone", "電話番号", "tel"]
 _EMAIL_COLS = ["email", "メール", "メールアドレス"]
 _URL_COLS = ["website_url", "url", "hp", "ホームページ", "サイト"]
+_TRADE_COLS = ["業種", "業種名", "trade", "gyoshu"]
 
 
 def _pick(row, cols):
@@ -198,6 +206,21 @@ def _pick(row, cols):
     return None
 
 
+def _derive_trades(row, raw_name):
+    """CSVで新規追加する会社の業種をconfig.TARGET_TRADESのキーワードで推定する。
+    「業種」列があればそれを優先し(顧客側の自己申告なので精度が高い)、
+    無い・ヒットしない場合だけ会社名のテキストから推測する(社名に「〇〇塗装」の
+    ように業種が出ている場合しか拾えない弱い手がかりなので、あくまで補助)。
+    ingest_mikomeru.TRADE_KEYWORDSと同じ表・同じ判定ロジックを流用する。"""
+    import ingest_mikomeru as IM
+
+    gyoshu = _pick(row, _TRADE_COLS)
+    trades = IM.map_trades(gyoshu) if gyoshu else ""
+    if not trades:
+        trades = IM.map_trades(raw_name)
+    return trades
+
+
 # URLで実際にサイトを開いて問い合わせページを探す(discover_urls=True)のは
 # 1件ずつPlaywrightでブラウザを起動する重い処理のため、暴走・誤操作の被害を
 # 抑える保守的な上限を設ける(MAX_CSV_ROWSとは別枠)。
@@ -207,8 +230,9 @@ MAX_URL_DISCOVERY_ROWS = 30
 def create_from_csv(con, tenant_id, name, csv_text, discover_urls=False, existing_list_id=None):
     """顧客が持ち込む企業リストを取り込む。既存の共有マスタ or 自テナントの
     既存データと商号(正規化)+都道府県が一致すればそこに寄せ、無ければ
-    owner_tenant_id=自分のtenant_idの新規companyとして追加する
-    (=他テナントには一切見えない非公開データになる)。
+    owner_tenant_id=NULLの共有マスタとして新規companyを追加する(=他テナントも
+    検索・送信対象にできるようになる。2026-09-09変更、旧仕様は本ファイル冒頭コメント
+    参照)。業種はCSVの「業種」列(あれば)か会社名から`_derive_trades()`で推定する。
 
     discover_urls=True(MIKOMERUの「CSV検索(URLで検索)」相当)にすると、
     CSVにURL列があり、かつcontact_url未確定の企業について、実際にそのURLへ
@@ -259,11 +283,12 @@ def create_from_csv(con, tenant_id, name, csv_text, discover_urls=False, existin
             cid = existing["id"]
             matched += 1
         else:
+            trades = _derive_trades(row, raw_name)
             cur2 = con.execute("""INSERT INTO companies
-                (name, name_norm, pref, phone, email, website_url, data_source, owner_tenant_id)
-                VALUES (?,?,?,?,?,?,?,?)""",
+                (name, name_norm, pref, phone, email, website_url, trades, data_source, owner_tenant_id)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
                 (raw_name, name_norm, pref, _pick(row, _PHONE_COLS), _pick(row, _EMAIL_COLS),
-                 row_url, "customer_upload", tenant_id))
+                 row_url, trades, "customer_upload", None))
             cid = cur2.lastrowid
             created += 1
         con.execute("""INSERT OR IGNORE INTO target_list_members
@@ -326,8 +351,10 @@ def run_csv_search(con, tenant_id, filename, csv_text, mode="name", name_col=Non
     MIKOMERUとの意図的な違い: MIKOMERUは自社が保有する会社基本情報DBを検索するだけで、
     一致しない行(「会社不明」)は何も作られない。ヒラケルの「CSV検索」は元々
     「自社の企業リストを取り込む」機能(MIKOMERUに無い独自機能)を兼ねているため、
-    一致しない行は御社専用の非公開企業として新規に追加する。これは仕様の劣化ではなく、
-    自社保有リストを送信対象にできるというヒラケル側の価値をそのまま残すための設計判断。
+    一致しない行は新規の共有マスタ企業として追加する(=他テナントも検索・送信対象に
+    できる。2026-09-09変更、名簿の登録数を増やす方針。旧仕様=御社専用の非公開企業
+    として追加、はcreate_from_csv()側のコメント・本ファイル冒頭コメント参照)。
+    業種はCSVの「業種」列(あれば)か会社名から`_derive_trades()`で推定する。
 
     mode='url'の場合は、name_col/url_colで指定した列を使い、問い合わせページの探索
     (discover_contact_url)を必ず行う(MIKOMERUの「URLで検索」が問い合わせページURLの
@@ -363,11 +390,12 @@ def run_csv_search(con, tenant_id, filename, csv_text, mode="name", name_col=Non
             cid = existing["id"]
             matched += 1
         else:
+            trades = _derive_trades(row, raw_name)
             cur2 = con.execute("""INSERT INTO companies
-                (name, name_norm, pref, phone, email, website_url, data_source, owner_tenant_id)
-                VALUES (?,?,?,?,?,?,?,?)""",
+                (name, name_norm, pref, phone, email, website_url, trades, data_source, owner_tenant_id)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
                 (raw_name, name_norm, pref, _pick(row, _PHONE_COLS), _pick(row, _EMAIL_COLS),
-                 row_url, "customer_upload", tenant_id))
+                 row_url, trades, "customer_upload", None))
             cid = cur2.lastrowid
             created += 1
         company_ids.append(cid)

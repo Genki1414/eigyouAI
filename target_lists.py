@@ -9,12 +9,21 @@ companies.owner_tenant_id: NULL=全テナント共有の国交省/mikomeru/CSV�
 値あり=そのテナント固有の非公開データ(他テナントには一切見えない)。
 フィルタ・一覧・詳細のすべてでこの境界を必ず通すこと(他テナント漏洩の防止)。
 
-【2026-09-09変更】CSVで持ち込んだ会社のうち、既存データと一致しなかった
+【2026-09-09変更(T64)】CSVで持ち込んだ会社のうち、既存データと一致しなかった
 (=真に新規の)会社は、以前は持ち込んだテナント専用の非公開データ
 (owner_tenant_id=そのテナント)として追加していたが、ユーザー要望により
 owner_tenant_id=NULLの共有マスタとして追加するよう変更した(名簿の登録数を
 テナントの利用を通じて増やしていく方針)。既存データにマッチした場合は
 そのレコード(公開/非公開いずれもあり得る)にそのまま寄せるだけで変更しない。
+
+【2026-09-09追記(T65)】共有マスタ化すると誰も編集できなくなり、持ち込んだ本人が
+連絡先の間違いに気付いても直せなくなる問題があったため、companies.
+contributed_by_tenant_idに「元々どのテナントが持ち込んだか」を別途記録し、
+owner_tenant_id IS NULL(共有マスタ)でもcontributed_by_tenant_id==自テナント
+なら編集を許可するようにした。閲覧側の境界(他テナントに見えるかどうか)は
+owner_tenant_idだけで判定し続ける — contributed_by_tenant_idは編集可否の
+判定にのみ使う。つまり編集した内容は他テナントにも見えてしまう点に注意
+(自分が持ち込んだ企業だから、という信頼の上に成り立つ仕様)。
 
 api.pyの /api/tenant/* エンドポイントがこのモジュールを呼ぶ。CLIは検証用。
   python3 target_lists.py list --api-key <key>
@@ -285,10 +294,11 @@ def create_from_csv(con, tenant_id, name, csv_text, discover_urls=False, existin
         else:
             trades = _derive_trades(row, raw_name)
             cur2 = con.execute("""INSERT INTO companies
-                (name, name_norm, pref, phone, email, website_url, trades, data_source, owner_tenant_id)
-                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (name, name_norm, pref, phone, email, website_url, trades, data_source,
+                 owner_tenant_id, contributed_by_tenant_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (raw_name, name_norm, pref, _pick(row, _PHONE_COLS), _pick(row, _EMAIL_COLS),
-                 row_url, trades, "customer_upload", None))
+                 row_url, trades, "customer_upload", None, tenant_id))
             cid = cur2.lastrowid
             created += 1
         con.execute("""INSERT OR IGNORE INTO target_list_members
@@ -392,10 +402,11 @@ def run_csv_search(con, tenant_id, filename, csv_text, mode="name", name_col=Non
         else:
             trades = _derive_trades(row, raw_name)
             cur2 = con.execute("""INSERT INTO companies
-                (name, name_norm, pref, phone, email, website_url, trades, data_source, owner_tenant_id)
-                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (name, name_norm, pref, phone, email, website_url, trades, data_source,
+                 owner_tenant_id, contributed_by_tenant_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (raw_name, name_norm, pref, _pick(row, _PHONE_COLS), _pick(row, _EMAIL_COLS),
-                 row_url, trades, "customer_upload", None))
+                 row_url, trades, "customer_upload", None, tenant_id))
             cid = cur2.lastrowid
             created += 1
         company_ids.append(cid)
@@ -600,9 +611,11 @@ def get_list(con, tenant_id, list_id, limit=200, offset=0, status_filter=None, q
     status_filterは_MEMBER_STATUS_FILTERSのキーのみ受け付ける(SQLインジェクション
     防止のため、フリーテキストでの絞込条件は組み立てない)。
     qを指定すると会社名の部分一致(大文字小文字を区別しない)で絞り込む。
-    各企業にeditable(bool)を含める(=owner_tenant_id==自テナント。フロント側が
-    「編集」ボタンを出すかどうかの判定に使う。他テナントのidを漏らさないよう
-    owner_tenant_id自体は返さずbool化する)。"""
+    各企業にeditable(bool)を含める(=owner_tenant_id==自テナント、または
+    共有マスタ<owner_tenant_id IS NULL>でもcontributed_by_tenant_id==自テナント
+    <T65: 自分がCSVで持ち込んで共有マスタ化した企業>。フロント側が「編集」ボタンを
+    出すかどうかの判定に使う。他テナントのidを漏らさないようowner_tenant_id・
+    contributed_by_tenant_id自体は返さずbool化する)。"""
     lst = con.execute("SELECT * FROM target_lists WHERE id=? AND tenant_id=?",
                        (list_id, tenant_id)).fetchone()
     if not lst:
@@ -616,7 +629,7 @@ def get_list(con, tenant_id, list_id, limit=200, offset=0, status_filter=None, q
         escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params.append(f"%{escaped}%")
     members = con.execute(f"""SELECT c.id, c.name, c.pref, c.rank, c.trades, c.phone, c.email,
-            c.website_url, c.contact_url, c.owner_tenant_id,
+            c.website_url, c.contact_url, c.owner_tenant_id, c.contributed_by_tenant_id,
             m.send_status, m.reason_code, m.retry_count, m.last_error, m.latest_result,
             m.started_at, m.completed_at, m.contacted_at,
             m.replied, m.replied_at, m.deal, m.deal_at, m.won, m.won_at, m.memo
@@ -626,7 +639,9 @@ def get_list(con, tenant_id, list_id, limit=200, offset=0, status_filter=None, q
     out_members = []
     for r in members:
         d = dict(r)
-        d["editable"] = d.pop("owner_tenant_id") == tenant_id
+        owner = d.pop("owner_tenant_id")
+        contributor = d.pop("contributed_by_tenant_id")
+        d["editable"] = owner == tenant_id or (owner is None and contributor == tenant_id)
         out_members.append(d)
     return {"list": dict(lst), "members": out_members}
 
@@ -636,10 +651,14 @@ _EDITABLE_COMPANY_FIELDS = {"name", "contact_url", "phone", "email"}
 
 def update_member_company(con, tenant_id, list_id, company_id, fields):
     """リスト内の企業情報(会社名・問い合わせURL・電話番号・メールアドレス)を編集する。
-    companies.owner_tenant_id=自テナントの非公開データ(CSV取込等で自社のみに
-    追加した企業)のみ編集可能にする。owner_tenant_id IS NULLの全社共有マスタは
+    編集可能なのは次のいずれか: (1) companies.owner_tenant_id=自テナントの非公開データ
+    (レガシー。T64より前にCSV取込で自社専用に追加された企業)、(2) owner_tenant_id
+    IS NULL(共有マスタ)だがcontributed_by_tenant_id=自テナント(T65: 自分がCSVで
+    持ち込んで共有マスタ化した企業)。それ以外(自分が持ち込んだのではない共有マスタ)は
     他テナントのリストにも同じ行が使われているため、ここでの編集は許可しない
-    (誤って他社のデータまで書き換えてしまう事故を防ぐ)。"""
+    (誤って他社のデータまで書き換えてしまう事故を防ぐ)。(2)の編集は他テナントにも
+    見える内容を書き換えることになるが、自分が持ち込んだ企業についての一次情報を
+    知っているのは基本的に持ち込んだ本人という前提で許可している。"""
     import db
     owns_list = con.execute("SELECT 1 FROM target_lists WHERE id=? AND tenant_id=?",
                              (list_id, tenant_id)).fetchone()
@@ -649,8 +668,13 @@ def update_member_company(con, tenant_id, list_id, company_id, fields):
                              (list_id, company_id)).fetchone()
     if not is_member:
         return {"error": "対象の企業がこのリストに含まれていません"}
-    company = con.execute("SELECT owner_tenant_id FROM companies WHERE id=?", (company_id,)).fetchone()
-    if not company or company["owner_tenant_id"] != tenant_id:
+    company = con.execute("SELECT owner_tenant_id, contributed_by_tenant_id FROM companies WHERE id=?",
+                           (company_id,)).fetchone()
+    can_edit = company and (
+        company["owner_tenant_id"] == tenant_id
+        or (company["owner_tenant_id"] is None and company["contributed_by_tenant_id"] == tenant_id)
+    )
+    if not can_edit:
         return {"error": "このデータは全テナント共有のマスタのため編集できません"
                           "(自社でCSV等から追加した企業のみ編集できます)"}
     sets, params = [], []

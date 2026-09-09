@@ -360,6 +360,11 @@ def migrate(con):
         ("companies", "corporate_no", "TEXT"),  # 法人番号(国税庁13桁)。mikomeru取込で判明した分のみ
         ("companies", "data_source", "TEXT"),  # NULL=国交省名簿(既定) / "mikomeru"=mikomeru由来の新規追加
         ("companies", "owner_tenant_id", "INTEGER"),  # NULL=全テナント共有マスタ / 値あり=そのテナント専用(CSV取込)
+        ("companies", "contributed_by_tenant_id", "INTEGER"),  # 共有マスタ化後もどのテナントが
+        # CSVで持ち込んだ企業かを記録しておく列(T65)。owner_tenant_id=NULL(共有マスタ)
+        # になった後も、持ち込んだ本人のテナントだけは連絡先等を編集できるようにするための
+        # 判定に使う(target_lists.update_member_company()参照)。owner_tenant_idと違い、
+        # 他テナントへの閲覧制御には一切使わない(閲覧制御は今まで通りowner_tenant_idのみ)。
         ("touches", "step", "INTEGER DEFAULT 1"),
         ("form_send_log", "page_text_snippet", "TEXT"),  # 成功判定できなかった原因調査用
         ("campaigns", "offer_id", "INTEGER"),  # compose.pyで確定したオファー。送信時のテナント解決に使う

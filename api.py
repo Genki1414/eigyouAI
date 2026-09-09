@@ -2695,9 +2695,12 @@ def self_test(port=8899):
     # 共有マスタ(owner_tenant_id IS NULL)を拾うことは他の絞り込みテストで
     # 既に検証済みなので、ここではDBの状態を直接見て「他テナントがCSVで持ち込んだ
     # 新規企業がowner_tenant_id=NULL(共有マスタ)になっている」ことを確認する
-    b_company = con.execute("SELECT owner_tenant_id FROM companies WHERE name='テナントB専用企業'").fetchone()
+    b_company = con.execute("""SELECT owner_tenant_id, contributed_by_tenant_id FROM companies
+        WHERE name='テナントB専用企業'""").fetchone()
     t("他テナントがCSVで持ち込んだ新規企業は共有マスタ(owner_tenant_id=NULL)になる(T64)",
       b_company is not None and b_company["owner_tenant_id"] is None)
+    t("共有マスタ化後もcontributed_by_tenant_idに持ち込んだテナントが残る(T65)",
+      b_company is not None and b_company["contributed_by_tenant_id"] == tid_b)
 
     print("\n── 保存済みリスト管理(MIKOMERU同等UI: 編集/複製/個別削除/ソフト削除/復元) ──")
     # list_a_id/list_b_idは以降の送信テスト等で厳密な状態を前提にされているため、
@@ -2766,11 +2769,47 @@ def self_test(port=8899):
     own_list_id = r["list_id"]
     st, r = get_auth(f"/api/tenant/lists/{own_list_id}", token=key_a)
     csv_added_company_id = r["members"][0]["id"]
-    t("CSVで新規追加した企業は共有マスタ扱いなのでeditable=false(T64)",
-      r["members"][0]["editable"] is False)
+    t("CSVで新規追加した企業(共有マスタ)は持ち込んだ本人にはeditable=true(T65)",
+      r["members"][0]["editable"] is True)
+
     st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{csv_added_company_id}",
-                      {"contact_url": "https://hijack.example.com/"}, token=key_a)
-    t("CSVで追加した企業(=共有マスタ)は追加した本人でも編集できない(400, T64)", st == 400)
+                      {"name": "", "contact_url": "https://t26-after.example.co.jp/"}, token=key_a)
+    t("会社名を空にしようとすると400", st == 400)
+    st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{csv_added_company_id}", {}, token=key_a)
+    t("更新項目が無いと400", st == 400)
+    st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{csv_added_company_id}",
+                      {"contact_url": "https://t26-after.example.co.jp/", "phone": "03-9999-0000"},
+                      token=key_a)
+    t("CSVで持ち込んだ本人は共有マスタ化後も編集できる(T65)",
+      st == 200 and r["company"]["contact_url"] == "https://t26-after.example.co.jp/"
+      and r["company"]["phone"] == "03-9999-0000")
+    st, r = get_auth(f"/api/tenant/lists/{own_list_id}", token=key_a)
+    t("編集内容がリスト表示にも反映される",
+      st == 200 and any(m["id"] == csv_added_company_id
+                         and m["contact_url"] == "https://t26-after.example.co.jp/" for m in r["members"]))
+    st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{csv_added_company_id}",
+                      {"contact_url": "https://hijack.example.com/"}, token=key_b)
+    t("持ち込んでいない他テナントはリストを持っていないので編集できない(404)", st == 404)
+
+    # 持ち込んでいないテナントは、そのリストを持っていること(=owns_list)自体はある
+    # 場合でも、contributed_by_tenant_idが一致しない限り編集できないことを別途検証する
+    # (T65の本質的な変更点。上のkey_bのケースはlist未所有の404で別の理由による拒否)
+    tmp_list_b_id = con.execute("""INSERT INTO target_lists
+        (tenant_id,name,source,filter_json,company_count,created_at,updated_at)
+        VALUES (?,?,?,?,?,datetime('now'),datetime('now'))""",
+        (tid_b, "B一時リスト(T65検証用)", "csv", None, 0)).lastrowid
+    con.execute("""INSERT INTO target_list_members (list_id, company_id, send_status, created_at, updated_at)
+        VALUES (?,?,'PENDING',datetime('now'),datetime('now'))""", (tmp_list_b_id, csv_added_company_id))
+    con.commit()
+    st, r = get_auth(f"/api/tenant/lists/{tmp_list_b_id}", token=key_b)
+    t("B自身のリストに入っていてもcontributed_by_tenant_id不一致ならeditable=false(T65)",
+      st == 200 and r["members"][0]["editable"] is False)
+    st, r = post_auth(f"/api/tenant/lists/{tmp_list_b_id}/members/{csv_added_company_id}",
+                      {"contact_url": "https://hijack.example.com/"}, token=key_b)
+    t("リストは持っていても持ち込み本人でなければ編集できない(400, T65)", st == 400)
+    con.execute("DELETE FROM target_list_members WHERE list_id=?", (tmp_list_b_id,))
+    con.execute("DELETE FROM target_lists WHERE id=?", (tmp_list_b_id,))
+    con.commit()
 
     # update_member_company()の「自テナントの非公開データ(owner_tenant_id=自分)は
     # 編集できる」パスは、T64より前にCSVで追加された既存データ向けに残っている。
@@ -2788,20 +2827,9 @@ def self_test(port=8899):
       any(m["id"] == own_company_id and m["editable"] is True for m in r["members"]))
 
     st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{own_company_id}",
-                      {"name": "", "contact_url": "https://t26-after.example.co.jp/"}, token=key_a)
-    t("会社名を空にしようとすると400", st == 400)
-    st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{own_company_id}", {}, token=key_a)
-    t("更新項目が無いと400", st == 400)
-    st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{own_company_id}",
-                      {"contact_url": "https://t26-after.example.co.jp/", "phone": "03-9999-0000"},
-                      token=key_a)
-    t("自社の非公開企業は編集できる",
-      st == 200 and r["company"]["contact_url"] == "https://t26-after.example.co.jp/"
-      and r["company"]["phone"] == "03-9999-0000")
-    st, r = get_auth(f"/api/tenant/lists/{own_list_id}", token=key_a)
-    t("編集内容がリスト表示にも反映される",
-      st == 200 and any(m["id"] == own_company_id
-                         and m["contact_url"] == "https://t26-after.example.co.jp/" for m in r["members"]))
+                      {"contact_url": "https://t26-legacy-after.example.co.jp/"}, token=key_a)
+    t("レガシーな非公開データも編集できる",
+      st == 200 and r["company"]["contact_url"] == "https://t26-legacy-after.example.co.jp/")
     st, r = post_auth(f"/api/tenant/lists/{own_list_id}/members/{own_company_id}",
                       {"contact_url": "https://hijack.example.com/"}, token=key_b)
     t("他テナントは編集できない(404)", st == 404)

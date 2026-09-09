@@ -3751,6 +3751,56 @@ kill_switchの状態は元(`stopped=1`)に戻した)。`api.py test`(368/368)・
 
 ---
 
+### T72. 配信停止URLが本番で404のまま残っていた原因を追加で特定・修正(2026-09-09)
+
+T70をリリース後、ユーザーが実際に受信した問合せへの返信内に含まれていた
+配信停止URLを踏んだところ、`ashibase.jp/optout?company_id=45894`(`app.`が
+無い・`/api`が無い)で404になるスクリーンショットが届いた。T70の
+`config.py`側の修正だけでは不十分だったことが判明。
+
+**原因①: `.env.example`自体が旧プレースホルダのまま**: `OPTOUT_URL=
+https://ashibase.jp/optout` / `API_PUBLIC_URL=https://ashibase.jp`という、
+T70で「本来こう直すべき」と説明した文字列そのものが`.env.example`に
+残っていた。`config.py`側は「環境変数が未設定の場合のデフォルト値」しか
+直しておらず、本番の実`.env`がこの例をそのまま使って明示的に環境変数を
+設定していれば、明示指定が常にデフォルト値より優先されるため今回の修正は
+一切反映されない。
+
+**原因②: 空文字列指定だとPythonの`os.environ.get(key, default)`が
+defaultを使わない**: `.env`側で`OPTOUT_URL=`(空欄)にして「configの
+自動導出に任せる」運用に変えたとしても、`os.environ.get("OPTOUT_URL",
+default)`は環境変数キー自体が存在すれば値が空文字列でも`default`を使わず
+`""`を返してしまうため、これも直さないと同じ404が再発する。
+
+**修正**: `.env.example`の`API_PUBLIC_URL`を`https://app.ashibase.jp`に、
+`OPTOUT_URL`を空欄(自動導出に一本化)に変更。`config.py`の
+`OPTOUT_URL = os.environ.get("OPTOUT_URL", ...)`を`os.environ.get(
+"OPTOUT_URL") or ...`に変更し、空文字列でも正しくフォールバックするように
+した。
+
+**コード修正だけでは終わらない(本番側で手動対応が必要)**:
+1. 本番サーバーの実`.env`(`docker-compose.yml`から見て1つ上の階層)を開き、
+   `OPTOUT_URL`/`API_PUBLIC_URL`の値を確認。旧プレースホルダのままなら
+   `API_PUBLIC_URL=https://app.ashibase.jp`・`OPTOUT_URL=`(空欄)に修正し、
+   `api`/`worker`コンテナを再起動して反映させる。
+2. **`tenants`テーブルの`optout_url`列は上記の環境変数と無関係の保存済みDB
+   値**であり、コード修正では変わらない。`offers.py`を初回実行した時点の
+   (誤った)`C.OPTOUT_URL`がそのまま書き込まれている可能性が高い
+   (スクリーンショットの`ashibase.jp/optout`は数字違いのcompany_idを含む
+   実際の送信メールに載っていたものなので、どこかのテナント行に古い値が
+   直接入っている可能性が高い)。`SELECT id, name, optout_url FROM tenants;`
+   で確認し、`https://ashibase.jp/optout`等の古い値が残っていれば
+   `UPDATE tenants SET optout_url='https://app.ashibase.jp/api/optout'
+   WHERE optout_url='https://ashibase.jp/optout';`のように直接更新する
+   (テナント個別にoptout_urlを編集するAPI/UIは現状無いため、この一回だけは
+   直接SQLでの対応になる)。
+
+**確認**: `api.py test`(368/368)・`test_pipeline.py`(42/42)で回帰なし。
+本番の`.env`更新・DB更新はユーザー側の作業のため、実際に配信停止URLが
+機能することの最終確認はユーザーの本番環境での再テストに委ねる。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

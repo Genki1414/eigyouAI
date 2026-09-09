@@ -190,7 +190,7 @@ def run_check(con, force=False):
                 for key, *_ in due_alerts:
                     _mark_sent(con, key)
             except NotImplementedError:
-                print("  ⚠ メール送信基盤(SENDGRID_API_KEY)が未設定のため送信できません"
+                print("  ⚠ メール送信基盤(RESEND_API_KEY)が未設定のため送信できません"
                       "(クールダウンは進めず、次回すぐ再試行します)")
             except Exception as e:  # noqa: BLE001
                 print(f"  ⚠ アラートメールの送信に失敗しました: {e}"

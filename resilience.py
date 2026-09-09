@@ -226,7 +226,8 @@ class Idempotency:
 # ── 送信APIごとのレート上限プリセット ──────────
 LIMITS = {
     "anthropic":  dict(per_minute=50),    # tier次第。実運用値に合わせる
-    "sendgrid":   dict(per_minute=600),
+    "resend":     dict(per_minute=120),   # Resendの既定レート上限(2 req/s)に合わせた値。
+                                           # 有料プランで引き上げた場合はここも合わせて変更する
     "fax_api":    dict(per_minute=30),    # FAXは物理的に遅い
     "sms":        dict(per_minute=120),
     "form_submit": dict(per_minute=15),   # 相手サイトへの負荷・bot判定回避のため意図的に低め

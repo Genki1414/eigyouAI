@@ -16,7 +16,7 @@ backup.py — SQLiteの安全なバックアップ+オフサイト複製(T36/T37
 サーバー消失そのものには対応できない。BACKUP_OFFSITE_TARGET(rsyncの宛先。
 例: Hetzner Storage Boxなら "u123456@u123456.your-storagebox.de:backups/")が
 設定されていれば、ローカルバックアップ成功直後にrsyncで複製する。未設定なら
-何もしない(SENDGRID_API_KEY等と同じ「未設定でも運用を止めない」方針)。
+何もしない(RESEND_API_KEY等と同じ「未設定でも運用を止めない」方針)。
 
 使い方:
   python3 backup.py run              # バックアップを1つ作成し、整合性確認+オフサイト複製する

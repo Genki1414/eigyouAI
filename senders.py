@@ -11,7 +11,8 @@ senders.py — 送信アダプタ層
   - 送信者情報の付与はここで強制する（特定電子メール法。文面生成側の実装漏れを防ぐ）
 
 本番実装で差すもの:
-  MailSender  → SendGrid / Amazon SES
+  MailSender  → Resend(2026-09-09にSendGridから切替。姉妹プロジェクト
+               「足場屋革命」がashibase.jpドメインで既に運用実績あり)
   FaxSender   → 秒速FAX / メッセージプラス
   SmsSender   → Twilio / KDDI Message Cast
   PostSender  → ハガキ・封書の印刷発送代行API
@@ -165,7 +166,7 @@ class BaseSender:
 class MailSender(BaseSender):
     channel = "メール"
     unit_cost_yen = 1
-    rate_service = "sendgrid"
+    rate_service = "resend"
     EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
     def validate(self, to):
@@ -179,29 +180,46 @@ class MailSender(BaseSender):
         if self.dry_run:
             return SendResult(ok=True, provider_id=f"mock_mail_{uuid.uuid4().hex[:10]}")
         import os
-        api_key = os.environ.get("SENDGRID_API_KEY")
+        api_key = os.environ.get("RESEND_API_KEY")
         if not api_key:
             # キー未設定は「宛先がダメ」ではなく運用側の設定不備なので、
             # permanent=Trueにして誤って配信停止に入れることはしない
             # (_notify_completion()等の呼び出し元は、この例外をログにだけ
             # 残して呼び出し元の送信処理自体は止めない)
-            raise NotImplementedError("SENDGRID_API_KEY が未設定のため送信できません")
-        import sendgrid
-        from sendgrid.helpers.mail import Mail
-        message = Mail(from_email=(sender.email, sender.name), to_emails=to.email,
-                        subject=subject, plain_text_content=body)
-        sg = sendgrid.SendGridAPIClient(api_key)
-        # 401/403等はpython_http_client.exceptions.HTTPError(status_codeを持つ)として
-        # 送出される。resilience.is_retryable()がstatus_codeを見て再試行要否を
-        # 自動判定する(429/5xxのみ再試行、401/403/400は再試行しない)ため、ここで
-        # 個別にハンドリングする必要はない。401/403をpermanent(=宛先の配信停止)に
-        # してしまうと、実際には自社のAPIキー設定ミスなのに宛先企業を誤って
-        # 配信停止に入れる事故になるため、意図的にR.Fatalへは変換しない。
-        resp = sg.send(message)
-        message_id = None
-        if hasattr(resp, "headers") and resp.headers:
-            message_id = resp.headers.get("X-Message-Id")
-        return SendResult(ok=True, provider_id=message_id or f"sendgrid_{uuid.uuid4().hex[:10]}")
+            raise NotImplementedError("RESEND_API_KEY が未設定のため送信できません")
+        # 2026-09-09: SendGridからResendへ切替(姉妹プロジェクト「足場屋革命」が
+        # 既にResend<Custom SMTP>でashibase.jpドメインの送信元評価を確立済み
+        # だったため、そちらを使い回す方針にした)。RESTが単純なので専用SDKは
+        # 追加せず標準ライブラリのurllibだけで呼ぶ。
+        import json as _json
+        import urllib.error
+        import urllib.request
+        payload = _json.dumps({
+            "from": f"{sender.name} <{sender.email}>",
+            "to": [to.email],
+            "subject": subject,
+            "text": body,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.resend.com/emails", data=payload, method="POST",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = _json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            # 401/403等はstatus_codeを持たせて送出する。resilience.is_retryable()が
+            # status_codeを見て再試行要否を自動判定する(429/5xxのみ再試行、
+            # 401/403/400は再試行しない)ため、ここで個別にハンドリングする必要は
+            # ない。401/403をpermanent(=宛先の配信停止)にしてしまうと、実際には
+            # 自社のAPIキー設定ミスなのに宛先企業を誤って配信停止に入れる事故に
+            # なるため、意図的にR.Fatalへは変換しない。
+            e.status_code = e.code
+            raise
+        except urllib.error.URLError as e:
+            # DNS解決失敗・接続不可等。is_retryable()がConnectionErrorを再試行対象に
+            # しているため、その型で包み直す。
+            raise ConnectionError(str(e.reason)) from e
+        return SendResult(ok=True, provider_id=result.get("id") or f"resend_{uuid.uuid4().hex[:10]}")
 
 
 # ── FAX ────────────────────────────────────
@@ -825,64 +843,92 @@ if __name__ == "__main__":
         print(f"  {'✓' if 'company_id=424242' in form_footer else '✗'} "
               f"配信停止URLにcompany_idが付与される(T70)")
 
-        print("\n── メール送信(SendGrid実装。T29) ──")
+        print("\n── メール送信(Resend実装。T29/T80でSendGridから切替) ──")
         import os as _os
-        orig_sg_key = _os.environ.get("SENDGRID_API_KEY")
+        import json as _json2
+        import urllib.error
+        import urllib.request
+        orig_re_key = _os.environ.get("RESEND_API_KEY")
         try:
-            _os.environ.pop("SENDGRID_API_KEY", None)
+            _os.environ.pop("RESEND_API_KEY", None)
             m_nokey = MailSender(con, dry_run=False)
             try:
                 m_nokey._deliver(Recipient(1, "テスト", email="a@b.co.jp"), s, "件名", "本文")
                 ok_nokey = False
             except NotImplementedError:
                 ok_nokey = True
-            print(f"  {'✓' if ok_nokey else '✗'} SENDGRID_API_KEY未設定ならNotImplementedError"
+            print(f"  {'✓' if ok_nokey else '✗'} RESEND_API_KEY未設定ならNotImplementedError"
                   f"(宛先を誤って配信停止にはしない)")
 
-            _os.environ["SENDGRID_API_KEY"] = "test-dummy-key"
-            import sendgrid
-            from python_http_client.exceptions import UnauthorizedError, ServiceUnavailableError
+            _os.environ["RESEND_API_KEY"] = "test-dummy-key"
             import resilience as R2
 
-            class _FakeResponse:
-                def __init__(self, message_id="fake-msg-id-123"):
-                    self.status_code = 202
-                    self.headers = {"X-Message-Id": message_id}
+            class _FakeUrlopenCtx:
+                def __init__(self, body):
+                    self._body = body
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    return False
+                def read(self):
+                    return self._body
 
-            orig_sg_send = sendgrid.SendGridAPIClient.send
+            def _http_error(code, reason):
+                # is_retryable()はstatus_code属性を見る。_deliver()はHTTPErrorを
+                # 捕まえた際にe.status_code=e.codeを付与してから再送出するので、
+                # ここでも同じ状態を再現する(生のHTTPErrorはcodeしか持たない)。
+                e = urllib.error.HTTPError("https://api.resend.com/emails", code, reason, {}, None)
+                e.status_code = code
+                return e
+
+            orig_urlopen = urllib.request.urlopen
             try:
-                sendgrid.SendGridAPIClient.send = lambda self, message: _FakeResponse()
+                urllib.request.urlopen = lambda req, timeout=10: _FakeUrlopenCtx(
+                    _json2.dumps({"id": "fake-msg-id-123"}).encode())
                 m_ok = MailSender(con, dry_run=False)
                 res_ok = m_ok._deliver(Recipient(1, "テスト", email="a@b.co.jp"), s, "件名", "本文")
                 ok_send = res_ok.ok and res_ok.provider_id == "fake-msg-id-123"
-                print(f"  {'✓' if ok_send else '✗'} 送信成功でSendGridのMessage-Idが"
+                print(f"  {'✓' if ok_send else '✗'} 送信成功でResendのidが"
                       f"SendResult.provider_idになる: {res_ok}")
 
-                ok_401_check = not R2.is_retryable(UnauthorizedError(401, "Unauthorized", b"{}", {}))
+                ok_401_check = not R2.is_retryable(_http_error(401, "Unauthorized"))
                 print(f"  {'✓' if ok_401_check else '✗'} 401はis_retryable()=False"
                       f"(APIキー不正で再試行しても無駄)")
 
-                sendgrid.SendGridAPIClient.send = lambda self, message: (
-                    _ for _ in ()).throw(UnauthorizedError(401, "Unauthorized", b"{}", {}))
-                con.execute("DELETE FROM idempotency WHERE key='test:sendgrid:401'"); con.commit()
+                def _raise_401(req, timeout=10):
+                    raise _http_error(401, "Unauthorized")
+                urllib.request.urlopen = _raise_401
+                con.execute("DELETE FROM idempotency WHERE key='test:resend:401'"); con.commit()
                 m_401 = MailSender(con, dry_run=False)
                 res_401 = m_401.send(Recipient(1, "テスト", email="a@b.co.jp"), s, "件名", "本文",
-                                      "test:sendgrid:401")
+                                      "test:resend:401")
                 ok_401 = (not res_401.ok) and (not res_401.permanent)
                 print(f"  {'✓' if ok_401 else '✗'} 401はpermanent=Falseで失敗する"
                       f"(APIキー設定ミスを宛先の配信停止と誤って結びつけない): {res_401}")
-                con.execute("DELETE FROM idempotency WHERE key='test:sendgrid:401'"); con.commit()
+                con.execute("DELETE FROM idempotency WHERE key='test:resend:401'"); con.commit()
 
-                ok_503_check = R2.is_retryable(ServiceUnavailableError(503, "Service Unavailable", b"{}", {}))
+                ok_503_check = R2.is_retryable(_http_error(503, "Service Unavailable"))
                 print(f"  {'✓' if ok_503_check else '✗'} 503はis_retryable()=True"
                       f"(一時的な障害として再試行される)")
+
+                def _raise_connerr(req, timeout=10):
+                    raise urllib.error.URLError("Name or service not known")
+                urllib.request.urlopen = _raise_connerr
+                try:
+                    MailSender(con, dry_run=False)._deliver(
+                        Recipient(1, "テスト", email="a@b.co.jp"), s, "件名", "本文")
+                    ok_dns = False
+                except ConnectionError:
+                    ok_dns = True
+                print(f"  {'✓' if ok_dns else '✗'} 接続不可(DNS失敗等)はConnectionErrorとして"
+                      f"再試行対象になる")
             finally:
-                sendgrid.SendGridAPIClient.send = orig_sg_send
+                urllib.request.urlopen = orig_urlopen
         finally:
-            if orig_sg_key is None:
-                _os.environ.pop("SENDGRID_API_KEY", None)
+            if orig_re_key is None:
+                _os.environ.pop("RESEND_API_KEY", None)
             else:
-                _os.environ["SENDGRID_API_KEY"] = orig_sg_key
+                _os.environ["RESEND_API_KEY"] = orig_re_key
 
         print("\n── 二重送信の防止 ──")
         con.execute("DELETE FROM idempotency WHERE key LIKE 'test:%'"); con.commit()

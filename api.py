@@ -193,9 +193,9 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/tenant/staff/register  {"name","email","password","role"} →
                            MIKOMERUの「担当者登録」相当(メール+パスワード)。
                            メール認証(GET /verify/staff/<token>)が完了するまで
-                           そのapi_keyは使えない。認証用URLは実際にSendGrid経由で
+                           そのapi_keyは使えない。認証用URLは実際にResend経由で
                            担当者へメール送信する(T33)。応答のemail_sentが送信
-                           成否を示す。SENDGRID_API_KEY未設定・送信失敗時のみ、
+                           成否を示す。RESEND_API_KEY未設定・送信失敗時のみ、
                            運用者が手動で共有できるようverify_pathを応答に含める
                            フォールバックにする(黙って失敗させない。HANDOFF.md
                            T21/T33参照)
@@ -1386,7 +1386,7 @@ _STAFF_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _send_staff_verification_email(con, tenant_id, name, email, verify_token):
-    """認証メールを実際にSendGrid経由で送る(T33)。応答を作る呼び出し元に
+    """認証メールを実際にResend経由で送る(T33)。応答を作る呼び出し元に
     例外を伝播させない(登録・再発行そのものは、メール送信の成否にかかわらず
     完了させる。_notify_completion()と同じ「ログにだけ残す」方針)。
     戻り値: 送信できたかどうか(bool)。"""
@@ -1479,7 +1479,7 @@ p{{font-size:13px;color:#333;line-height:1.7}}</style></head>
 
 
 def _send_password_reset_email(con, name, email, reset_token):
-    """パスワード再設定メールを実際にSendGrid経由で送る(T34)。呼び出し元に
+    """パスワード再設定メールを実際にResend経由で送る(T34)。呼び出し元に
     例外を伝播させない(_send_staff_verification_emailと同じ「ログにだけ残す」
     方針)。ここは戻り値を使わない — 呼び出し元(h_password_reset_request)は
     メール列挙攻撃を防ぐため送信成否に関わらず常に同じ応答を返すため。"""
@@ -4181,14 +4181,14 @@ def self_test(port=8899):
     st, r = post_auth("/api/tenant/staff/register",
                       {"name": "T21太郎", "email": "t21@test-a.example.co.jp",
                        "password": "pass1234", "role": "管理者"}, token=key_a)
-    t("POST /api/tenant/staff/register で登録でき、SENDGRID_API_KEY未設定時は"
+    t("POST /api/tenant/staff/register で登録でき、RESEND_API_KEY未設定時は"
       "email_sent=falseでverify_pathが返る(T33)",
       st == 200 and bool(r.get("staff_id")) and r.get("email_sent") is False
       and r.get("verify_path", "").startswith("/verify/staff/"))
     t21_staff_id = r.get("staff_id")
     t21_verify_path = r.get("verify_path")
 
-    print("\n── 担当者認証メールの実送信(T33。SENDGRID_API_KEYが有効な場合の挙動をモックで検証) ──")
+    print("\n── 担当者認証メールの実送信(T33。RESEND_API_KEYが有効な場合の挙動をモックで検証) ──")
     t33_sent_to = []
 
     def _fake_verify_deliver(self, to, sender, subject, body):

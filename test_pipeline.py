@@ -126,7 +126,7 @@ def main():
               q("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='idempotency'") == 1)
     import resilience as R
     check("レートリミッターがサービス別に定義されている",
-          all(k in R.LIMITS for k in ["anthropic", "sendgrid", "fax_api", "sms"]))
+          all(k in R.LIMITS for k in ["anthropic", "resend", "fax_api", "sms"]))
     def _http_err(status):
         e = RuntimeError(f"http {status}")
         e.status_code = status

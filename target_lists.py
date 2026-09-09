@@ -838,10 +838,9 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
 
 def _notify_completion(con, tenant_id, list_name, target_count, stats):
     """送信完了を担当者へメール通知する(MIKOMERU同等の完了通知)。
-    実際のメール送信基盤(SendGrid等)はまだ未実装(HANDOFF.md T2)のため、
-    今はsenders.MailSenderがNotImplementedErrorを投げるだけの状態——それでも
-    ここで先に呼び出しておき、T2が実装された瞬間から追加のコード変更なしで
-    通知が届き始めるようにする。あくまで補助機能なので、失敗しても
+    senders.MailSenderがResend経由で実送信する(HANDOFF.md T32/T80)。
+    RESEND_API_KEY未設定の環境ではNotImplementedErrorを投げるだけになるが、
+    あくまで補助機能なので、失敗しても
     (未実装であっても)呼び出し元の送信処理自体は絶対に止めない。"""
     import senders
 

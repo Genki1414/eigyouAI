@@ -4053,6 +4053,58 @@ Playwrightで実ブラウザ起動し、スコアランクの絞り込みチッ�
 
 ---
 
+### T80. メール送信基盤をSendGridからResendへ切替(2026-09-09)
+
+「リリースの壁」を洗い出す中で、パスワード再設定・担当者認証・監視アラート等
+のメール通知に必要な`SENDGRID_API_KEY`が本番`.env`で空欄のままだったことが
+判明(ユーザーがSSHで確認)。ユーザーから「他のシステムではSendGridを使って
+いないのに再設定メールとかは送信できてる」と指摘があり、姉妹プロジェクト
+「足場屋革命」(`Genki1414/ashiba.kyouiku`)を確認したところ、Supabase Authの
+Custom SMTPとして**Resend**を使い、`ashibase.jp`ドメインで送信元評価を
+既に確立していることが分かった(SendGridの共有送信元は英語のみ・レート制限が
+厳しいという理由で乗り換えた経緯がドキュメントに残っていた)。新規に
+SendGridを契約するより、同じResendアカウント・同じドメインを流用した方が
+到達率的にも合理的なため、SendGridからResendへ切り替えた。
+
+**変更内容**:
+- `senders.py`: `MailSender._deliver()`をSendGrid SDK呼び出しから、Resendの
+  REST API(`POST https://api.resend.com/emails`)を標準ライブラリの
+  `urllib.request`で直接叩く実装に書き換えた。専用SDKを追加しなかったのは
+  ResendのAPIが単純なJSON POST 1本で完結するため。環境変数は
+  `SENDGRID_API_KEY`→`RESEND_API_KEY`。401/403等は`urllib.error.HTTPError`に
+  `status_code`属性を付与してから再送出し、`resilience.is_retryable()`の
+  既存のステータスコード判定にそのまま乗せた(SendGrid実装時と同じ設計:
+  APIキー設定ミスを宛先の配信停止と誤って結びつけないよう、`R.Fatal`へは
+  変換しない)。DNS失敗等の接続不可は`ConnectionError`として再試行対象に
+  する扱いを追加。
+- `resilience.py`: レートリミッターの`LIMITS`キーを`"sendgrid"`→`"resend"`
+  (Resendの既定レート上限である2 req/s=120/分に合わせた値へ変更)。
+- `requirements.txt`: `sendgrid>=6.11`を削除(urllibのみで完結するため
+  依存が減った)。
+- `.env.example`・`api.py`・`monitor.py`・`backup.py`・`target_lists.py`の
+  コメント/docstring/ログ文言もSendGrid→Resend/RESEND_API_KEYへ更新。
+
+**副次的な効果**: このサンドボックス環境には`sendgrid`パッケージが
+インストールされておらず、これまで`senders.py test`はモジュール欠落で
+実行不能だった(T71等で「pre-existing sandbox environment gap」として
+何度か迂回してきた既知の制約)。依存を無くしたことでこの制約が解消し、
+今回から`senders.py test`が通しで実行・確認できるようになった。
+
+**未対応(要ユーザー対応)**: 本番`.env`の`SENDGRID_API_KEY=`を
+`RESEND_API_KEY=<実際のキー>`に置き換え、コンテナを再作成する必要がある
+(コード修正だけでは本番のメール送信は有効化されない。T72の.env問題と
+同じ構図)。
+
+**確認**: `senders.py test`が今回から実行可能になり、メール送信関連
+6項目(未設定時のNotImplementedError・送信成功時のprovider_id・401の
+再試行判定・401のpermanent判定・503の再試行判定・接続不可時の
+ConnectionError化)全て確認(52項目、失敗なし)。`api.py test`(384/384)・
+`test_pipeline.py`(42/42)・`test_concurrency.py`(全項目パス)・
+`storage.py test`(5/5)・`monitor.py test`(28/28)・`backup.py test`
+(18/18)、いずれも回帰なし。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

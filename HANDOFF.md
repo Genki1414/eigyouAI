@@ -3393,18 +3393,26 @@ mikomeruだけで解決した(情報処理はIT グループでおおむねカ�
 とする形で対応した(例: gyoshu="動物病院"は`doubutsubyouin`にのみ一致し、`byouin`
 には一致しない)。
 
-**要フォローアップ(本番反映)**: 本番の`companies`テーブルは今回の394業種登録
-より前の`TRADE_KEYWORDS`(176業種)で取り込んだデータのため、新しい218業種は
-まだ既存46万7千社には反映されていない。デプロイ後、サーバー上で
+**本番反映(2026-09-09実施済み)**: デプロイ後、サーバー上で
 `docker cp /root/mikomeru_all.csv eigyouai-api:/app/mikomeru_all.csv` →
 `docker exec -it eigyouai-api python3 ingest_mikomeru.py /app/mikomeru_all.csv`
-を再実行すること(T59で直したtradesマージのおかげで、再実行しても
-website/contact等は壊れず、trades列だけ新業種分が追記される)。
+を再実行し、既存46万7千社に新しい394業種の判定を反映した(T59で直した
+tradesマージのおかげで、website/contact等は壊れず、trades列だけ新業種分が
+追記される。取込結果: 既存更新1,435,902件/新規追加0件、想定通り)。
+
+反映後の実測値: **業種タグなし企業が238,910件(51%)→13,896件(3%)に激減**。
+新規に追加した業種も本番データで実件数が確認できた
+(byouin(病院)155件/doubutsubyouin(動物病院)67件が別々に分離、
+shokuhinkanren(食品関連)3,429件/shokuhinkanrensenmonshousha(食品関連専門商社)
+1,389件も別々に分離=除外ルールが本番でも正しく機能。
+sekyuriteikeibi(警備)1,847件/kuriininguseisousaabisu(清掃)3,059件/
+haikibutsushobun(廃棄物処分)532件=データソース不足としていた業種も実データ確認)。
 
 **確認**: `config.TARGET_TRADES`と`ingest_mikomeru.TRADE_KEYWORDS`のコード集合が
 完全一致(394件)することをスクリプトで検証。`map_trades("動物病院")`が
 `doubutsubyouin`のみを返し`byouin`を含まないこと、`map_trades("食品関連専門商社")`が
-`shokuhinkanrensenmonshousha`のみを返し`shokuhinkanren`を含まないことを確認。
+`shokuhinkanrensenmonshousha`のみを返し`shokuhinkanren`を含まないことをローカルで確認、
+本番データでも同様に分離されていることを実測で確認。
 `api.py test`(357/357)・`test_pipeline.py`(42/42)・`test_concurrency.py`で回帰なし。
 
 ---

@@ -17,7 +17,7 @@ TRACK_BASE_URL = os.environ.get("TRACK_BASE_URL", "https://ashibase.jp")
 
 # api.py側のverify/staff・reset-passwordリンクと同じ環境変数(値はEIGYOUAI_DOMAIN
 # <Caddyfileの実際の公開ドメイン>と揃える。本番は app.ashibase.jp)。
-API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://ashibase.jp")
+API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://app.ashibase.jp")
 
 # 特定電子メール法上必須の配信停止URL。2026-09-09発覚: 専用のOPTOUT_URL環境変数を
 # 想定していたコード(.env.example)はあったが、どのPythonコードからも参照されて
@@ -26,7 +26,15 @@ API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://ashibase.jp")
 # (ashibase.jpは実際の公開ドメインapp.ashibase.jpの取り違え、/optoutは実際の
 # エンドポイントである/api/optoutの取り違えで、クリックしても機能しない状態
 # だった)。API_PUBLIC_URLから自動的に正しいパスを組み立てる形に修正した。
-OPTOUT_URL = os.environ.get("OPTOUT_URL", f"{API_PUBLIC_URL}/api/optout")
+# 2026-09-09追記: この修正をリリースした後も本番で404が再現した。原因は
+# .env側に旧プレースホルダのOPTOUT_URL=https://ashibase.jp/optoutがそのまま
+# 明示指定として残っていたこと(このコードのデフォルト値は環境変数が未設定の
+# 場合にしか使われないため、明示指定があるとそちらが優先されてしまい今回の
+# 修正が本番へ反映されていなかった)。os.environ.get(key, default)は空文字列
+# 指定(OPTOUT_URL=)でもdefaultを使わず""を返してしまうため、"or"で明示的に
+# 空文字列もdefault採用にフォールバックするようにした(.env側もOPTOUT_URL=
+# <空欄>にして、API_PUBLIC_URLから常に自動導出させる運用に変更ずみ)。
+OPTOUT_URL = os.environ.get("OPTOUT_URL") or f"{API_PUBLIC_URL}/api/optout"
 
 # ── 対象業種 ──────────────────────────────
 # 建設業許可29業種(parsers/common.py TRADE_CODE_NAMES)のうち、ここに書いた

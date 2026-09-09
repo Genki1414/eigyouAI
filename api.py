@@ -8,7 +8,11 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/activate  積算を1回実行した     → activated=1
   POST /api/paid      課金webhook          → paid=1, mrr_yen
   POST /api/optout    配信停止             → suppression に登録 + 未送信分を取消
-  GET  /api/optout    配信停止（ワンクリック）→ メール footer のリンクから
+  GET  /api/optout    配信停止の確認ページ   → メール footer のリンクから開く。
+                           2026-09-09からワンクリック即時停止ではなく確認画面を
+                           挟む(セキュリティ製品のリンク自動プリフェッチによる
+                           意図しない配信停止を防ぐため)。画面上のボタンから
+                           上記POSTを叩いて初めて実際に停止する
   GET  /t/<touch_id>  開封・クリック計測    → responded=1 してLPへリダイレクト
   GET  /track/click/<token>  MIKOMERUの「URLアクセスの記録」相当。テナントの送信文章
                            中のURLがクリックされたことを記録し、本来のURLへ302
@@ -262,6 +266,7 @@ CACもチャネル別成績も出せない = 売り物にならない。
 import csv
 import hashlib
 import hmac
+import html
 import io
 import json
 import os
@@ -325,6 +330,19 @@ _OPS_PLAN_CHANGE_RESOLVE_PATH_RE = re.compile(r"^/api/ops/plan-change-requests/(
 _STATIC_PAGES = {"/list_builder.html": "list_builder.html", "/": "list_builder.html",
                   "/hq.html": "hq.html"}
 _BASE_DIR = Path(__file__).parent
+
+# GET /api/optout(h_optout_page)の確認画面用。h_verify_staff_email/
+# h_reset_password_pageと同じカード型レイアウトに揃える。
+_OPTOUT_PAGE_STYLE = """<style>body{font-family:sans-serif;background:#EFF1F2;display:flex;
+  align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#fff;border-radius:8px;padding:32px 40px;max-width:420px;width:100%;
+  text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08);box-sizing:border-box}
+h1{font-size:18px;color:#333;margin-top:0}
+p{font-size:13px;color:#333;line-height:1.7}
+button{width:100%;margin-top:8px;padding:10px;font-size:14px;background:#4F8FEF;color:#fff;
+  border:none;border-radius:4px;cursor:pointer}
+button:disabled{background:#aaa;cursor:default}
+.msg.ok{color:#1E7A4D} .msg.err{color:#B4441F}</style>"""
 
 
 def _build_chrome_extension_zip():
@@ -475,6 +493,70 @@ def h_optout(con, data):
     con.commit()
     return 200, {"ok": True, "company_id": cid, "cancelled": n,
                  "message": "配信を停止しました"}
+
+
+def h_optout_page(con, qs):
+    """GET /api/optout(公開)。2026-09-09: 以前はこのGETを開いた時点でh_optout()を
+    呼び即時停止していたが、企業向けセキュリティ製品がメール内リンクを安全性確認の
+    ため自動で開く「プリフェッチ」により、受信者本人がクリックしていなくても
+    意図せず配信停止扱いになる事故が起こりうるという指摘を受け、確認画面を
+    挟む方式に変更した(h_verify_staff_email/h_reset_password_pageと同じ、
+    リンクを開くだけで完結するHTML+JS方式)。実際の停止処理は変更していない
+    (画面上のボタンから今まで通りPOST /api/optout=h_optout()を呼ぶだけ)。
+    GET自体はDBを一切変更しない(参照のみ)ので、プリフェッチされても無害。"""
+    touch_id, company_id, email = qs.get("touch_id"), qs.get("company_id"), qs.get("email")
+    _, cid, _ = resolve_touch(con, touch_id, company_id, email)
+    # resolve_touch()は「company_idが渡されればtouchesの有無に関わらずそのまま
+    # 会社IDとして採用する」設計(touch由来のアトリビューション判定が主目的で、
+    # company_idの実在確認はしていない)ため、ここで別途companiesに実在するかを
+    # 確認する。しないと、でたらめなcompany_idでも「配信停止の確認」画面が
+    # 表示されてしまう。
+    row = con.execute("SELECT name FROM companies WHERE id=?", (cid,)).fetchone() if cid else None
+    if not row:
+        return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<title>ヒラケル — 配信停止</title>{_OPTOUT_PAGE_STYLE}</head>
+<body><div class="card"><h1>× リンクが無効です</h1>
+<p class="msg err">該当する会社が特定できませんでした。お手数ですが送信元へ直接ご連絡ください。</p>
+</div></body></html>"""
+    company_name = row["name"] or ""
+    already = con.execute("SELECT 1 FROM suppression WHERE company_id=?", (cid,)).fetchone()
+    if already:
+        return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<title>ヒラケル — 配信停止</title>{_OPTOUT_PAGE_STYLE}</head>
+<body><div class="card"><h1>✓ 配信停止済みです</h1>
+<p class="msg ok">{html.escape(company_name)} 様は既に配信停止の設定が完了しています。
+今後の連絡は届きません。</p></div></body></html>"""
+
+    payload = json.dumps({"touch_id": touch_id, "company_id": company_id, "email": email})
+    return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<title>ヒラケル — 配信停止の確認</title>{_OPTOUT_PAGE_STYLE}</head>
+<body><div class="card">
+<h1>配信停止の確認</h1>
+<p>{html.escape(company_name)} 様への今後のご連絡を停止します。よろしいですか？</p>
+<button id="btn" onclick="doOptout()">配信を停止する</button>
+<p id="msg" class="msg"></p>
+<script>
+async function doOptout() {{
+  const btn = document.getElementById("btn"), msg = document.getElementById("msg");
+  btn.disabled = true;
+  try {{
+    const res = await fetch("/api/optout", {{method: "POST",
+      headers: {{"Content-Type": "application/json"}}, body: JSON.stringify({payload})}});
+    const data = await res.json();
+    if (res.ok && data.ok) {{
+      msg.className = "msg ok"; msg.textContent = "配信を停止しました。今後の連絡は届きません。";
+      btn.style.display = "none";
+    }} else {{
+      msg.className = "msg err"; msg.textContent = data.error || "処理に失敗しました";
+      btn.disabled = false;
+    }}
+  }} catch (e) {{
+    msg.className = "msg err"; msg.textContent = "通信に失敗しました。時間をおいて再度お試しください";
+    btn.disabled = false;
+  }}
+}}
+</script>
+</div></body></html>"""
 
 
 def h_click(con, touch_id):
@@ -2400,8 +2482,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             if u.path == "/api/optout":
-                st, res = h_optout(con, {k: v[0] for k, v in qs.items()})
-                return self._json(st, res)
+                body = h_optout_page(con, {k: v[0] for k, v in qs.items()}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                return self.wfile.write(body)
             verify_staff_match = _VERIFY_STAFF_PATH_RE.match(u.path)
             if verify_staff_match:
                 body = h_verify_staff_email(con, verify_staff_match.group(1)).encode("utf-8")
@@ -2560,15 +2646,28 @@ def self_test(port=8899):
     con.commit()
 
     print("\n── 配信停止 ──")
+    print("  (T73: GETは確認画面を返すだけで、ボタンを押す<POST>まで実際には停止しない)")
+    st, body = get(f"/api/optout?company_id={cid}")
+    t("GET /api/optoutは確認画面(HTML)を返す",
+      st == 200 and "配信を停止する" in body.decode("utf-8"))
+    t("GETを開いただけではまだsuppressionに入らない(プリフェッチ対策)",
+      con.execute("SELECT COUNT(*) FROM suppression WHERE company_id=?", (cid,)).fetchone()[0] == 0)
+    st, body = get("/api/optout?company_id=999999999")
+    t("該当企業が無いGETはエラー画面(HTML)を返す",
+      st == 200 and "リンクが無効です" in body.decode("utf-8"))
+
     before = con.execute("SELECT COUNT(*) FROM touches WHERE company_id=? AND sent_at IS NULL",
                          (cid,)).fetchone()[0]
     st, r = post("/api/optout", {"company_id": cid})
-    t("POST /api/optout", st == 200 and r.get("ok"))
+    t("POST /api/optout(確認画面のボタンから呼ばれる、実際の停止処理)", st == 200 and r.get("ok"))
     t("suppressionに登録される",
       con.execute("SELECT COUNT(*) FROM suppression WHERE company_id=?", (cid,)).fetchone()[0] == 1)
     t("未送信の予定が取り消される",
       con.execute("SELECT COUNT(*) FROM touches WHERE company_id=? AND sent_at IS NULL",
                   (cid,)).fetchone()[0] == 0, f"取消前{before}件")
+    st, body = get(f"/api/optout?company_id={cid}")
+    t("停止済み企業がGETを開くと「既に配信停止済み」画面になる",
+      st == 200 and "配信停止済みです" in body.decode("utf-8"))
     allowed, why = db.can_contact(con, cid)
     t("以後 can_contact が拒否する", (not allowed) and "配信停止" in why)
 

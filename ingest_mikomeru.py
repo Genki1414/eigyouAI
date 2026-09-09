@@ -2,14 +2,17 @@
 ingest_mikomeru.py — mikomeru保存済みリスト(CSV)の取込
 既存companies.dbとは別データソース(法人番号ベースの業種横断ディレクトリ)。
 国交省名簿は config.TARGET_TRADES の許可業者のみだが、mikomeruは業種を問わない
-一般的な建設業者ディレクトリで、ホームページ/問い合わせページ/フォーム有無が
+一般的な業者ディレクトリで、ホームページ/問い合わせページ/フォーム有無が
 ほぼ全件揃っている(=Webフォーム経由の営業チャネルに使える一次情報)。
 
-【建設業以外(警備・情報処理・清掃サービス・廃棄物処理・給食等)は対象外】
-mikomeruも建設業者ディレクトリなので、これらの業種はそもそも収録が無い。
-AI入札連携(AInyusatsu)が必要とする業種の一部(電気・造園)は建設業許可の
-枠内なのでTRADE_KEYWORDSに追加したが、それ以外は別のデータソースが要る
-(eigyouAI HANDOFF.md「5. 連絡すべき判断」に選定未着手として記録)。
+【2026-09-09追記: 建設業限定ではなく全業種を扱うディレクトリだった】
+T60時点では「mikomeruも建設業者ディレクトリなので警備・情報処理・清掃・
+廃棄物処理・給食等は収録が無い」としていたが誤りだった。T63でユーザーが
+mikomeruの「業種で絞り込む」を最後まで確認したところ、建設・製造・小売以外にも
+運輸/人材/医療/広告/商社/不動産/美容/エンタメ/コンサル/金融/IT/教育/化学/
+公共サービス/鉱業/エネルギー/ゲーム/専門サービス/通信/メディア/その他サービス業界
+(警備・清掃・廃棄物処理はここに実在した)/その他業界まで全394業種が確認でき、
+TRADE_KEYWORDSに登録済み。給食は元々「外食」グループの「給食・食堂」で対応済み。
 
 既存レコードとの重複はdb.normalize_name()+prefで名寄せ判定し、一致した場合は
 新規行を作らず既存レコードにURL情報を書き足すだけにする
@@ -227,11 +230,266 @@ TRADE_KEYWORDS = {
     "hyakkaten": ["百貨店"],
     "kodomofukukanren": ["子供服関連ショップ"],
     "sonohokakouri": ["その他小売"],
+    # 運輸・物流
+    "ippankamotsuyusousaabisu": ["一般貨物輸送サービス"],
+    "kuuunkoukuubutsuryuu": ["空運・航空物流"],
+    "basukoukyoukoutsuukikan": ["バス・公共交通機関"],
+    "takushiihaiyaa": ["タクシー・ハイヤー"],
+    "reitoureizouyusou": ["冷凍・冷蔵輸送"],
+    "tetsudourikuun": ["鉄道・陸運"],
+    "kaiun": ["海運"],
+    "soukokanriunei": ["倉庫管理・運営"],
+    "hikkoshiitensaabisu": ["引っ越し・移転サービス"],
+    "juukikikaiyusou": ["重機・機械輸送"],
+    "juuryoubutsuyusou": ["重量物輸送"],
+    "kouwankaijouyusoushien": ["港湾・海上輸送支援"],
+    "sonohokaunyubutsuryuu": ["その他運輸・物流"],
+    # 人材系
+    "gyoumuukeoisaabisu": ["業務請負サービス"],
+    "seizougyougijutsushokuhaken": ["製造業・技術職派遣"],
+    "saabisugyoujinzaihaken": ["サービス業人材派遣"],
+    "jimushoriautosooshingu": ["事務処理アウトソーシング"],
+    "iryoufukushijinzaihaken": ["医療・福祉人材派遣"],
+    "butsuryuusoukokanrenjinzaihaken": ["物流・倉庫関連人材派遣"],
+    "jimuinsagyouinhaken": ["事務員・作業員派遣"],
+    "jinzaishoukai": ["人材紹介"],
+    "koorusentaaunei": ["コールセンター運営"],
+    "kigyoukenshuutoreeningu": ["企業研修・トレーニング"],
+    "sonotaninzaizenpan": ["その他人材全般"],
+    "seminaakobetsushidousaabisu": ["セミナー・個別指導サービス"],
+    # 医療・福祉・バイオ
+    "chouzaiyakkyokuyakkyokujigyou": ["調剤薬局・薬局事業"],
+    "seiyaku": ["製薬"],
+    "iryoukikijikkenkiutsuwaseizou": ["医療機器・実験機器製造"],
+    "sonohokairyouryouyoushisetsuunei": ["その他医療・療養施設運営"],
+    "koureishamukefukushi": ["高齢者向け福祉"],
+    "kaigoyouhinzaitakuiryoukiki": ["介護用品・在宅医療機器"],
+    "shougaimonofukushijigyou": ["障がい者福祉事業"],
+    "byouin": ["病院"],
+    "iryouhounin": ["医療法人"],
+    "koureishamukejuutakushisetsu": ["高齢者向け住宅施設"],
+    "jidoufukushihoikukanren": ["児童福祉・保育関連"],
+    "kaigofukushi": ["介護・福祉"],
+    "kurinikkuiinshinryoujo": ["クリニック・医院・診療所"],
+    "baiotekunorojiisentaniryou": ["バイオテクノロジー・先端医療"],
+    "doubutsubyouin": ["動物病院"],
+    "haisha": ["歯医者"],
+    "sonohokairyoufukushisaabisu": ["その他医療・福祉サービス"],
+    # 広告
+    "koukokukikakudairiten": ["広告企画代理店"],
+    "onrainkoukokudairi": ["オンライン広告代理"],
+    "sonohokakoukoku": ["その他広告"],
+    "tenjikaipuromooshonibento": ["展示会・プロモーションイベント"],
+    # 商社関連
+    "sougoushousha": ["総合商社"],
+    "kagakuhiniyakuhinshousha": ["化学品・医薬品商社"],
+    "shokuhinkanrensenmonshousha": ["食品関連専門商社"],
+    "tekkoukinzokushousha": ["鉄鋼・金属商社"],
+    "iryoukikikigushousha": ["医療機器・器具商社"],
+    "kougyouyoukikaisenmonshousha": ["工業用機械専門商社"],
+    "nousanbutsushokuhinshousha": ["農産物食品商社"],
+    "denshibuhinshousha": ["電子部品商社"],
+    "nichiyouhinkeshouhinshousha": ["日用品・化粧品商社"],
+    "kamiparupusenmonshousha": ["紙・パルプ専門商社"],
+    "kikaisenmonshousha": ["機械専門商社"],
+    "kenzaisenmonshousha": ["建材専門商社"],
+    "shokunikutamagokanrensenmonshousha": ["食肉・卵関連専門商社"],
+    "suisanbutsushokuhinsenmonshousha": ["水産物食品専門商社"],
+    "nourinsuisanyoukikaishousha": ["農林水産用機械商社"],
+    "seniaparerushousha": ["繊維・アパレル商社"],
+    "zakkanichiyouhinsenmonshousha": ["雑貨・日用品専門商社"],
+    "sonohokasenmonshousha": ["その他専門商社"],
+    # 不動産
+    "manshonapaatochintai": ["マンション・アパート賃貸"],
+    "sonohokafudousan": ["その他不動産"],
+    "sougoufudousandeberoppaa": ["総合不動産（デベロッパー）"],
+    "kodatechintai": ["戸建賃貸"],
+    "kodatebaibai": ["戸建売買"],
+    "jigyouyoubukkentenantobiruchintai": ["事業用物件・テナントビル賃貸"],
+    "manshonapaatobaibai": ["マンション・アパート売買"],
+    "chuushajouunei": ["駐車場運営"],
+    "manshonbirukanri": ["マンション・ビル管理"],
+    "rentarusupeesuteikyou": ["レンタルスペース提供"],
+    "jigyouyoubukkentenantobirubaibai": ["事業用物件・テナントビル売買"],
+    "tochibaibaichintai": ["土地売買・賃貸"],
+    "sonohokafudousankanri": ["その他不動産管理"],
+    # ファッション・美容
+    "sukinkea": ["スキンケア"],
+    "kosumeteikkuseizou": ["コスメティック製造"],
+    "rediisuapareru": ["レディースアパレル"],
+    "tokei": ["時計"],
+    "innaaueakutsushitaseizou": ["インナーウェア・靴下製造"],
+    "esuterirakuzeeshon": ["エステ・リラクゼーション"],
+    "bagguapareruzakka": ["バッグ・アパレル雑貨"],
+    "juerii2": ["ジュエリー"],
+    "senishokufu": ["繊維・織布"],
+    "shuuzu": ["シューズ"],
+    "biyousaronheakea": ["美容サロン・ヘアケア"],
+    "seifukuwaakuueaseizou": ["制服・ワークウェア製造"],
+    "sonohokabiyou": ["その他美容"],
+    "kodomofuku": ["子供服"],
+    "menzuapareru": ["メンズアパレル"],
+    "sonohokaapareru": ["その他アパレル"],
+    # エンタメ・レジャー
+    "gorufubaunei": ["ゴルフ場運営"],
+    "eizoucmseisaku": ["映像・CM制作"],
+    "pachinkoamyuuzumento": ["パチンコ・アミューズメント"],
+    "ryokanhoterushukuhakushisetsu": ["旅館・ホテル・宿泊施設"],
+    "ryokoukanren": ["旅行関連"],
+    "pettodoubutsukanrensaabisu": ["ペット・動物関連サービス"],
+    "maruchimediagakki": ["マルチメディア・楽器"],
+    "ibentokikakuunei": ["イベント企画・運営"],
+    "supootsubijinesukanren": ["スポーツビジネス関連"],
+    "fittonesujimu": ["フィットネス・ジム"],
+    "kaigairyokouryuugakushien": ["海外旅行・留学支援"],
+    "eigaanime": ["映画・アニメ"],
+    "geinoupurodakushon": ["芸能プロダクション"],
+    "tarentokyarakutaaguzzu": ["タレント・キャラクターグッズ"],
+    "sonohokaentamerejaa": ["その他エンタメ・レジャー"],
+    # コンサル
+    "itkonsaruteingu": ["ITコンサルティング"],
+    "zaimukonsaruteingu": ["財務コンサルティング"],
+    "iryoukanrenkonsaruteingu": ["医療関連コンサルティング"],
+    "sougoukonsaruteingu": ["総合コンサルティング"],
+    "puromooshonsenryakukonsaruteingu": ["プロモーション戦略コンサルティング"],
+    "keieikonsaruteingu": ["経営コンサルティング"],
+    "seizougyoukonsaruteingu": ["製造業コンサルティング"],
+    "fudousankonsaruteingu": ["不動産コンサルティング"],
+    "soshikijinjisenryakukonsaruteingu": ["組織・人事戦略コンサルティング"],
+    "dejitarumaaketeingu": ["デジタルマーケティング"],
+    "dobokukenchikukonsaruteingu": ["土木・建築コンサルティング"],
+    "inshokukanrenkonsaruteingu": ["飲食関連コンサルティング"],
+    "kosutosakugenkonsaruteingu": ["コスト削減コンサルティング"],
+    "shisanunyouadobaizaa": ["資産運用アドバイザー"],
+    "koukokuunyoukonsaruteingu": ["広告運用コンサルティング"],
+    "sutaatoappushien": ["スタートアップ支援"],
+    "sonohokakonsaruteingu": ["その他コンサルティング"],
+    # 金融
+    "hokensaabisu": ["保険サービス"],
+    "toushishisanunyou": ["投資・資産運用"],
+    "ginkoushinyoukinkoshinyoukumiai": ["銀行・信用金庫・信用組合"],
+    "shouken": ["証券"],
+    "kurejittoshinpankessaisaabisu": ["クレジット・信販・決済サービス"],
+    "hokendairimise": ["保険代理店"],
+    "kashikinroonsaabisu": ["貸金・ローンサービス"],
+    "jigyoushamukekinyuusaabisu": ["事業者向け金融サービス"],
+    "nettoshouken": ["ネット証券"],
+    "sonohokakinyuukanrensaabisu": ["その他金融関連サービス"],
+    # IT
+    "saibaasekyuriteisaabisu": ["サイバーセキュリティサービス"],
+    "sofutoueasenmonshousha": ["ソフトウェア専門商社"],
+    "itinfurakouchikuunyou": ["ITインフラ構築・運用"],
+    "jutakukaihatsusi": ["受託開発・SI"],
+    "sofutoueakaihatsu": ["ソフトウェア開発"],
+    "webdezainseisaku": ["Webデザイン・制作"],
+    "websaabisuapuriunei": ["Webサービス・アプリ運営"],
+    "dejitarukontentsuseisakuunyou": ["デジタルコンテンツ制作・運用"],
+    "kuraudofintekku": ["クラウド・フィンテック"],
+    "sonohokait": ["その他IT"],
+    # 教育・スクール関連
+    "gakushuujukuyobikou": ["学習塾・予備校"],
+    "sukuurunaraigoto": ["スクール・習い事"],
+    "youchienhoikuen": ["幼稚園・保育園"],
+    "daigaku": ["大学"],
+    "shikakushutokutsuushinkyouiku": ["資格取得・通信教育"],
+    "itkyouikukanren": ["IT教育関連"],
+    "kyouzaiseisakuhanbai": ["教材製作・販売"],
+    "gogakugakushuusukuuru": ["語学学習スクール"],
+    "shougakkouchuugakkoukoukou": ["小学校・中学校・高校"],
+    "senmongakkou": ["専門学校"],
+    "sonohokagakkoukyouikukikan": ["その他学校・教育機関"],
+    # 化学
+    "kagakuhinkagakuyakuhinseizou": ["化学品・化学薬品製造"],
+    "toryouseizou": ["塗料製造"],
+    "jushiseihinseizou": ["樹脂製品製造"],
+    "jushiseibuhinseizou": ["樹脂製部品製造"],
+    "hiryounouyakuengeiyouhinseizou": ["肥料・農薬・園芸用品製造"],
+    "setchakuzainenchakuteepuseizou": ["接着剤・粘着テープ製造"],
+    "sonohokakagaku": ["その他化学"],
+    # 公共サービス
+    "kankouchou": ["官公庁"],
+    "saibanshokensatsuchou": ["裁判所・検察庁"],
+    # 石炭・鉱石採掘
+    "shigenmejaa": ["資源メジャー"],
+    "kikinzokusaikutsuseiren": ["貴金属採掘・精錬"],
+    "saikutsusaisekikanren": ["採掘・採石関連"],
+    "sekitansekkaiishikaihatsuhanbai": ["石炭・石灰石開発、販売"],
+    "sekitankaihatsusaabisu": ["石炭開発サービス"],
+    "sonohokakinzokusaikutsu": ["その他金属採掘"],
+    # エネルギー
+    "gasunenryoukanren": ["ガス・燃料関連"],
+    "denryokukyoukyuu": ["電力供給"],
+    "saiseikanouenerugii": ["再生可能エネルギー"],
+    "sonohokaenerugii": ["その他エネルギー"],
+    # ゲーム
+    "soosharugeemu": ["ソーシャルゲーム"],
+    "geemusofutokaihatsu": ["ゲームソフト開発"],
+    "animeeshondezain": ["アニメーションデザイン"],
+    "sonohokageemukanrensaabisu": ["その他ゲーム関連サービス"],
+    # 専門サービス
+    "senmonjimusho": ["専門事務所"],
+    "honyakutsuuyaku": ["翻訳・通訳"],
+    # 通信及び通信機器
+    "tsuushinkaisenteikyou": ["通信回線提供"],
+    "pasokonseizouhanbaishuuri": ["パソコン製造・販売・修理"],
+    "keitaitsuushinkaisenhanbaidairiten": ["携帯・通信回線販売代理店"],
+    "pasokonsumahoshuuhenkikiseizou": ["パソコン・スマホ周辺機器製造"],
+    "denwakiseizou": ["電話機製造"],
+    "sumahotaburettoseizoushuuri": ["スマホ・タブレット製造・修理"],
+    "sonohokatsuushin": ["その他通信"],
+    "sonohokatsuushinkiutsuwa": ["その他通信機器"],
+    # メディア・出版関連
+    "terebirajiohousoukyoku": ["テレビ・ラジオ放送局"],
+    "shosekizasshishuppan": ["書籍・雑誌出版"],
+    "shinbun": ["新聞"],
+    "terebibangumiseisaku": ["テレビ番組制作"],
+    "dejitarushosekishuppan": ["デジタル書籍出版"],
+    "rajiobangumiseisaku": ["ラジオ番組制作"],
+    "mediazenpan": ["メディア全般"],
+    # その他サービス業界
+    "sekyuriteikeibi": ["セキュリティ・警備"],
+    "kuriininguseisousaabisu": ["クリーニング・清掃サービス"],
+    "chousakensakenkyuukanren": ["調査・検査・研究関連"],
+    "birushisetsuseisou": ["ビル・施設清掃"],
+    "haikibutsushuushuuunpansaabisu": ["廃棄物収集・運搬サービス"],
+    "haikibutsushobun": ["廃棄物処分"],
+    "satsueisaabisu": ["撮影サービス"],
+    "rentaruriisu": ["レンタル・リース"],
+    "sonohokadezainkurieiteibu": ["その他デザイン・クリエイティブ"],
+    "seikatsukanrenrentaruriisu": ["生活関連レンタル・リース"],
+    "risaikururiyuusu": ["リサイクル・リユース"],
+    "buraidaru": ["ブライダル"],
+    "sougisousaikanren": ["葬儀・葬祭関連"],
+    "sonotadantaigyoukai": ["その他団体業界"],
+    "hokenkumiai": ["保険組合"],
+    "sonohokaseisou": ["その他清掃"],
+    "ofisukikirentaruriisu": ["オフィス機器レンタル・リース"],
+    "ihinseirisaabisu": ["遺品整理サービス"],
+    "sonohokasaabisu": ["その他サービス"],
+    # その他業界
+    "kumiaidantairengoukaikyoukai": ["組合・団体・連合会・協会"],
+    "npo": ["NPO"],
+    "shuukyouhoujin": ["宗教法人"],
+}
+
+
+# TRADE_KEYWORDSは部分文字列一致なので、短い業種名がより具体的な複合語の一部として
+# 誤ヒットすることがある(例: 「病院」が「動物病院」に、「食品関連」が「食品関連専門商社」に
+# 一致してしまう)。同じ業種内の広い/狭いの関係(「その他不動産」⊂「その他不動産管理」等)は
+# 実害が無いため許容するが、別業種にまたがるものだけここで個別に除外する(T63)。
+TRADE_EXCLUDE_KEYWORDS = {
+    "byouin": ["動物病院"],
+    "shokuhinkanren": ["食品関連専門商社"],
 }
 
 
 def map_trades(gyoshu: str) -> str:
-    hits = [code for code, kws in TRADE_KEYWORDS.items() if any(k in (gyoshu or "") for k in kws)]
+    g = gyoshu or ""
+    hits = [
+        code for code, kws in TRADE_KEYWORDS.items()
+        if any(k in g for k in kws)
+        and not any(ex in g for ex in TRADE_EXCLUDE_KEYWORDS.get(code, []))
+    ]
     return ",".join(hits)
 
 

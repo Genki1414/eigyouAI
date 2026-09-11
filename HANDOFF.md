@@ -4128,6 +4128,51 @@ Resend側(またはその手前のインフラ)でボット判定されブロッ
 
 ---
 
+### T82. バックアップのオフサイト複製(Hetzner Storage Box)を実際に設定(2026-09-09)
+
+「リリースの壁」の最後の1点として、T37で実装していたオフサイト複製が
+本番で未設定(`BACKUP_OFFSITE_TARGET`が空)だったことが判明。ユーザーと
+一緒にHetzner Storage Box(BX11、`u668279.your-storagebox.de`)を新規契約し、
+実際に設定した。
+
+**分かったこと・つまずいた点**:
+- Storage BoxはSSH Supportが既定で無効になっており、有効化が必要だった
+  (Hetzner Console上で操作)。
+- Storage BoxのSSHポートは**23番**(標準の22番ではない)。`backup.py`の
+  `sync_offsite()`は元から`BACKUP_OFFSITE_SSH_PORT`(既定値"23")に対応済み
+  だったため、コード変更は不要だった。
+- バックアップを実行するcronは`worker`コンテナの中で動く(`deploy/crontab`
+  経由)。ホスト側で`ssh-keygen`して作った鍵は、そのままだとコンテナから
+  見えない(`docker-compose.yml`にSSH鍵ディレクトリのマウントが無かった)。
+  ホストの`~/.ssh`をまるごとマウントすると他の秘密鍵(デプロイ鍵等)まで
+  コンテナに晒すことになるため、バックアップ専用の鍵だけを置く専用
+  ディレクトリ(`backup_ssh/`、`deploy/`と同じ階層)を新設し、`worker`
+  サービスにだけ`/root/.ssh`としてマウントするようにした。
+
+**修正**: `deploy/docker-compose.yml`の`worker`サービスに
+`../backup_ssh:/root/.ssh`のボリュームマウントを追加(`:ro`を付けず、
+`ssh -o StrictHostKeyChecking=accept-new`が初回接続時に`known_hosts`を
+書き込めるようにする)。鍵ファイルを`id_ed25519`という名前で置けば、
+`ssh`側の設定ファイル追加なしで自動的に使われる。
+
+**本番側の作業手順(ユーザーと一緒に実施)**:
+1. Hetzner ConsoleでStorage Box(BX11)を契約、SSH Supportを有効化
+2. サーバー上で`ssh-keygen -t ed25519 -f ~/.ssh/backup_storagebox -N ""`
+   (バックアップ専用鍵。デプロイ鍵等とは別の鍵にする)
+3. 公開鍵をStorage BoxのSSH鍵として登録
+4. `ssh -p 23 -i ~/.ssh/backup_storagebox u668279@u668279.your-storagebox.de`
+   で接続確認 → `mkdir backups`でバックアップ先ディレクトリを作成
+5. `mkdir -p /opt/eigyouai/backup_ssh`、鍵を`id_ed25519`/`id_ed25519.pub`
+   という名前でそこへ移動、パーミッションを`700`/`600`に
+6. `.env`に`BACKUP_OFFSITE_TARGET=u668279@u668279.your-storagebox.de:backups/`
+   を設定
+7. コード更新分(`docker-compose.yml`)を反映させた上で
+   `docker compose -f deploy/docker-compose.yml up -d --force-recreate worker`
+8. `docker exec deploy-worker-1 python3 backup.py run`で実際にオフサイト
+   複製が成功することを確認
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

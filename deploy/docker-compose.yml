@@ -39,7 +39,11 @@ services:
   worker:
     build: { context: .., dockerfile: deploy/Dockerfile }
     env_file: [../.env]
-    volumes: ["engine-data:/app/out", "../data:/app/data:ro"]
+    # ../backup_ssh: backup.py sync_offsite()(T37)がバックアップ先(Hetzner
+    # Storage Box等)へrsync -e sshする際に使う秘密鍵(id_ed25519という名前で
+    # 置くとsshが自動で見つける)。known_hosts をここへ書き込めるよう:ro を
+    # 付けない。ホスト側の準備手順はHANDOFF.md T82参照。
+    volumes: ["engine-data:/app/out", "../data:/app/data:ro", "../backup_ssh:/root/.ssh"]
     command: ["/bin/bash", "-c", "crontab /app/deploy/crontab && cron -f"]
     restart: unless-stopped
     depends_on: { postgres: { condition: service_healthy } }

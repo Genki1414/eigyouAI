@@ -4148,12 +4148,27 @@ Resend側(またはその手前のインフラ)でボット判定されブロッ
   コンテナに晒すことになるため、バックアップ専用の鍵だけを置く専用
   ディレクトリ(`backup_ssh/`、`deploy/`と同じ階層)を新設し、`worker`
   サービスにだけ`/root/.ssh`としてマウントするようにした。
+- **鍵・.envの設定を全て終えて`backup.py run`を実行しても、CLIの出力は
+  「✓ バックアップ完了」としか出ず、実は毎回オフサイト複製だけ失敗していた**。
+  `run_backup()`はローカルさえ成功していれば`ok=True`を返す設計(意図通り。
+  ローカル成功とオフサイト複製失敗を混同させないため)だが、CLI側の
+  `print()`が`ok=True`の時に`msg`(オフサイト失敗の詳細)を完全に捨てて
+  いたため、複製が全滅していることにCLI出力からは全く気づけなかった。
+  Storage Box側を直接SSHで見て`backups/`が空であることに気づき発覚。
+  原因は**`rsync`コマンド自体がDockerイメージに入っていなかったこと**
+  (`deploy/Dockerfile`は`cron`/`tzdata`/`ca-certificates`しかインストール
+  しておらず、`rsync`も`ssh`クライアントも無かった)。
 
-**修正**: `deploy/docker-compose.yml`の`worker`サービスに
-`../backup_ssh:/root/.ssh`のボリュームマウントを追加(`:ro`を付けず、
-`ssh -o StrictHostKeyChecking=accept-new`が初回接続時に`known_hosts`を
-書き込めるようにする)。鍵ファイルを`id_ed25519`という名前で置けば、
-`ssh`側の設定ファイル追加なしで自動的に使われる。
+**修正**:
+- `deploy/docker-compose.yml`の`worker`サービスに`../backup_ssh:/root/.ssh`
+  のボリュームマウントを追加(`:ro`を付けず、`ssh -o
+  StrictHostKeyChecking=accept-new`が初回接続時に`known_hosts`を書き込める
+  ようにする)。鍵ファイルを`id_ed25519`という名前で置けば、`ssh`側の設定
+  ファイル追加なしで自動的に使われる。
+- `deploy/Dockerfile`に`openssh-client`・`rsync`を追加。
+- `backup.py`のCLI(`run`コマンド)を修正し、ローカルバックアップ成功時でも
+  `msg`が`"ok"`以外(=オフサイト複製失敗の詳細)なら表示するようにした
+  (今回のような「成功表示なのに実は複製だけ失敗」を二度と見逃さないため)。
 
 **本番側の作業手順(ユーザーと一緒に実施)**:
 1. Hetzner ConsoleでStorage Box(BX11)を契約、SSH Supportを有効化
@@ -4166,10 +4181,15 @@ Resend側(またはその手前のインフラ)でボット判定されブロッ
    という名前でそこへ移動、パーミッションを`700`/`600`に
 6. `.env`に`BACKUP_OFFSITE_TARGET=u668279@u668279.your-storagebox.de:backups/`
    を設定
-7. コード更新分(`docker-compose.yml`)を反映させた上で
-   `docker compose -f deploy/docker-compose.yml up -d --force-recreate worker`
-8. `docker exec deploy-worker-1 python3 backup.py run`で実際にオフサイト
-   複製が成功することを確認
+7. コード更新分(`docker-compose.yml`のマウント追加・`Dockerfile`への
+   `rsync`/`openssh-client`追加)を反映させた上で
+   `docker compose -f deploy/docker-compose.yml up -d --build --force-recreate worker`
+   (Dockerfile変更を含むため`--build`が必須)
+8. `docker exec deploy-worker-1 python3 backup.py run`を実行し、表示内容に
+   カッコ書きの失敗詳細が付いていないことを確認。念のためStorage Box側も
+   `ssh -p 23 -i /opt/eigyouai/backup_ssh/id_ed25519
+   u668279@u668279.your-storagebox.de "ls -la backups/"`でファイルが実際に
+   届いていることを直接確認する
 
 ---
 

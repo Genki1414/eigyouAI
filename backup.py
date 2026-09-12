@@ -353,7 +353,16 @@ if __name__ == "__main__":
         raise SystemExit(0 if test() else 1)
     elif args.cmd == "run":
         ok, path, msg = run_backup()
-        print(f"{'✓' if ok else '✗'} {msg if not ok else f'バックアップ完了: {path}'}")
+        # ローカルのバックアップ自体が失敗した場合はmsgをそのまま表示。成功時は
+        # 「バックアップ完了」を基本にしつつ、msgが"ok"以外(=オフサイト複製失敗の
+        # 詳細)ならそれも一緒に表示する(2026-09-09発覚: 以前はmsgが"ok"以外でも
+        # okがTrueなら黙って握りつぶしており、rsync未インストールでオフサイト
+        # 複製が全滅していたことにCLI出力からは気づけなかった)。
+        if ok:
+            detail = f"（{msg}）" if msg != "ok" else ""
+            print(f"✓ バックアップ完了: {path}{detail}")
+        else:
+            print(f"✗ {msg}")
         raise SystemExit(0 if ok else 1)
     elif args.cmd == "list":
         list_backups()

@@ -3,7 +3,7 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Tokyo
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      cron tzdata ca-certificates \
+      cron tzdata ca-certificates openssh-client rsync \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

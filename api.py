@@ -112,6 +112,14 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/tenant/search-log/<id>/save-as-list  {"name" or "existing_list_id"} →
                            検索結果をリストとして保存(filter型は検索条件を今再実行する)
   GET  /api/tenant/search-log/<id>/csv  検索ログの内容をCSVでダウンロード
+  POST /api/tenant/products       {"name","description"} → 商材登録(T83)。ヒラケル独自
+                           (MIKOMERUには無い)。登録時点ではAI判断は行わない
+  GET  /api/tenant/products       自テナントの商材一覧(商材ごとの累計リストアップ数付き)
+  POST /api/tenant/products/<id>/build-list  {"count","name"} → 商材の説明文をAIが読み、
+                           どんな企業に刺さるかを判断してフィルタ型と同じ仕組みで
+                           count社のリストを新規作成する。過去にこの商材向けに作った
+                           全リストのメンバーは自動で除外する(同じ会社に同じ商材を
+                           二度提案しない)
   POST /api/tenant/lists/<id>/outcome  {"company_id","field":"replied"|"deal"|"won",
                            "value","memo"} → 返信・商談化・受注を手動記録(β版。
                            メール自動取得等はしない)
@@ -294,6 +302,7 @@ from pathlib import Path
 import db
 import metrics
 import offers
+import products as PR
 import run as R
 import storage
 import target_lists as TL
@@ -318,6 +327,7 @@ _RENAME_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/rename$")
 _DUPLICATE_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/duplicate$")
 _REMOVE_MEMBERS_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/remove-members$")
 _MEMBER_UPDATE_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/members/(\d+)$")
+_PRODUCT_BUILD_LIST_PATH_RE = re.compile(r"^/api/tenant/products/(\d+)/build-list$")
 _SEARCH_LOG_DETAIL_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)$")
 _SEARCH_LOG_SAVE_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)/save-as-list$")
 _SEARCH_LOG_CSV_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)/csv$")
@@ -711,6 +721,36 @@ def h_tenant_search_csv(con, tenant_id, data):
                              name_col=name_col, url_col=url_col, pref_col=pref_col)
     if "error" in res:
         return 400, res
+    return 200, res
+
+
+def h_tenant_products_list(con, tenant_id):
+    return 200, {"products": PR.list_products(con, tenant_id)}
+
+
+def h_tenant_products_create(con, tenant_id, data):
+    """商材登録(T83)。登録時点ではAI判断は行わない
+    (判断はbuild-listのたびに商材説明の最新版で行う。products.py docstring参照)。"""
+    name = (data.get("name") or "").strip()
+    description = (data.get("description") or "").strip()
+    if not name:
+        return 400, {"error": "nameは必須です"}
+    if not description:
+        return 400, {"error": "descriptionは必須です"}
+    product_id = PR.create_product(con, tenant_id, name, description)
+    return 200, {"product_id": product_id}
+
+
+def h_tenant_product_build_list(con, tenant_id, product_id, data):
+    """MIKOMERUには無い、ヒラケル独自の「商材を見せると対象を判断してリストを
+    作る」機能(T83)。countはユーザー指定(何社リストアップするか)。"""
+    count = data.get("count")
+    if not isinstance(count, int) or count < 1:
+        return 400, {"error": "countは1以上の整数で指定してください"}
+    res = PR.build_list_for_product(con, tenant_id, product_id, count, list_name=data.get("name"))
+    if "error" in res:
+        status = 404 if res["error"] == "指定された商材が見つかりません" else 400
+        return status, res
     return 200, res
 
 
@@ -2190,14 +2230,15 @@ class Handler(BaseHTTPRequestHandler):
         remove_members_match = _REMOVE_MEMBERS_PATH_RE.match(path)
         member_update_match = _MEMBER_UPDATE_PATH_RE.match(path)
         search_log_save_match = _SEARCH_LOG_SAVE_PATH_RE.match(path)
+        product_build_list_match = _PRODUCT_BUILD_LIST_PATH_RE.match(path)
         if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv",
                      "/api/tenant/lists/delete", "/api/tenant/lists/restore",
                      "/api/tenant/search/filter", "/api/tenant/search/csv",
-                     "/api/tenant/plan-change-request") \
+                     "/api/tenant/products", "/api/tenant/plan-change-request") \
                 or send_match or outcome_match or autofill_match or note_match \
                 or manual_sent_match or exec_note_match or preview_msg_match \
                 or rename_match or duplicate_match or remove_members_match \
-                or member_update_match or search_log_save_match:
+                or member_update_match or search_log_save_match or product_build_list_match:
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -2217,6 +2258,11 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_search_filter(con, tenant["id"], data)
                 elif path == "/api/tenant/search/csv":
                     st, res = h_tenant_search_csv(con, tenant["id"], data)
+                elif path == "/api/tenant/products":
+                    st, res = h_tenant_products_create(con, tenant["id"], data)
+                elif product_build_list_match:
+                    st, res = h_tenant_product_build_list(
+                        con, tenant["id"], int(product_build_list_match.group(1)), data)
                 elif path == "/api/tenant/plan-change-request":
                     st, res = h_tenant_plan_change_request_create(con, tenant["id"], data,
                                                                     staff_id=tenant.get("_staff_id"))
@@ -2476,6 +2522,7 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/exclusions"
                 or u.path == "/api/tenant/suppression"
                 or u.path == "/api/tenant/companies/search"
+                or u.path == "/api/tenant/products"
                 or u.path == "/api/tenant/templates"
                 or u.path == "/api/tenant/sender-templates"
                 or u.path == "/api/tenant/staff"
@@ -2508,6 +2555,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_suppression_list(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/companies/search":
                     st, res = h_tenant_companies_search(con, tenant["id"], qs)
+                elif u.path == "/api/tenant/products":
+                    st, res = h_tenant_products_list(con, tenant["id"])
                 elif u.path == "/api/tenant/templates":
                     st, res = h_tenant_templates_list(con, tenant["id"])
                 elif u.path == "/api/tenant/sender-templates":
@@ -2940,6 +2989,71 @@ def self_test(port=8899):
       b_company is not None and b_company["owner_tenant_id"] is None)
     t("共有マスタ化後もcontributed_by_tenant_idに持ち込んだテナントが残る(T65)",
       b_company is not None and b_company["contributed_by_tenant_id"] == tid_b)
+
+    print("\n── 商材登録とAIリスト作成(T83。ヒラケル独自) ──")
+    # 実際のAnthropic API呼び出しは行わず、classify_targeting()を差し替えて
+    # 判断結果を固定する(enrich.py同様、CIで課金・ネットワーク依存を持ち込まないため)
+    import products as PR_test
+    orig_classify = PR_test.classify_targeting
+    PR_test.classify_targeting = lambda name, description: ({"trades": ["tobi"]}, "テスト用の固定判断")
+    product_id = None
+    product_list_ids = []
+    try:
+        st, r = post_auth("/api/tenant/products", {"description": "とび業向けの資材管理ツール"}, token=key_a)
+        t("nameが無いと400", st == 400)
+        st, r = post_auth("/api/tenant/products", {"name": "テスト商材"}, token=key_a)
+        t("descriptionが無いと400", st == 400)
+        st, r = post_auth("/api/tenant/products",
+                          {"name": "テスト商材", "description": "とび業向けの資材管理ツール"}, token=key_a)
+        t("POST /api/tenant/products: 商材登録", st == 200 and bool(r.get("product_id")))
+        product_id = r.get("product_id")
+
+        st, r = get_auth("/api/tenant/products", token=key_a)
+        t("GET /api/tenant/products: 一覧に登録した商材が出る",
+          st == 200 and any(p["id"] == product_id and p["listed_count"] == 0 for p in r.get("products", [])))
+
+        st, r = post_auth(f"/api/tenant/products/{product_id}/build-list", {"count": 0}, token=key_a)
+        t("count=0は400", st == 400)
+
+        st, r = post_auth(f"/api/tenant/products/{product_id}/build-list", {"count": 2}, token=key_a)
+        t("POST .../build-list: AI判断でリスト作成(1回目)",
+          st == 200 and bool(r.get("list_id")) and r.get("count", 0) <= 2
+          and r.get("filters", {}).get("trades") == ["tobi"])
+        if r.get("list_id"):
+            product_list_ids.append(r["list_id"])
+        build1_ids = {row[0] for row in con.execute(
+            "SELECT company_id FROM target_list_members WHERE list_id=?", (r.get("list_id"),)).fetchall()}
+
+        st, r2 = post_auth(f"/api/tenant/products/{product_id}/build-list", {"count": 2}, token=key_a)
+        t("POST .../build-list: 2回目", st == 200 and bool(r2.get("list_id")))
+        if r2.get("list_id"):
+            product_list_ids.append(r2["list_id"])
+        build2_ids = {row[0] for row in con.execute(
+            "SELECT company_id FROM target_list_members WHERE list_id=?", (r2.get("list_id"),)).fetchall()}
+        t("2回目は1回目でリストアップ済みの会社を除外する(重複提案しない)",
+          not (build1_ids & build2_ids), f"build1={build1_ids} build2={build2_ids}")
+
+        st, r = get_auth("/api/tenant/products", token=key_a)
+        t("一覧のlisted_countが累計されている",
+          st == 200 and next(p for p in r["products"] if p["id"] == product_id)["listed_count"]
+          == len(build1_ids) + len(build2_ids))
+
+        st, r = post_auth(f"/api/tenant/products/{product_id}/build-list", {"count": 1}, token=key_b)
+        t("他テナントの商材へはbuild-listできない(404)", st == 404)
+        st, r = get_auth("/api/tenant/products", token=key_b)
+        t("他テナントの商材一覧には出ない",
+          st == 200 and all(p["id"] != product_id for p in r.get("products", [])))
+    finally:
+        PR_test.classify_targeting = orig_classify
+        # tenant_products/target_lists共にtenants(id)へのFOREIGN KEYを持つため、
+        # 後段の「テストテナントの削除」より前に必ず消しておく
+        if product_list_ids:
+            qmarks = ",".join("?" * len(product_list_ids))
+            con.execute(f"DELETE FROM target_list_members WHERE list_id IN ({qmarks})", product_list_ids)
+            con.execute(f"DELETE FROM target_lists WHERE id IN ({qmarks})", product_list_ids)
+        if product_id:
+            con.execute("DELETE FROM tenant_products WHERE id=?", (product_id,))
+        con.commit()
 
     print("\n── 保存済みリスト管理(MIKOMERU同等UI: 編集/複製/個別削除/ソフト削除/復元) ──")
     # list_a_id/list_b_idは以降の送信テスト等で厳密な状態を前提にされているため、

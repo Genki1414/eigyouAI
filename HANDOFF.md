@@ -4193,6 +4193,65 @@ Resend側(またはその手前のインフラ)でボット判定されブロッ
 
 ---
 
+### T83. 商材登録→AIが対象企業を判断してリストを自動生成する機能(2026-09-12)
+
+ユーザー要望: 「商材を見せるとどんな企業に提案するかを判断し、リスト作成。
+何社リストアップするかはユーザー指定。商材登録を行うと、次回から同じ商材で
+リスト作成する際はリストアップ済み企業への送信は避けられる仕様」。
+
+MIKOMERUには無い、ヒラケル独自機能として新規実装(`products.py`)。
+
+**設計**:
+- テナントが商材名+説明文(自由記述)を登録する(`POST /api/tenant/products`)。
+  登録時点ではAI判断は行わない — 判断は「リスト作成」を押すたびに商材説明の
+  最新版で毎回やり直す(商材説明を後で直しても次回リスト作成に反映されるように、
+  かつ分類結果をキャッシュして陳腐化させないため)。
+- リスト作成(`POST /api/tenant/products/<id>/build-list`、`count`必須)では、
+  商材の説明文をAI(Claude、`claude-sonnet-5`、web検索なし・`effort=low`)に読ませ、
+  `target_lists.build_filter_sql()`が受け取るのと**全く同じ形**のfilters
+  (trades/ranks/capital_max/hiring_now/has_website)に変換させる。これにより
+  「AIでの絞り込み」を独自の新しいクエリ経路として作らず、既存のフィルタ型
+  リスト作成の仕組み(ホワイトリスト・テナント境界<`_base_where()`>込み)へ
+  そのまま乗せている。AIの出力はJSONのみを期待し、業種名→コード変換や
+  ランクの値もbuild_filter_sql()側のホワイトリストで二重に検証される
+  (AIが業種一覧に無い値や不正な値を返しても無視されるだけで安全)。
+- 「同じ会社に同じ商材を二度提案しない」は、`target_lists`に`product_id`列を
+  追加し(`campaign_id`と同じ後付けALTER方式)、リスト作成時に
+  `id NOT IN (SELECT company_id FROM target_list_members m JOIN target_lists l
+  ON l.id=m.list_id WHERE l.product_id=?)`を絞り込みへ追加することで実現。
+  新しい台帳テーブルを作らず、既存の`target_lists`/`target_list_members`を
+  そのまま「その商材向けに過去作ったリストの集合」として扱っている
+  (どのリストが対象かは`list_builder.html`の「保存済みリスト」からも
+  普通に確認できる=不透明な内部台帳にならない)。
+- 何社作るか(`count`)はユーザー指定。`ORDER BY COALESCE(score_v2,score,0) DESC
+  LIMIT count`で、対象条件に合う会社のうちスコア上位から選ぶ。
+
+**同期呼び出しについての判断(重要)**: `enrich.py`/`compose.py`は何百〜何千社分を
+AIに投げるためcron/CLIの一括処理(バッチ)にしている。api.pyの`HTTPServer`は
+スレッド化されておらず、あるリクエストの処理中は他の全リクエスト(他テナントの
+送信等も含む)がブロックされるため、本来AI呼び出しをリクエスト処理内で
+同期的に行うのは避けたい。しかしこの機能は「商材登録1件につきAI呼び出し1回」
+の軽い処理(web検索なし・`effort=low`、通常数秒で完了)であり、何百社分を
+逐次処理するenrich.py/compose.pyとは性質が異なる。非同期ジョブ化(専用cron+
+ポーリングUI)は今回の規模には過剰と判断し、代わりに`anthropic.Anthropic(timeout=12.0)`
+と再試行を2回・短いバックオフに絞ることで最悪時間を抑える方針にした
+(`products.classify_targeting()`のdocstring参照)。将来、商材登録の利用頻度が
+上がって体感の詰まりが問題になったら、そのときに非同期化を検討する。
+
+**確認**: `api.py test`に新規テストを追加(商材登録・countバリデーション・
+AI判断結果を固定値に差し替えての1回目/2回目リスト作成・2回目が1回目の
+リストアップ済み企業を除外すること・累計listed_count・テナント分離)。
+実際のAnthropic API呼び出しはCIでは行わず、`products.classify_targeting`を
+差し替えてモックする(enrich.py同様、CIに課金・ネットワーク依存を持ち込まない
+ため)。`storage.py`/`senders.py`/`monitor.py`/`backup.py`/`api.py`/
+`test_pipeline.py`全スイートがパスすることを確認済み。
+
+list_builder.htmlに「商材からAI作成」ページを新設(商材登録フォーム+
+登録済み商材一覧、各商材に件数入力+「AIでリスト作成」ボタン)。作成された
+リストは「保存済みリスト」に`AI商材`ラベル付きでそのまま表示される。
+
+---
+
 ## 3. やってはいけないこと
 
 - **スキーマの再設計**: `db.py` の `SCHEMA` を作り変えない。列追加は `migrate()` の

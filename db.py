@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 import config as C
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_rank ON companies(rank);
@@ -343,10 +343,12 @@ def migrate(con):
     # 下のALTER列(tenants.api_key等)より前に置くこと — でないと対象テーブルが
     # まだ存在せずALTERが失敗する
     import resilience, offers as _offers, target_lists as _tl, monitor as _monitor, storage
+    import products as _products
     con.executescript(resilience.SCHEMA)
     con.executescript(_offers.SCHEMA)
     con.executescript(_tl.SCHEMA)
     con.executescript(_monitor.SCHEMA)
+    con.executescript(_products.SCHEMA)
     # 旧バージョンで欠けている列を後付け
     for table, col, ddl in [
         ("companies", "name_norm", "TEXT"), ("companies", "score_v2", "REAL"),
@@ -517,6 +519,11 @@ def migrate(con):
         # monthly_send_quotaから自動でラベルを組み立てる(例:
         # 「月間4,000通プラン」)ため、この列自体は空でも表示は壊れない。
         ("tenants", "plan_name", "TEXT"),
+        # T83: 商材登録→AIが対象企業を判断してリストを自動生成する機能。
+        # NULL=従来通りの手動フィルタ/CSV由来のリスト。値ありならその商材向けに
+        # AIが作ったリストで、products.build_list_for_product()が次回リスト作成時に
+        # 「この商材で過去にリストアップ済みの会社」を除外するための紐付けに使う。
+        ("target_lists", "product_id", "INTEGER"),
     ]:
         cols = storage.table_columns(con, table)
         if col not in cols:

@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS target_lists (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tenant_id INTEGER NOT NULL,
   name TEXT NOT NULL,
-  source TEXT NOT NULL,          -- 'filter' | 'csv'
+  source TEXT NOT NULL,          -- 'filter' | 'csv' | 'ai_product'(T83: 商材からAIが自動生成)
   filter_json TEXT,              -- source='filter'の場合の条件(再現・監査用)
   company_count INTEGER DEFAULT 0,
   campaign_id INTEGER,           -- send_list()で一度送信すると紐づく。二重クリックで

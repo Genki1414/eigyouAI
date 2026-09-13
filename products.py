@@ -1,8 +1,10 @@
 """
-products.py — テナントの「商材」登録とAIによるリスト自動生成(T83)
+products.py — テナントの「商材」登録とAIによるリスト自動生成・文面生成(T83)
 テナントが売りたい商材(商品/サービス)を登録すると、AIが商材の説明文から
 「どんな企業に提案すべきか」を判断し、target_lists.build_filter_sql()と同じ
-フィルタ条件に変換して、フィルタ型と同じ仕組みでリストを自動生成する。
+フィルタ条件に変換して、フィルタ型と同じ仕組みでリストを自動生成する
+(classify_targeting())。さらに、そのリストを送信する際は会社ごとに
+提案文(件名・本文)もAIが書き分ける(compose_message()。T83追記)。
 
 何社リストアップするか(count)はテナントが指定する。同じ商材で2回目以降リストを
 作る際は、その商材向けに過去作成した全リスト(target_lists.product_id経由)の
@@ -10,18 +12,28 @@ products.py — テナントの「商材」登録とAIによるリスト自動�
 (=同じ会社に同じ商材を二度提案しない)。
 
 必要環境変数: ANTHROPIC_API_KEY。enrich.py/compose.pyと違いオフライン代替は
-用意しない(商材ごとの対象判断はテンプレ文で代替できる性質のものではないため)。
-未設定または分類に失敗した場合は、その場でエラーを返す(呼び出し側がやり直せる)。
+用意しない(商材ごとの対象判断・文面はテンプレ文で代替できる性質のものではないため)。
+未設定または分類/生成に失敗した場合は、その場でエラーを返す(呼び出し側がやり直せる)。
 
-api.pyの /api/tenant/products* エンドポイントがこのモジュールを呼ぶ。
+api.pyの /api/tenant/products* エンドポイント、target_lists.send_list()
+(product_idを持つリストの送信時)がこのモジュールを呼ぶ。
 
-【分類呼び出しをリクエスト処理内で同期的に行うことについて】
+【AI呼び出しをリクエスト処理内で同期的に行うことについて】
 enrich.py/compose.pyは何百〜何千社分をAIに投げるためcron/CLIの一括処理に
-しているが、ここは「商材登録1件につきAI呼び出し1回」の軽い処理(web検索なし、
-effort=low)であり性質が異なる。api.pyのHTTPServerはスレッド化していないため
-長時間のブロッキングは避けたいが、通常は数秒で完了する処理を非同期化する方が
-過剰と判断し、client側タイムアウトと再試行回数を絞ることで最悪時間を抑える
-方針にした(classify_targeting()参照)。
+しているが、classify_targeting()は「商材登録1件につきAI呼び出し1回」の
+軽い処理(web検索なし、effort=low)であり性質が異なる。api.pyのHTTPServerは
+スレッド化していないため長時間のブロッキングは避けたいが、通常は数秒で完了する
+処理を非同期化する方が過剰と判断し、client側タイムアウトと再試行回数を絞ることで
+最悪時間を抑える方針にした。
+
+compose_message()は会社ごとに1回呼ぶため合計では重くなり得るが、実際の送信
+(target_lists.send_list()→senders.send_campaign())自体が既にフォームへの
+Playwright操作を1社ずつ同期実行する設計(=1回の送信リクエストが長時間かかることは
+そもそも織り込み済み)であり、そこへ1社あたり1回のAI呼び出しが増える程度は
+同じ性質の延長でしかないと判断した。ただしdry_run(プレビュー用の疑似送信)で
+毎回課金が発生するのは無駄なので、送信側(send_list())で「そのcampaign+会社の
+組み合わせに対して既に生成済みならAIを呼び直さず使い回す」実装にしている
+(詳細はtarget_lists.send_list()参照)。
 """
 import json
 import os
@@ -115,6 +127,68 @@ def classify_targeting(name, description):
     if d.get("has_website"):
         filters["has_website"] = True
     return filters, (d.get("reasoning") or "")
+
+
+COMPOSE_PROMPT = """あなたはBtoB営業のセールスライターです。次の商材を、次の会社宛に
+問い合わせフォーム経由で提案する文面を書いてください。
+
+【商材】
+商材名: {product_name}
+商材説明: {product_description}
+
+【宛先の会社】
+会社名: {name}
+所在地: {pref}
+業種: {trades}
+規模: 従業員約{emp}名
+AIリサーチ所見: {note}
+{hint_block}
+【厳守事項】
+- 問い合わせフォームの自由記述欄に入力する想定の文章(本文200〜400字程度)
+- 会社名・業種・所見など、分かっている情報から「なぜこの会社に送っているか」が
+  伝わる一文を入れる(テンプレート感を出さない)
+- 誇張・断定的な数値効果の約束をしない
+- 敬語だが硬すぎない、売り込み感を出しすぎない自然な文章
+- 出力は件名と本文のみ。解説や前置きは書かない
+
+出力形式:
+件名: (問い合わせフォームに件名欄がある場合用の短い件名)
+本文:
+(ここに本文)
+"""
+
+
+def compose_message(product, company, hint=""):
+    """商材の説明+会社の属性から、その会社向けの提案文(件名・本文)をAIに書かせる。
+    classify_targeting()と同じ理由(モジュールdocstring参照)で同期呼び出し・
+    タイムアウト/再試行を短く絞る。呼び出し側(target_lists.send_list())が
+    会社ごとに1回呼ぶため、生成済みの内容は呼び出し側で使い回してコストを
+    抑えること(再送信のたびに呼び直さない)。
+    戻り値: (subject, body)。"""
+    import resilience as R
+
+    client = _client()
+    rl = R.limiter_for("anthropic")
+    hint_block = f"追加の指示: {hint}\n" if hint else ""
+
+    def _call():
+        rl.acquire()
+        msg = client.messages.create(
+            model=MODEL, max_tokens=1000, output_config={"effort": "low"},
+            messages=[{"role": "user", "content": COMPOSE_PROMPT.format(
+                product_name=product["name"], product_description=product["description"],
+                name=company["name"], pref=company["pref"] or "", trades=company["trades"] or "",
+                emp=company["est_employees"] or "不明", note=company["enrich_note"] or "情報なし",
+                hint_block=hint_block)}])
+        return "".join(b.text for b in msg.content if b.type == "text").strip()
+
+    text = R.retry(_call, attempts=2, base=1.0, cap=4.0, job="products.compose_message")
+    subject, body = "お問い合わせ", text
+    if text.startswith("件名:"):
+        head, _, rest = text.partition("\n")
+        subject = head.replace("件名:", "").strip() or "お問い合わせ"
+        body = rest.replace("本文:", "", 1).strip()
+    return subject, body
 
 
 def create_product(con, tenant_id, name, description):

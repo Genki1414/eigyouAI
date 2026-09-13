@@ -3284,6 +3284,34 @@ async function renderSendForm(container, id) {
     const targetListLabel = targetList
       ? `${targetList.name}(${targetList.company_count.toLocaleString()}社)`
       : `リストID ${id}`;
+    // T83: 商材からAIで作ったリストは、会社ごとにAIが提案文を書き分ける
+    // (テンプレート選択・件名/本文の直接入力は「AIへの追加の指示」に役割が変わる)
+    const isAiList = !!(targetList && targetList.product_id);
+    const messageBlockHtml = isAiList ? `
+        <div style="margin-top:18px;padding:12px 14px;background:var(--concrete);border-radius:6px">
+          <b>🤖 商材「${targetList.product_name || ""}」をもとに、AIが会社ごとに文面を自動で書き分けます</b>
+          <p class="hint" style="margin-top:6px">件名・本文は空欄のままで構いません。入力すると
+            送信文そのものにはならず、AIへの「追加の指示」(訴求の方向性のヒント)として使われます。</p>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>件名(任意。AIへの追加の指示)</label><input type="text" id="sendSubject" placeholder="例: 価格の安さを特に強調してほしい"></div>
+          <div><label>本文(任意。AIへの追加の指示)</label><textarea id="sendBody" rows="6" placeholder="AIへの追加の指示があれば入力してください(空欄でも送信できます)"></textarea></div>
+        </div>
+        <div class="btnrow" style="margin-top:4px"><button class="ghost" id="btnPreviewMessage">👁️ AIにサンプル文面を書かせてプレビュー</button></div>` : `
+        <div style="margin-top:18px">
+          <label>送信文章テンプレートを使う(任意。「送信文章テンプレート」メニューで登録)</label>
+          <select id="sendTemplate">
+            <option value="">選択しない(件名・本文を直接入力)</option>
+            ${lastTemplates.map(x => `<option value="${x.id}">${x.name}</option>`).join("")}
+          </select>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>件名</label><input type="text" id="sendSubject" placeholder="例: 積算のお手伝いをさせてください"></div>
+          <div><label>本文</label><textarea id="sendBody" rows="6" placeholder="本文を入力してください"></textarea></div>
+        </div>
+        <p class="hint" style="margin-top:4px"><code>##TO_COMPANY_NAME##</code>(送信先の会社名)・
+          <code>##FROM_FAMILY_NAME##</code>(送信元の姓)が使えます。 <span id="sendBodyCount">0 文字</span></p>
+        <div class="btnrow" style="margin-top:4px"><button class="ghost" id="btnPreviewMessage">👁️ プレビュー</button></div>`;
     container.innerHTML = `<h2>送信文章 <span>MESSAGE</span></h2>
       <div class="card">
         <p style="margin-bottom:10px;padding:10px 14px;background:var(--concrete);
@@ -3331,20 +3359,7 @@ async function renderSendForm(container, id) {
           <div><label>電話番号</label><input type="text" id="sendPhone" placeholder="例: 03-1234-5678"></div>
         </div>
 
-        <div style="margin-top:18px">
-          <label>送信文章テンプレートを使う(任意。「送信文章テンプレート」メニューで登録)</label>
-          <select id="sendTemplate">
-            <option value="">選択しない(件名・本文を直接入力)</option>
-            ${lastTemplates.map(x => `<option value="${x.id}">${x.name}</option>`).join("")}
-          </select>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <div><label>件名</label><input type="text" id="sendSubject" placeholder="例: 積算のお手伝いをさせてください"></div>
-          <div><label>本文</label><textarea id="sendBody" rows="6" placeholder="本文を入力してください"></textarea></div>
-        </div>
-        <p class="hint" style="margin-top:4px"><code>##TO_COMPANY_NAME##</code>(送信先の会社名)・
-          <code>##FROM_FAMILY_NAME##</code>(送信元の姓)が使えます。 <span id="sendBodyCount">0 文字</span></p>
-        <div class="btnrow" style="margin-top:4px"><button class="ghost" id="btnPreviewMessage">👁️ プレビュー</button></div>
+        ${messageBlockHtml}
 
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:14px">
           <input type="checkbox" id="sendTrackClicks" style="width:auto">
@@ -3405,10 +3420,12 @@ async function renderSendForm(container, id) {
       $("sendCancelRecentWrap").style.display = $("sendCancelRecentToggle").checked ? "block" : "none";
     });
 
-    $("sendTemplate").addEventListener("change", () => {
-      const tmpl = lastTemplates.find(x => String(x.id) === $("sendTemplate").value);
-      if (tmpl) { $("sendSubject").value = tmpl.subject; $("sendBody").value = tmpl.body; updateSendBodyCount(); }
-    });
+    if (!isAiList) {
+      $("sendTemplate").addEventListener("change", () => {
+        const tmpl = lastTemplates.find(x => String(x.id) === $("sendTemplate").value);
+        if (tmpl) { $("sendSubject").value = tmpl.subject; $("sendBody").value = tmpl.body; updateSendBodyCount(); }
+      });
+    }
 
     // el: 画面の入力欄id / tmplKey: 送信元テンプレートAPIが返すキー(自動入力元) /
     // overrideKey: POST /send のsender_overrideへ送るキー(senders.pyのSender項目名と一致)
@@ -3434,14 +3451,19 @@ async function renderSendForm(container, id) {
     });
 
     function updateSendBodyCount() {
-      $("sendBodyCount").textContent = `${$("sendBody").value.length} 文字`;
+      const el = $("sendBodyCount");
+      if (el) el.textContent = `${$("sendBody").value.length} 文字`;
     }
     $("sendBody").addEventListener("input", updateSendBodyCount);
 
     $("btnPreviewMessage").addEventListener("click", async () => {
       const subject = $("sendSubject").value.trim();
       const body = $("sendBody").value.trim();
-      if (!subject && !body) { alert("件名または本文を入力してください"); return; }
+      if (!isAiList && !subject && !body) { alert("件名または本文を入力してください"); return; }
+      const btn = $("btnPreviewMessage");
+      const originalLabel = btn.textContent;
+      btn.disabled = true;
+      if (isAiList) btn.textContent = "AIが文面を作成中...";
       try {
         const r = await call(`/api/tenant/lists/${id}/preview-message`,
           { method: "POST", body: JSON.stringify({ subject, body }) });
@@ -3451,6 +3473,9 @@ async function renderSendForm(container, id) {
         $("previewModal").classList.add("open");
       } catch (e) {
         alert("プレビューに失敗しました: " + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
       }
     });
 
@@ -3468,7 +3493,7 @@ async function renderSendForm(container, id) {
       const allowNoSolicit = $("sendAllowNoSolicit").checked;
       const senderTemplateId = $("sendSenderTemplate").value ? Number($("sendSenderTemplate").value) : null;
       const rEl = $("sendResult");
-      if (!subject || !body) { rEl.innerHTML = `<div class="result err">件名と本文を入力してください</div>`; return; }
+      if (!isAiList && (!subject || !body)) { rEl.innerHTML = `<div class="result err">件名と本文を入力してください</div>`; return; }
 
       const senderOverride = {};
       SENDER_FIELDS.forEach(f => {

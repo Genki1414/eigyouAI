@@ -1848,10 +1848,19 @@ def h_tenant_list_send(con, tenant_id, list_id, data, staff_id=None):
     scheduled_at(ISO日時。未来のみ)を指定すると、即時実行せずscheduled_sendsへ
     予約として登録するだけになる(MIKOMERUの「送信開始日時を指定する」相当。
     実際の実行はscheduled_send_cli.pyがcronから拾ってTL.send_list()をそのまま
-    呼ぶため、can_contact()・Kill Switch・冪等性等の既存ガードはそのまま効く)。"""
+    呼ぶため、can_contact()・Kill Switch・冪等性等の既存ガードはそのまま効く)。
+
+    subjectとbodyは通常のリストでは必須(そのまま送信文になる)。商材からAIで
+    作ったリスト(target_lists.product_id持ち。T83)では任意 — 指定しても
+    送信文には使われず、AIへの「追加の指示」ヒントとして渡されるだけになる
+    (TL.send_list()参照)。"""
+    lst = con.execute("SELECT id, product_id FROM target_lists WHERE id=? AND tenant_id=?",
+                       (list_id, tenant_id)).fetchone()
+    if not lst:
+        return 404, {"error": "リストが見つかりません"}
     subject = (data.get("subject") or "").strip()
     body = (data.get("body") or "").strip()
-    if not subject or not body:
+    if not lst["product_id"] and (not subject or not body):
         return 400, {"error": "subjectとbodyは必須です"}
     dry_run = data.get("dry_run", True)
     if not isinstance(dry_run, bool):
@@ -1887,10 +1896,6 @@ def h_tenant_list_send(con, tenant_id, list_id, data, staff_id=None):
                                    "(例: 2026-08-23T09:00:00)"}
         if when <= datetime.now():
             return 400, {"error": "scheduled_atは未来の日時を指定してください"}
-        lst = con.execute("SELECT id FROM target_lists WHERE id=? AND tenant_id=?",
-                           (list_id, tenant_id)).fetchone()
-        if not lst:
-            return 404, {"error": "リストが見つかりません"}
         sid = db.create_scheduled_send(con, tenant_id, list_id, subject, body, dry_run,
                                         when.isoformat(timespec="seconds"),
                                         track_clicks=track_clicks,
@@ -1915,15 +1920,37 @@ def h_tenant_list_send(con, tenant_id, list_id, data, staff_id=None):
 def h_tenant_list_preview_message(con, tenant_id, list_id, data):
     """MIKOMERUの「プレビュー」相当。実際に送るのと同じマージタグ置換
     (senders.render_merge_tags())を使い、リスト内の企業1社をサンプルに
-    件名・本文がどう置き換わるかを事前確認できる(送信は行わない)。"""
+    件名・本文がどう置き換わるかを事前確認できる(送信は行わない)。
+
+    商材からAIで作ったリスト(product_id持ち。T83)ではマージタグ置換ではなく、
+    実際の送信と同じproducts.compose_message()を1社分だけその場で呼んで
+    プレビューする(送信結果には保存しない。何度でも試せるプレビュー専用の
+    呼び出しなので、send_list()側のキャッシュ<既生成分の使い回し>は行わない)。"""
+    lst = con.execute("SELECT id, product_id FROM target_lists WHERE id=? AND tenant_id=?",
+                       (list_id, tenant_id)).fetchone()
+    if not lst:
+        return 404, {"error": "リストが見つかりません"}
+
+    if lst["product_id"]:
+        sample = con.execute("""SELECT c.name, c.pref, c.trades, c.est_employees, c.enrich_note
+            FROM target_list_members m JOIN companies c ON c.id = m.company_id
+            WHERE m.list_id=? ORDER BY (c.contact_url IS NULL), m.company_id LIMIT 1""",
+            (list_id,)).fetchone()
+        if not sample:
+            return 400, {"error": "このリストにはプレビューできる企業がありません"}
+        product = con.execute("SELECT name, description FROM tenant_products WHERE id=?",
+                               (lst["product_id"],)).fetchone()
+        hint = (data.get("body") or data.get("subject") or "").strip()
+        try:
+            ai_subject, ai_body = PR.compose_message(product, sample, hint=hint)
+        except Exception as e:  # noqa: BLE001
+            return 400, {"error": f"AI文面生成に失敗しました: {str(e)[:200]}"}
+        return 200, {"sample_company": sample["name"], "subject": ai_subject, "body": ai_body}
+
     subject = (data.get("subject") or "").strip()
     body = (data.get("body") or "").strip()
     if not subject and not body:
         return 400, {"error": "件名または本文を入力してください"}
-    lst = con.execute("SELECT id FROM target_lists WHERE id=? AND tenant_id=?",
-                       (list_id, tenant_id)).fetchone()
-    if not lst:
-        return 404, {"error": "リストが見つかりません"}
     sample = con.execute("""SELECT c.name FROM target_list_members m
         JOIN companies c ON c.id = m.company_id
         WHERE m.list_id=? ORDER BY (c.contact_url IS NULL), m.company_id LIMIT 1""",
@@ -3053,6 +3080,67 @@ def self_test(port=8899):
             con.execute(f"DELETE FROM target_lists WHERE id IN ({qmarks})", product_list_ids)
         if product_id:
             con.execute("DELETE FROM tenant_products WHERE id=?", (product_id,))
+        con.commit()
+
+    print("\n── 商材リストの送信はAIが会社ごとに文面を書く(T83追記) ──")
+    import products as PR_test2
+    orig_compose = PR_test2.compose_message
+    PR_test2.compose_message = lambda product, company, hint="": (
+        f"{product['name']}のご案内", f"{company['name']}様、AI生成本文(hint={hint})")
+    send_product_id = None
+    send_list_id = None
+    try:
+        send_product_id = PR_test2.create_product(con, tid_a, "送信テスト商材", "送信テスト用の説明")
+        clean_company2 = None
+        for row in con.execute("SELECT id, name FROM companies WHERE contact_url IS NOT NULL AND dedup_of IS NULL"):
+            if db.can_contact(con, row["id"])[0]:
+                clean_company2 = row
+                break
+        if not clean_company2:
+            t("商材リスト送信のAI文面テスト", False, "適切な企業が見つからずスキップ")
+        else:
+            now_ai = datetime.now().isoformat(timespec="seconds")
+            cur = con.execute("""INSERT INTO target_lists
+                (tenant_id,name,source,company_count,product_id,created_at) VALUES (?,?,?,?,?,?)""",
+                (tid_a, "AI文面テスト用リスト", "ai_product", 1, send_product_id, now_ai))
+            send_list_id = cur.lastrowid
+            con.execute("""INSERT INTO target_list_members (list_id, company_id, send_status,
+                created_at, updated_at) VALUES (?,?,'PENDING',?,?)""",
+                (send_list_id, clean_company2["id"], now_ai, now_ai))
+            con.commit()
+
+            st, r = post_auth(f"/api/tenant/lists/{send_list_id}/send", {}, token=key_a)
+            t("商材からのリストはsubject/bodyが空でも送信できる(AIが書くため)",
+              st == 200 and "stats" in r)
+            touch = con.execute("SELECT subject, body FROM touches WHERE campaign_id=? AND company_id=?",
+                                 (r.get("campaign_id"), clean_company2["id"])).fetchone()
+            t("送信された文面がAI生成(compose_message)の内容になっている",
+              touch is not None and touch["subject"] == "送信テスト商材のご案内"
+              and clean_company2["name"] in touch["body"])
+
+            st, r2 = post_auth(f"/api/tenant/lists/{send_list_id}/send", {}, token=key_a)
+            t("同じリストへの再送信は同じcampaign_idを使い回す", r2.get("campaign_id") == r.get("campaign_id"))
+            touch2 = con.execute("SELECT subject, body FROM touches WHERE campaign_id=? AND company_id=?",
+                                  (r2.get("campaign_id"), clean_company2["id"])).fetchone()
+            t("再送信では既生成の文面を使い回す(AIを呼び直して再課金しない)",
+              touch2 is not None and touch2["subject"] == touch["subject"] and touch2["body"] == touch["body"])
+
+            st, r = post_auth(f"/api/tenant/lists/{send_list_id}/preview-message",
+                              {"body": "値引きを強調して"}, token=key_a)
+            t("AI商材リストのプレビューはcompose_message()を直接呼んでAI文面を返す",
+              st == 200 and r.get("sample_company") == clean_company2["name"]
+              and "hint=値引きを強調して" in r.get("body", ""))
+    finally:
+        PR_test2.compose_message = orig_compose
+        if send_list_id:
+            con.execute("""DELETE FROM touches
+                WHERE campaign_id=(SELECT campaign_id FROM target_lists WHERE id=?)""", (send_list_id,))
+            con.execute("""DELETE FROM campaigns
+                WHERE id=(SELECT campaign_id FROM target_lists WHERE id=?)""", (send_list_id,))
+            con.execute("DELETE FROM target_list_members WHERE list_id=?", (send_list_id,))
+            con.execute("DELETE FROM target_lists WHERE id=?", (send_list_id,))
+        if send_product_id:
+            con.execute("DELETE FROM tenant_products WHERE id=?", (send_product_id,))
         con.commit()
 
     print("\n── 保存済みリスト管理(MIKOMERU同等UI: 編集/複製/個別削除/ソフト削除/復元) ──")

@@ -120,6 +120,11 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            count社のリストを新規作成する。過去にこの商材向けに作った
                            全リストのメンバーは自動で除外する(同じ会社に同じ商材を
                            二度提案しない)
+  POST /api/tenant/products/<id>/generate-message  {"hint","force"} → 商材単位の
+                           AI生成フォーム文面(件名・本文)を作る/作り直す(T83追記)。
+                           会社ごとの個別化はまだ行わず1本だけ生成し、会社名は
+                           ##TO_COMPANY_NAME##で送信時に差し込む。force省略時は
+                           生成済みならそれを返すだけでAIを呼び直さない(課金しない)
   POST /api/tenant/lists/<id>/outcome  {"company_id","field":"replied"|"deal"|"won",
                            "value","memo"} → 返信・商談化・受注を手動記録(β版。
                            メール自動取得等はしない)
@@ -328,6 +333,7 @@ _DUPLICATE_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/duplicate$")
 _REMOVE_MEMBERS_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/remove-members$")
 _MEMBER_UPDATE_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/members/(\d+)$")
 _PRODUCT_BUILD_LIST_PATH_RE = re.compile(r"^/api/tenant/products/(\d+)/build-list$")
+_PRODUCT_GENERATE_MESSAGE_PATH_RE = re.compile(r"^/api/tenant/products/(\d+)/generate-message$")
 _SEARCH_LOG_DETAIL_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)$")
 _SEARCH_LOG_SAVE_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)/save-as-list$")
 _SEARCH_LOG_CSV_PATH_RE = re.compile(r"^/api/tenant/search-log/(\d+)/csv$")
@@ -748,6 +754,19 @@ def h_tenant_product_build_list(con, tenant_id, product_id, data):
     if not isinstance(count, int) or count < 1:
         return 400, {"error": "countは1以上の整数で指定してください"}
     res = PR.build_list_for_product(con, tenant_id, product_id, count, list_name=data.get("name"))
+    if "error" in res:
+        status = 404 if res["error"] == "指定された商材が見つかりません" else 400
+        return status, res
+    return 200, res
+
+
+def h_tenant_product_generate_message(con, tenant_id, product_id, data):
+    """商材ページの「AIに文面を作ってもらう/作り直す」ボタン用(T83追記)。
+    force:trueを指定しない限り、既に生成済みならそれをそのまま返すだけで
+    AIを呼び直さない(=課金しない)。hint(任意)は次に生成する時の追加の指示。"""
+    force = bool(data.get("force"))
+    hint = (data.get("hint") or "").strip()
+    res = PR.generate_message(con, tenant_id, product_id, hint=hint, force=force)
     if "error" in res:
         status = 404 if res["error"] == "指定された商材が見つかりません" else 400
         return status, res
@@ -1851,9 +1870,10 @@ def h_tenant_list_send(con, tenant_id, list_id, data, staff_id=None):
     呼ぶため、can_contact()・Kill Switch・冪等性等の既存ガードはそのまま効く)。
 
     subjectとbodyは通常のリストでは必須(そのまま送信文になる)。商材からAIで
-    作ったリスト(target_lists.product_id持ち。T83)では任意 — 指定しても
-    送信文には使われず、AIへの「追加の指示」ヒントとして渡されるだけになる
-    (TL.send_list()参照)。"""
+    作ったリスト(target_lists.product_id持ち。T83)では任意 — 空のままなら
+    その商材のAI生成文面(products.generate_message()。無ければこの時点で
+    自動生成される)が使われ、指定すればテナントの手入力を優先する(TL.send_list()
+    参照)。"""
     lst = con.execute("SELECT id, product_id FROM target_lists WHERE id=? AND tenant_id=?",
                        (list_id, tenant_id)).fetchone()
     if not lst:
@@ -1922,33 +1942,24 @@ def h_tenant_list_preview_message(con, tenant_id, list_id, data):
     (senders.render_merge_tags())を使い、リスト内の企業1社をサンプルに
     件名・本文がどう置き換わるかを事前確認できる(送信は行わない)。
 
-    商材からAIで作ったリスト(product_id持ち。T83)ではマージタグ置換ではなく、
-    実際の送信と同じproducts.compose_message()を1社分だけその場で呼んで
-    プレビューする(送信結果には保存しない。何度でも試せるプレビュー専用の
-    呼び出しなので、send_list()側のキャッシュ<既生成分の使い回し>は行わない)。"""
+    商材からAIで作ったリスト(product_id持ち。T83)で件名・本文が空のまま
+    渡された場合は、その商材のAI生成文面(products.generate_message()。
+    無ければこの時点で1回だけ生成してキャッシュする)を使う。指定すれば
+    テナントの手入力を優先する。以降は通常のリストと全く同じマージタグ置換で
+    プレビューする(会社名は##TO_COMPANY_NAME##として文面に含まれている想定)。"""
     lst = con.execute("SELECT id, product_id FROM target_lists WHERE id=? AND tenant_id=?",
                        (list_id, tenant_id)).fetchone()
     if not lst:
         return 404, {"error": "リストが見つかりません"}
 
-    if lst["product_id"]:
-        sample = con.execute("""SELECT c.name, c.pref, c.trades, c.est_employees, c.enrich_note
-            FROM target_list_members m JOIN companies c ON c.id = m.company_id
-            WHERE m.list_id=? ORDER BY (c.contact_url IS NULL), m.company_id LIMIT 1""",
-            (list_id,)).fetchone()
-        if not sample:
-            return 400, {"error": "このリストにはプレビューできる企業がありません"}
-        product = con.execute("SELECT name, description FROM tenant_products WHERE id=?",
-                               (lst["product_id"],)).fetchone()
-        hint = (data.get("body") or data.get("subject") or "").strip()
-        try:
-            ai_subject, ai_body = PR.compose_message(product, sample, hint=hint)
-        except Exception as e:  # noqa: BLE001
-            return 400, {"error": f"AI文面生成に失敗しました: {str(e)[:200]}"}
-        return 200, {"sample_company": sample["name"], "subject": ai_subject, "body": ai_body}
-
     subject = (data.get("subject") or "").strip()
     body = (data.get("body") or "").strip()
+    if lst["product_id"] and (not subject or not body):
+        gen = PR.generate_message(con, tenant_id, lst["product_id"])
+        if "error" in gen:
+            return 400, gen
+        subject = subject or gen["subject"]
+        body = body or gen["body"]
     if not subject and not body:
         return 400, {"error": "件名または本文を入力してください"}
     sample = con.execute("""SELECT c.name FROM target_list_members m
@@ -2258,6 +2269,7 @@ class Handler(BaseHTTPRequestHandler):
         member_update_match = _MEMBER_UPDATE_PATH_RE.match(path)
         search_log_save_match = _SEARCH_LOG_SAVE_PATH_RE.match(path)
         product_build_list_match = _PRODUCT_BUILD_LIST_PATH_RE.match(path)
+        product_generate_message_match = _PRODUCT_GENERATE_MESSAGE_PATH_RE.match(path)
         if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv",
                      "/api/tenant/lists/delete", "/api/tenant/lists/restore",
                      "/api/tenant/search/filter", "/api/tenant/search/csv",
@@ -2265,7 +2277,8 @@ class Handler(BaseHTTPRequestHandler):
                 or send_match or outcome_match or autofill_match or note_match \
                 or manual_sent_match or exec_note_match or preview_msg_match \
                 or rename_match or duplicate_match or remove_members_match \
-                or member_update_match or search_log_save_match or product_build_list_match:
+                or member_update_match or search_log_save_match or product_build_list_match \
+                or product_generate_message_match:
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
@@ -2290,6 +2303,9 @@ class Handler(BaseHTTPRequestHandler):
                 elif product_build_list_match:
                     st, res = h_tenant_product_build_list(
                         con, tenant["id"], int(product_build_list_match.group(1)), data)
+                elif product_generate_message_match:
+                    st, res = h_tenant_product_generate_message(
+                        con, tenant["id"], int(product_generate_message_match.group(1)), data)
                 elif path == "/api/tenant/plan-change-request":
                     st, res = h_tenant_plan_change_request_create(con, tenant["id"], data,
                                                                     staff_id=tenant.get("_staff_id"))
@@ -3082,15 +3098,39 @@ def self_test(port=8899):
             con.execute("DELETE FROM tenant_products WHERE id=?", (product_id,))
         con.commit()
 
-    print("\n── 商材リストの送信はAIが会社ごとに文面を書く(T83追記) ──")
+    print("\n── 商材単位のAI文面生成(T83追記。2026-09-13: コスト面から会社ごとではなく商材単位に変更) ──")
     import products as PR_test2
-    orig_compose = PR_test2.compose_message
-    PR_test2.compose_message = lambda product, company, hint="": (
-        f"{product['name']}のご案内", f"{company['name']}様、AI生成本文(hint={hint})")
+    orig_compose_product = PR_test2.compose_product_message
+    compose_calls = []
+
+    def _mock_compose_product(product, hint=""):
+        compose_calls.append((product["id"], hint))
+        return (f"{product['name']}のご案内", f"##TO_COMPANY_NAME## 様へ、AI生成本文(hint={hint})")
+
+    PR_test2.compose_product_message = _mock_compose_product
     send_product_id = None
     send_list_id = None
     try:
         send_product_id = PR_test2.create_product(con, tid_a, "送信テスト商材", "送信テスト用の説明")
+
+        st, r = post_auth(f"/api/tenant/products/{send_product_id}/generate-message", {}, token=key_a)
+        t("POST .../generate-message: 初回生成", st == 200 and r.get("cached") is False
+          and r.get("subject") == "送信テスト商材のご案内")
+        t("初回生成でAIが1回呼ばれる", len(compose_calls) == 1)
+
+        st, r = post_auth(f"/api/tenant/products/{send_product_id}/generate-message", {}, token=key_a)
+        t("再度呼んでもforce指定が無ければ生成済みをそのまま返す(再課金しない)",
+          st == 200 and r.get("cached") is True)
+        t("キャッシュ利用時はAIを呼び直さない", len(compose_calls) == 1)
+
+        st, r = post_auth(f"/api/tenant/products/{send_product_id}/generate-message",
+                          {"force": True, "hint": "値引き強調"}, token=key_a)
+        t("force:trueで作り直せる", st == 200 and r.get("cached") is False)
+        t("作り直すとAIが呼ばれ、hintが渡る", len(compose_calls) == 2 and compose_calls[-1][1] == "値引き強調")
+
+        st, r = post_auth("/api/tenant/products/999999999/generate-message", {}, token=key_a)
+        t("存在しない商材のgenerate-messageは404", st == 404)
+
         clean_company2 = None
         for row in con.execute("SELECT id, name FROM companies WHERE contact_url IS NOT NULL AND dedup_of IS NULL"):
             if db.can_contact(con, row["id"])[0]:
@@ -3109,29 +3149,37 @@ def self_test(port=8899):
                 (send_list_id, clean_company2["id"], now_ai, now_ai))
             con.commit()
 
+            calls_before = len(compose_calls)
             st, r = post_auth(f"/api/tenant/lists/{send_list_id}/send", {}, token=key_a)
-            t("商材からのリストはsubject/bodyが空でも送信できる(AIが書くため)",
+            t("商材からのリストはsubject/bodyが空でも送信できる(商材のAI文面を使うため)",
               st == 200 and "stats" in r)
+            t("送信時は既に商材の文面が生成済みなのでAIを呼び直さない", len(compose_calls) == calls_before)
             touch = con.execute("SELECT subject, body FROM touches WHERE campaign_id=? AND company_id=?",
                                  (r.get("campaign_id"), clean_company2["id"])).fetchone()
-            t("送信された文面がAI生成(compose_message)の内容になっている",
+            t("送信された文面が商材のAI生成文面になっている(会社名はマージタグのまま保存)",
               touch is not None and touch["subject"] == "送信テスト商材のご案内"
-              and clean_company2["name"] in touch["body"])
+              and "##TO_COMPANY_NAME##" in touch["body"])
 
             st, r2 = post_auth(f"/api/tenant/lists/{send_list_id}/send", {}, token=key_a)
             t("同じリストへの再送信は同じcampaign_idを使い回す", r2.get("campaign_id") == r.get("campaign_id"))
-            touch2 = con.execute("SELECT subject, body FROM touches WHERE campaign_id=? AND company_id=?",
-                                  (r2.get("campaign_id"), clean_company2["id"])).fetchone()
-            t("再送信では既生成の文面を使い回す(AIを呼び直して再課金しない)",
-              touch2 is not None and touch2["subject"] == touch["subject"] and touch2["body"] == touch["body"])
+            t("再送信でもAIは呼ばれない(商材単位でキャッシュ済み)", len(compose_calls) == calls_before)
 
-            st, r = post_auth(f"/api/tenant/lists/{send_list_id}/preview-message",
-                              {"body": "値引きを強調して"}, token=key_a)
-            t("AI商材リストのプレビューはcompose_message()を直接呼んでAI文面を返す",
+            st, r = post_auth(f"/api/tenant/lists/{send_list_id}/preview-message", {}, token=key_a)
+            t("AI商材リストのプレビューは商材の生成文面をマージタグ置換して返す",
               st == 200 and r.get("sample_company") == clean_company2["name"]
-              and "hint=値引きを強調して" in r.get("body", ""))
+              and clean_company2["name"] in r.get("body", "")
+              and "##TO_COMPANY_NAME##" not in r.get("body", ""))
+            t("プレビューでもAIは呼ばれない", len(compose_calls) == calls_before)
+
+            st, r = post_auth(f"/api/tenant/lists/{send_list_id}/send",
+                              {"subject": "手動件名", "body": "手動本文"}, token=key_a)
+            t("件名・本文を手入力すればAI文面を上書きできる", st == 200)
+            touch3 = con.execute("SELECT subject, body FROM touches WHERE campaign_id=? AND company_id=?",
+                                  (r.get("campaign_id"), clean_company2["id"])).fetchone()
+            t("手入力した内容がそのまま送信文になる",
+              touch3 is not None and touch3["subject"] == "手動件名" and touch3["body"] == "手動本文")
     finally:
-        PR_test2.compose_message = orig_compose
+        PR_test2.compose_product_message = orig_compose_product
         if send_list_id:
             con.execute("""DELETE FROM touches
                 WHERE campaign_id=(SELECT campaign_id FROM target_lists WHERE id=?)""", (send_list_id,))

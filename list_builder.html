@@ -2587,7 +2587,7 @@ async function refreshProducts() {
     const r = await call("/api/tenant/products");
     if (!r.products.length) { el.innerHTML = `<div class="empty">まだ商材が登録されていません</div>`; return; }
     el.innerHTML = r.products.map(p => `
-      <div class="card" data-id="${p.id}" style="margin-bottom:12px">
+      <div class="card" data-id="${p.id}" data-has-message="${p.ai_subject ? "1" : ""}" style="margin-bottom:12px">
         <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap">
           <div>
             <b>${p.name}</b>
@@ -2601,10 +2601,42 @@ async function refreshProducts() {
           <button class="btnBuildList">🤖 AIでリスト作成</button>
         </div>
         <div class="pBuildResult"></div>
+
+        <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+          <label style="margin-top:0">送信文面(この商材のリストを送信する時に使われます。会社名は自動で差し込まれます)</label>
+          ${p.ai_subject ? `
+            <div class="hint" style="margin-top:4px"><b>件名:</b> ${p.ai_subject}</div>
+            <div class="hint" style="margin-top:2px;white-space:pre-line"><b>本文:</b> ${p.ai_body}</div>` :
+            `<div class="hint" style="margin-top:4px">まだ生成していません</div>`}
+          <div class="btnrow" style="margin-top:8px">
+            <button class="ghost btnGenerateMessage">${p.ai_subject ? "🤖 AIで書き直す" : "🤖 AIに文面を書いてもらう"}</button>
+          </div>
+          <div class="pMessageResult"></div>
+        </div>
       </div>`).join("");
     el.querySelectorAll(".btnBuildList").forEach(btn => btn.addEventListener("click", () => buildProductList(btn)));
+    el.querySelectorAll(".btnGenerateMessage").forEach(btn => btn.addEventListener("click", () => generateProductMessage(btn)));
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+async function generateProductMessage(btn) {
+  const card = btn.closest(".card");
+  const productId = card.dataset.id;
+  const resultEl = card.querySelector(".pMessageResult");
+  const force = !!card.dataset.hasMessage;
+  btn.disabled = true;
+  resultEl.innerHTML = `<div class="result">AIが文面を作成中...(数秒かかります)</div>`;
+  try {
+    const r = await call(`/api/tenant/products/${productId}/generate-message`,
+      { method: "POST", body: JSON.stringify({ force }) });
+    resultEl.innerHTML = `<div class="result ok">文面を${r.cached ? "取得しました" : "作成しました"}</div>`;
+    refreshProducts();
+  } catch (e) {
+    resultEl.innerHTML = `<div class="result err">${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -3284,20 +3316,25 @@ async function renderSendForm(container, id) {
     const targetListLabel = targetList
       ? `${targetList.name}(${targetList.company_count.toLocaleString()}社)`
       : `リストID ${id}`;
-    // T83: 商材からAIで作ったリストは、会社ごとにAIが提案文を書き分ける
-    // (テンプレート選択・件名/本文の直接入力は「AIへの追加の指示」に役割が変わる)
+    // T83: 商材からAIで作ったリストは、商材単位のAI生成文面(会社ごとの書き分けは
+    // まだ行わない。会社名は##TO_COMPANY_NAME##のマージタグで差し込む)を使う
     const isAiList = !!(targetList && targetList.product_id);
     const messageBlockHtml = isAiList ? `
         <div style="margin-top:18px;padding:12px 14px;background:var(--concrete);border-radius:6px">
-          <b>🤖 商材「${targetList.product_name || ""}」をもとに、AIが会社ごとに文面を自動で書き分けます</b>
-          <p class="hint" style="margin-top:6px">件名・本文は空欄のままで構いません。入力すると
-            送信文そのものにはならず、AIへの「追加の指示」(訴求の方向性のヒント)として使われます。</p>
+          <b>🤖 商材「${targetList.product_name || ""}」のAI生成文面を使います</b>
+          <p class="hint" style="margin-top:6px">下の件名・本文はこの商材で共通です(##TO_COMPANY_NAME##の
+            部分に会社名が自動で入ります)。そのまま送信することも、内容を編集してから送信することもできます。</p>
         </div>
         <div class="row" style="margin-top:10px">
-          <div><label>件名(任意。AIへの追加の指示)</label><input type="text" id="sendSubject" placeholder="例: 価格の安さを特に強調してほしい"></div>
-          <div><label>本文(任意。AIへの追加の指示)</label><textarea id="sendBody" rows="6" placeholder="AIへの追加の指示があれば入力してください(空欄でも送信できます)"></textarea></div>
+          <div><label>件名</label><input type="text" id="sendSubject" placeholder="AIが作成します" value="${targetList.product_ai_subject || ""}"></div>
+          <div><label>本文</label><textarea id="sendBody" rows="6" placeholder="AIが作成します">${targetList.product_ai_body || ""}</textarea></div>
         </div>
-        <div class="btnrow" style="margin-top:4px"><button class="ghost" id="btnPreviewMessage">👁️ AIにサンプル文面を書かせてプレビュー</button></div>` : `
+        <p class="hint" style="margin-top:4px"><code>##TO_COMPANY_NAME##</code>(送信先の会社名)・
+          <code>##FROM_FAMILY_NAME##</code>(送信元の姓)が使えます。 <span id="sendBodyCount">0 文字</span></p>
+        <div class="btnrow" style="margin-top:4px">
+          <button class="ghost" id="btnPreviewMessage">👁️ プレビュー</button>
+          <button class="ghost" id="btnRegenerateAiMessage">🤖 AIで書き直す</button>
+        </div>` : `
         <div style="margin-top:18px">
           <label>送信文章テンプレートを使う(任意。「送信文章テンプレート」メニューで登録)</label>
           <select id="sendTemplate">
@@ -3412,6 +3449,45 @@ async function renderSendForm(container, id) {
       <h2>予約済みの送信 <span>SCHEDULED</span></h2>
       <div id="scheduledSendsWrap"><div class="empty">読み込み中...</div></div>`;
     await refreshScheduledSends(id);
+
+    if (isAiList && !targetList.product_ai_subject) {
+      // まだこの商材のAI文面が無ければ、この時点で1回だけ生成して表示する
+      // (商材側にキャッシュされるので、次にこのリストを開いても再生成しない)
+      $("sendSubject").placeholder = "AIが文面を作成中...";
+      try {
+        const gen = await call(`/api/tenant/products/${targetList.product_id}/generate-message`,
+          { method: "POST", body: JSON.stringify({}) });
+        $("sendSubject").value = gen.subject || "";
+        $("sendBody").value = gen.body || "";
+        updateSendBodyCount();
+        const cached = allLists.find(l => String(l.id) === String(id));
+        if (cached) { cached.product_ai_subject = gen.subject; cached.product_ai_body = gen.body; }
+      } catch (e) {
+        $("sendResult").innerHTML = `<div class="result err">AI文面の生成に失敗しました: ${e.message}</div>`;
+      }
+    }
+    if (isAiList) {
+      $("btnRegenerateAiMessage").addEventListener("click", async () => {
+        const rbtn = $("btnRegenerateAiMessage");
+        const originalLabel = rbtn.textContent;
+        rbtn.disabled = true;
+        rbtn.textContent = "AIが書き直し中...";
+        try {
+          const gen = await call(`/api/tenant/products/${targetList.product_id}/generate-message`,
+            { method: "POST", body: JSON.stringify({ force: true }) });
+          $("sendSubject").value = gen.subject || "";
+          $("sendBody").value = gen.body || "";
+          updateSendBodyCount();
+          const cached = allLists.find(l => String(l.id) === String(id));
+          if (cached) { cached.product_ai_subject = gen.subject; cached.product_ai_body = gen.body; }
+        } catch (e) {
+          alert("AI文面の書き直しに失敗しました: " + e.message);
+        } finally {
+          rbtn.disabled = false;
+          rbtn.textContent = originalLabel;
+        }
+      });
+    }
 
     $("sendScheduleToggle").addEventListener("change", () => {
       $("sendScheduleWrap").style.display = $("sendScheduleToggle").checked ? "block" : "none";

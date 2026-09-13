@@ -506,7 +506,8 @@ def save_search_log_as_list(con, tenant_id, search_log_id, name=None, existing_l
 def list_lists(con, tenant_id, include_deleted=False):
     where = "l.tenant_id=?" if include_deleted else "l.tenant_id=? AND l.deleted_at IS NULL"
     rows = con.execute(f"""SELECT l.id, l.name, l.source, l.company_count, l.created_at,
-            l.updated_at, l.deleted_at, l.product_id, p.name AS product_name
+            l.updated_at, l.deleted_at, l.product_id, p.name AS product_name,
+            p.ai_subject AS product_ai_subject, p.ai_body AS product_ai_body
         FROM target_lists l LEFT JOIN tenant_products p ON p.id=l.product_id
         WHERE {where} ORDER BY l.id DESC""", (tenant_id,)).fetchall()
     return [dict(r) for r in rows]
@@ -734,10 +735,14 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
     ガードとは別の、ユーザーが都度選べる追加フィルタという位置づけ)。
 
     subject/body: リストがproduct_idを持つ(=商材からAIで作ったリスト。T83)場合は
-    必須ではなく、指定してもそのまま送信文には使われない — AIへの「追加の指示」
-    (訴求の方向性のヒント)として渡すだけで、実際の件名・本文は会社ごとに
-    products.compose_message()が書く。product_idを持たない通常のリストでは
-    従来通りこの引数がそのまま送信文になる(必須。呼び出し元<api.py>で検証する)。
+    必須ではない。空のまま呼ぶと、その商材のAI生成文面(products.generate_message()。
+    無ければこの時点で1回だけ生成してtenant_products.ai_subject/ai_bodyへ
+    キャッシュする)を使う。指定すればテナントの手入力を優先する(手動上書き)。
+    いずれの場合も、以後は通常のリストと全く同じ経路(1本の件名・本文を全社へ
+    マージタグ<##TO_COMPANY_NAME##等>置換して送る)で送信される — 会社ごとの
+    個別化はまだ行わない(products.pyモジュールdocstring参照)。
+    product_idを持たない通常のリストでは従来通りこの引数が必須(呼び出し元
+    <api.py>で検証する)。
     """
     import senders
     import db
@@ -747,15 +752,22 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
     if not lst:
         return None
 
+    if lst["product_id"] and (not subject or not body):
+        import products as PR
+        gen = PR.generate_message(con, tenant_id, lst["product_id"])
+        if "error" in gen:
+            return gen
+        subject = subject or gen["subject"]
+        body = body or gen["body"]
+
     offer = con.execute("SELECT id FROM offers WHERE tenant_id=? ORDER BY id LIMIT 1",
                          (tenant_id,)).fetchone()
     if not offer:
         return {"error": "このテナントにはオファーが設定されていません。管理者に連絡してください"}
 
-    # フォーム自動送信は問い合わせURLが分かっている企業にしか行えない。
-    # 名前・所在地・業種等はproduct_id持ちのリスト(T83)でAI文面生成に使う
-    members = con.execute("""SELECT c.id, c.name, c.pref, c.trades, c.est_employees, c.enrich_note
-        FROM target_list_members m JOIN companies c ON c.id = m.company_id
+    # フォーム自動送信は問い合わせURLが分かっている企業にしか行えない
+    members = con.execute("""SELECT c.id FROM target_list_members m
+        JOIN companies c ON c.id = m.company_id
         WHERE m.list_id=? AND c.contact_url IS NOT NULL""", (list_id,)).fetchall()
     if not members:
         return {"error": "このリストにはフォーム送信可能な企業がありません"
@@ -805,47 +817,18 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
                                        (list_id,)).fetchone()["campaign_id"]
 
     now2 = datetime.now().isoformat(timespec="seconds")
-    if lst["product_id"]:
-        # T83: 商材から作ったリストは、会社ごとにAIが提案文を書き分ける
-        # (products.compose_message())。同じcampaign+会社の組み合わせで既に
-        # 生成済みなら使い回し、再送信のたびにAIを呼び直して課金しないようにする
-        # (products.pyモジュールdocstring参照。手入力欄<subject/body>は空でもよく、
-        # 入力されていればAIへの「追加の指示」として渡す)。
-        import products as PR
-        product = con.execute("SELECT name, description FROM tenant_products WHERE id=?",
-                               (lst["product_id"],)).fetchone()
-        hint = " / ".join(x for x in (subject, body) if x)
-        for m in members:
-            existing = con.execute("""SELECT subject, body FROM touches
-                WHERE campaign_id=? AND company_id=? AND step=1""",
-                (campaign_id, m["id"])).fetchone()
-            if existing and existing["subject"] and existing["body"]:
-                continue
-            try:
-                ai_subject, ai_body = PR.compose_message(product, m, hint=hint)
-            except Exception:  # noqa: BLE001
-                # 1社のAI生成失敗で他社への送信機会まで失わせない。最低限の文面へ
-                # フォールバックする(手入力欄があればそれを使う)
-                ai_subject = subject or "お問い合わせ"
-                ai_body = body or f"{product['name']}のご案内です。"
-            con.execute("""INSERT INTO touches
-                (campaign_id, company_id, channel, variant, step, subject, body)
-                VALUES (?,?,'フォーム','A',1,?,?)
-                ON CONFLICT(campaign_id, company_id, step) DO UPDATE SET
-                    subject=excluded.subject, body=excluded.body""",
-                (campaign_id, m["id"], ai_subject, ai_body))
-    else:
-        for m in members:
-            # 2026-09-09: 以前は「まだ本番送信していない行に限り」件名・本文を
-            # 更新していた(WHERE touches.sent_at IS NULL OR ...)が、既に送信済みの
-            # 企業への再送信を許可した以上、再送信のたびに直前に入力し直した
-            # 最新の件名・本文が使われるべきなので、常に上書きするようにした。
-            con.execute("""INSERT INTO touches
-                (campaign_id, company_id, channel, variant, step, subject, body)
-                VALUES (?,?,'フォーム','A',1,?,?)
-                ON CONFLICT(campaign_id, company_id, step) DO UPDATE SET
-                    subject=excluded.subject, body=excluded.body""",
-                (campaign_id, m["id"], subject, body))
+    for m in members:
+        # 2026-09-09: 以前は「まだ本番送信していない行に限り」件名・本文を
+        # 更新していた(WHERE touches.sent_at IS NULL OR ...)が、既に送信済みの
+        # 企業への再送信を許可した以上、再送信のたびに直前に入力し直した
+        # (またはT83: 商材のAI生成文面の)最新の件名・本文が使われるべきなので、
+        # 常に上書きするようにした。
+        con.execute("""INSERT INTO touches
+            (campaign_id, company_id, channel, variant, step, subject, body)
+            VALUES (?,?,'フォーム','A',1,?,?)
+            ON CONFLICT(campaign_id, company_id, step) DO UPDATE SET
+                subject=excluded.subject, body=excluded.body""",
+            (campaign_id, m["id"], subject, body))
     con.commit()
 
     if not dry_run:

@@ -3,8 +3,8 @@ products.py — テナントの「商材」登録とAIによるリスト自動�
 テナントが売りたい商材(商品/サービス)を登録すると、AIが商材の説明文から
 「どんな企業に提案すべきか」を判断し、target_lists.build_filter_sql()と同じ
 フィルタ条件に変換して、フィルタ型と同じ仕組みでリストを自動生成する
-(classify_targeting())。さらに、そのリストを送信する際は会社ごとに
-提案文(件名・本文)もAIが書き分ける(compose_message()。T83追記)。
+(classify_targeting())。さらに、その商材向けの提案文(件名・本文)もAIに
+書かせられる(compose_product_message()/generate_message()。T83追記)。
 
 何社リストアップするか(count)はテナントが指定する。同じ商材で2回目以降リストを
 作る際は、その商材向けに過去作成した全リスト(target_lists.product_id経由)の
@@ -18,22 +18,25 @@ products.py — テナントの「商材」登録とAIによるリスト自動�
 api.pyの /api/tenant/products* エンドポイント、target_lists.send_list()
 (product_idを持つリストの送信時)がこのモジュールを呼ぶ。
 
+【文面生成は会社ごとではなく商材単位で1本だけ(2026-09-13、ユーザー判断)】
+当初は会社ごとに個別の提案文をAIに書かせる設計(compose_message(product,
+company))だったが、リストの件数分だけAI呼び出しが発生しコストが線形に増える
+ため、ユーザー判断で「まずは商材単位で1本だけ生成し、会社名はマージタグ
+(##TO_COMPANY_NAME##)で差し込む」方式に変更した。会社ごとの個別化(所在地・
+業種・AIリサーチ所見を踏まえた書き分け)は今後拡充する候補として残す
+(compose_message()相当のものを再度追加する形になる想定)。
+
+生成した文面はtenant_products.ai_subject/ai_bodyにキャッシュし、
+generate_message()はforce=Falseなら既存の生成結果をそのまま返す(呼び出す
+たびに課金しない。再生成したい時だけforce=Trueを指定する)。
+
 【AI呼び出しをリクエスト処理内で同期的に行うことについて】
 enrich.py/compose.pyは何百〜何千社分をAIに投げるためcron/CLIの一括処理に
-しているが、classify_targeting()は「商材登録1件につきAI呼び出し1回」の
-軽い処理(web検索なし、effort=low)であり性質が異なる。api.pyのHTTPServerは
-スレッド化していないため長時間のブロッキングは避けたいが、通常は数秒で完了する
-処理を非同期化する方が過剰と判断し、client側タイムアウトと再試行回数を絞ることで
-最悪時間を抑える方針にした。
-
-compose_message()は会社ごとに1回呼ぶため合計では重くなり得るが、実際の送信
-(target_lists.send_list()→senders.send_campaign())自体が既にフォームへの
-Playwright操作を1社ずつ同期実行する設計(=1回の送信リクエストが長時間かかることは
-そもそも織り込み済み)であり、そこへ1社あたり1回のAI呼び出しが増える程度は
-同じ性質の延長でしかないと判断した。ただしdry_run(プレビュー用の疑似送信)で
-毎回課金が発生するのは無駄なので、送信側(send_list())で「そのcampaign+会社の
-組み合わせに対して既に生成済みならAIを呼び直さず使い回す」実装にしている
-(詳細はtarget_lists.send_list()参照)。
+しているが、classify_targeting()/compose_product_message()はどちらも
+「商材1件につきAI呼び出し1回」の軽い処理(web検索なし、effort=low)であり
+性質が異なる。api.pyのHTTPServerはスレッド化していないため長時間のブロッキング
+は避けたいが、通常は数秒で完了する処理を非同期化する方が過剰と判断し、
+client側タイムアウトと再試行回数を絞ることで最悪時間を抑える方針にした。
 """
 import json
 import os
@@ -129,24 +132,18 @@ def classify_targeting(name, description):
     return filters, (d.get("reasoning") or "")
 
 
-COMPOSE_PROMPT = """あなたはBtoB営業のセールスライターです。次の商材を、次の会社宛に
-問い合わせフォーム経由で提案する文面を書いてください。
+COMPOSE_PROMPT = """あなたはBtoB営業のセールスライターです。次の商材を、複数の会社へ
+問い合わせフォーム経由で一斉に提案するための文面(件名・本文)を書いてください。
+会社ごとの個別最適化はまだ行わないため、汎用的に使い回せる1本の文面にしてください。
 
 【商材】
 商材名: {product_name}
 商材説明: {product_description}
-
-【宛先の会社】
-会社名: {name}
-所在地: {pref}
-業種: {trades}
-規模: 従業員約{emp}名
-AIリサーチ所見: {note}
 {hint_block}
 【厳守事項】
 - 問い合わせフォームの自由記述欄に入力する想定の文章(本文200〜400字程度)
-- 会社名・業種・所見など、分かっている情報から「なぜこの会社に送っているか」が
-  伝わる一文を入れる(テンプレート感を出さない)
+- 本文の冒頭付近で必ず ##TO_COMPANY_NAME##(送信先の会社名に自動置換される)を
+  使い、「##TO_COMPANY_NAME## 様」のように呼びかける
 - 誇張・断定的な数値効果の約束をしない
 - 敬語だが硬すぎない、売り込み感を出しすぎない自然な文章
 - 出力は件名と本文のみ。解説や前置きは書かない
@@ -154,17 +151,16 @@ AIリサーチ所見: {note}
 出力形式:
 件名: (問い合わせフォームに件名欄がある場合用の短い件名)
 本文:
-(ここに本文)
+(ここに本文。##TO_COMPANY_NAME##を使うこと)
 """
 
 
-def compose_message(product, company, hint=""):
-    """商材の説明+会社の属性から、その会社向けの提案文(件名・本文)をAIに書かせる。
-    classify_targeting()と同じ理由(モジュールdocstring参照)で同期呼び出し・
-    タイムアウト/再試行を短く絞る。呼び出し側(target_lists.send_list())が
-    会社ごとに1回呼ぶため、生成済みの内容は呼び出し側で使い回してコストを
-    抑えること(再送信のたびに呼び直さない)。
-    戻り値: (subject, body)。"""
+def compose_product_message(product, hint=""):
+    """商材の説明から、複数社へ使い回す前提の提案文(件名・本文)をAIに書かせる。
+    会社名はマージタグ(##TO_COMPANY_NAME##)で送信時に差し込む(senders.
+    render_merge_tags()。会社ごとの個別化<所在地・業種・AIリサーチ所見を
+    踏まえた書き分け>は行わない。モジュールdocstring参照)。
+    戻り値: (subject, body)。呼び出し側(generate_message())でキャッシュすること。"""
     import resilience as R
 
     client = _client()
@@ -177,18 +173,39 @@ def compose_message(product, company, hint=""):
             model=MODEL, max_tokens=1000, output_config={"effort": "low"},
             messages=[{"role": "user", "content": COMPOSE_PROMPT.format(
                 product_name=product["name"], product_description=product["description"],
-                name=company["name"], pref=company["pref"] or "", trades=company["trades"] or "",
-                emp=company["est_employees"] or "不明", note=company["enrich_note"] or "情報なし",
                 hint_block=hint_block)}])
         return "".join(b.text for b in msg.content if b.type == "text").strip()
 
-    text = R.retry(_call, attempts=2, base=1.0, cap=4.0, job="products.compose_message")
+    text = R.retry(_call, attempts=2, base=1.0, cap=4.0, job="products.compose_product_message")
     subject, body = "お問い合わせ", text
     if text.startswith("件名:"):
         head, _, rest = text.partition("\n")
         subject = head.replace("件名:", "").strip() or "お問い合わせ"
         body = rest.replace("本文:", "", 1).strip()
     return subject, body
+
+
+def generate_message(con, tenant_id, product_id, hint="", force=False):
+    """商材単位で1本だけ、フォーム送信用のAI文面(件名・本文)を作る/作り直す。
+    tenant_products.ai_subject/ai_bodyにキャッシュし、force=Falseなら既に
+    生成済みの内容をそのまま返す(呼ぶたびに課金しないため。再生成したい時だけ
+    force=Trueを指定する)。"""
+    product = get_product(con, tenant_id, product_id)
+    if not product:
+        return {"error": "指定された商材が見つかりません"}
+    if not force and product.get("ai_subject") and product.get("ai_body"):
+        return {"subject": product["ai_subject"], "body": product["ai_body"], "cached": True}
+    try:
+        subject, body = compose_product_message(product, hint=hint)
+    except KeyError:
+        return {"error": "AI文面生成が利用できません(ANTHROPIC_API_KEY未設定)"}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"AI文面生成に失敗しました: {str(e)[:200]}"}
+    now = datetime.now().isoformat(timespec="seconds")
+    con.execute("""UPDATE tenant_products SET ai_subject=?, ai_body=?, ai_message_generated_at=?
+        WHERE id=?""", (subject, body, now, product_id))
+    con.commit()
+    return {"subject": subject, "body": body, "cached": False}
 
 
 def create_product(con, tenant_id, name, description):

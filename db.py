@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 import config as C
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_rank ON companies(rank);
@@ -524,6 +524,12 @@ def migrate(con):
         # AIが作ったリストで、products.build_list_for_product()が次回リスト作成時に
         # 「この商材で過去にリストアップ済みの会社」を除外するための紐付けに使う。
         ("target_lists", "product_id", "INTEGER"),
+        # T83追記: 商材単位のAI生成文面(1本だけ。会社ごとの個別化はしない。
+        # products.generate_message()参照)。NULLならまだ生成していない
+        # (send_list()が初回送信時に自動生成してここへ書き込む)。
+        ("tenant_products", "ai_subject", "TEXT"),
+        ("tenant_products", "ai_body", "TEXT"),
+        ("tenant_products", "ai_message_generated_at", "TEXT"),
     ]:
         cols = storage.table_columns(con, table)
         if col not in cols:

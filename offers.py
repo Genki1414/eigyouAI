@@ -26,6 +26,7 @@ offers.py — オファーとテナントの分離
 import argparse
 import hashlib
 import json
+import re
 import secrets
 from datetime import datetime, timedelta
 
@@ -158,6 +159,55 @@ def add_tenant(con, name, sender_email, kind="client", sender_name=None, sender_
         (tid, "デフォルト", "送信先リストからの直接送信用", 0, "1=0", "[]", now))
     con.commit()
     return tid, api_key
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# 野放図なデモ発行を防ぐための保守的な上限(1日あたり)。LPからの自己発行は
+# 承認なしで即座にAPIキーを渡す設計のため、悪用時の被害を抑える目的。
+# 実運用でボトルネックになるようなら引き上げる。
+DEMO_SIGNUP_DAILY_CAP = 50
+
+
+def create_demo_tenant(con, email, company_name=None):
+    """LPの「今すぐデモを試す」から呼ばれる、承認不要・自己発行のデモアカウント
+    (T84)。add_tenant()を土台にしつつ、本番送信を絶対にできないようテナント別
+    Kill Switchで最初から停止済みにする — senders.pyのdry_run分岐は
+    Kill Switch・クォータの両方をバイパスするため、ドライラン(「何件中何件
+    送れるか」等のシミュレーション)は通常通り体験できる。
+
+    本番のAPIキー発行(add_tenant)と違い、ここは認証なしで誰でも呼べる公開
+    エンドポイント(POST /api/demo/signup)から使われるため、悪用を見込んだ
+    ガードを2つ入れている: (1)同じメールアドレスでの再発行を拒否、
+    (2)1日あたりの発行数に上限(DEMO_SIGNUP_DAILY_CAP)を設ける。
+    AI機能(products.py)自体の呼び出し回数には現状上限が無い — ANTHROPIC_API_KEY
+    を有効にした状態でこのエンドポイントを公開する場合、実際の悪用状況を見て
+    追加のガードが要るかもしれない(HANDOFF.md参照)。"""
+    email = (email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        return {"error": "メールアドレスの形式が正しくありません"}
+
+    today = datetime.now().date().isoformat()
+    today_count = con.execute(
+        "SELECT COUNT(*) FROM tenants WHERE kind='demo' AND created_at >= ?", (today,)
+    ).fetchone()[0]
+    if today_count >= DEMO_SIGNUP_DAILY_CAP:
+        return {"error": "本日のデモ申込みが上限に達しました。お手数ですが翌日以降に再度お試しください"}
+
+    existing = con.execute("SELECT id FROM tenants WHERE kind='demo' AND sender_email=?",
+                            (email,)).fetchone()
+    if existing:
+        return {"error": "このメールアドレスのデモアカウントは既に発行されています。"
+                          "お手数ですが発行時にお伝えしたログイン情報をご利用ください"}
+
+    name = (company_name or "").strip()[:200] or f"デモ利用({email})"
+    tid, api_key = add_tenant(con, name, email, kind="demo",
+                               monthly_send_quota=0, daily_send_quota=0)
+    import db
+    db.set_tenant_kill_switch(con, tid, True,
+        reason="デモアカウントのため本番送信はできません(ドライランのみ利用可能)",
+        updated_by="demo_signup")
+    return {"tenant_id": tid, "api_key": api_key, "name": name}
 
 
 def resolve_tenant_by_key(con, api_key):

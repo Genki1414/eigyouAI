@@ -4,6 +4,11 @@ api.py — 外部からの反応を受け取るHTTPサーバ
 CACもチャネル別成績も出せない = 売り物にならない。
 
 エンドポイント:
+  POST /api/demo/signup  {"email","company_name"} → 認証不要の公開エンドポイント。
+                           lp_hirakeru.html(ヒラケル自身のLP。T84)の「今すぐデモを
+                           試す」フォーム用。offers.create_demo_tenant()でその場で
+                           テナントを自己発行し、api_keyを返す。テナント別Kill Switchで
+                           最初から本番送信不可の状態にする(悪用防止ガードはoffers.py参照)
   POST /api/signup    LPのフォーム送信      → responded=1, signed_up=1
   POST /api/activate  積算を1回実行した     → activated=1
   POST /api/paid      課金webhook          → paid=1, mrr_yen
@@ -293,6 +298,7 @@ import hmac
 import html
 import io
 import json
+import mimetypes
 import os
 import re
 import sqlite3
@@ -355,7 +361,9 @@ _OPS_PLAN_CHANGE_RESOLVE_PATH_RE = re.compile(r"^/api/ops/plan-change-requests/(
 # (本部専用。URLを直接知っている運用者だけが辿り着く想定。将来的に
 # 別サブドメイン<例: hq.ashibase.jp>へ切り離すことも可能<Caddy側の設定のみで済む>)。
 _STATIC_PAGES = {"/list_builder.html": "list_builder.html", "/": "list_builder.html",
-                  "/hq.html": "hq.html"}
+                  "/hq.html": "hq.html",
+                  "/lp_hirakeru.html": "lp_hirakeru.html", "/demo": "lp_hirakeru.html",
+                  "/lp_assets/screenshot_filter.png": "lp_assets/screenshot_filter.png"}
 _BASE_DIR = Path(__file__).parent
 
 # GET /api/optout(h_optout_page)の確認画面用。h_verify_staff_email/
@@ -471,6 +479,20 @@ def h_signup(con, data):
     cancelled = cancel_pending_followups(con, cid) if cid else 0
     return 200, {"ok": True, "touch_id": tid, "company_id": cid, "attribution": how,
                  "cancelled_followups": cancelled}
+
+
+def h_demo_signup(con, data):
+    """LP(lp_hirakeru.html)の「今すぐデモを試す」フォーム用(T84)。認証不要の
+    公開エンドポイント。実体はoffers.create_demo_tenant()(悪用防止ガードは
+    そちら参照)。成功時に返すapi_keyをそのままlist_builder.htmlのlocalStorage
+    へ書き込めば、その場でログイン済みのデモ環境が開ける設計。"""
+    email = (data.get("email") or "").strip()
+    if not email:
+        return 400, {"error": "メールアドレスは必須です"}
+    res = offers.create_demo_tenant(con, email, data.get("company_name"))
+    if "error" in res:
+        return 400, res
+    return 200, res
 
 
 def h_activate(con, data):
@@ -2447,6 +2469,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/signup":
                 st, res = h_signup(con, data)
+            elif path == "/api/demo/signup":
+                st, res = h_demo_signup(con, data)
             elif path == "/api/activate":
                 st, res = h_activate(con, data)
             elif path == "/api/paid":
@@ -2476,8 +2500,13 @@ class Handler(BaseHTTPRequestHandler):
         if u.path in _STATIC_PAGES:
             f = _BASE_DIR / _STATIC_PAGES[u.path]
             body = f.read_bytes() if f.exists() else b"not found"
+            # 大半はHTML(text/html)だが、lp_hirakeru.htmlに埋め込む実際の管理画面
+            # スクリーンショット(png)等、HTML以外の静的アセットもここから配信する
+            ctype = mimetypes.guess_type(f.name)[0] or "text/html"
+            if ctype == "text/html":
+                ctype += "; charset=utf-8"
             self.send_response(200 if f.exists() else 404)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             return self.wfile.write(body)
@@ -2908,6 +2937,67 @@ def self_test(port=8899):
     t("POST /api/ops/run-stepも認証必須(401)", st == 401)
     st, r = post_auth("/api/ops/run-step", {"step": "dedup"}, token=ops_key)
     t("POST /api/ops/run-step: dedup", st == 200 and r.get("ok"))
+
+    print("\n── デモアカウント自己発行(T84。ヒラケルLP<lp_hirakeru.html>用、認証不要の公開API) ──")
+    con.execute("""DELETE FROM tenant_kill_switch WHERE tenant_id IN
+        (SELECT id FROM tenants WHERE kind='demo' AND sender_email LIKE 'demo-test%')""")
+    con.execute("""DELETE FROM offers WHERE tenant_id IN
+        (SELECT id FROM tenants WHERE kind='demo' AND sender_email LIKE 'demo-test%')""")
+    con.execute("DELETE FROM tenants WHERE kind='demo' AND sender_email LIKE 'demo-test%'")
+    con.commit()
+
+    st, r = post("/api/demo/signup", {"email": "こわれた"})
+    t("不正なメールアドレスは400", st == 400)
+    st, r = post("/api/demo/signup", {})
+    t("メールアドレス無しは400", st == 400)
+
+    st, r = post("/api/demo/signup",
+                {"email": "demo-test1@example.co.jp", "company_name": "デモテスト株式会社"})
+    t("POST /api/demo/signupでテナントとapi_keyが即発行される",
+      st == 200 and bool(r.get("api_key")) and bool(r.get("tenant_id")))
+    demo_tenant_id = r.get("tenant_id")
+    demo_api_key = r.get("api_key")
+
+    t("発行されたテナントはkind='demo'",
+      con.execute("SELECT kind FROM tenants WHERE id=?", (demo_tenant_id,)).fetchone()["kind"] == "demo")
+    demo_quota_row = con.execute("SELECT monthly_send_quota, daily_send_quota FROM tenants WHERE id=?",
+                                  (demo_tenant_id,)).fetchone()
+    t("monthly/daily_send_quotaも0で二重に防御されている",
+      demo_quota_row["monthly_send_quota"] == 0 and demo_quota_row["daily_send_quota"] == 0)
+
+    # kill_switch_status()は全体停止を最優先で返すため、テナント別の理由文言を
+    # 確認する間だけ一時的に全体停止を解除する(Kill Switchのテスト章と同じ手法)
+    orig_ks_demo, orig_ks_demo_reason = db.kill_switch_status(con)
+    db.set_global_kill_switch(con, False, updated_by="test")
+    try:
+        demo_ks = db.kill_switch_status(con, tenant_id=demo_tenant_id)
+        t("発行直後からテナント別Kill Switchで停止されている(本番送信不可)",
+          demo_ks[0] is True and "デモアカウント" in (demo_ks[1] or ""))
+    finally:
+        db.set_global_kill_switch(con, orig_ks_demo, reason=orig_ks_demo_reason, updated_by="test-restore")
+
+    st, r = get_auth("/api/tenant/lists", token=demo_api_key)
+    t("発行されたapi_keyはすぐ使える(認証を通る)", st == 200)
+
+    st, r2 = post("/api/demo/signup", {"email": "demo-test1@example.co.jp"})
+    t("同じメールアドレスでの再発行は拒否される", st == 400 and "既に発行" in r2.get("error", ""))
+
+    import offers as OF_test
+    orig_demo_cap = OF_test.DEMO_SIGNUP_DAILY_CAP
+    OF_test.DEMO_SIGNUP_DAILY_CAP = 1
+    try:
+        st, r = post("/api/demo/signup", {"email": "demo-test-cap@example.co.jp"})
+        t("1日の発行上限に達すると新規発行を拒否する(上限を1に絞って検証)",
+          st == 400 and "上限" in r.get("error", ""))
+    finally:
+        OF_test.DEMO_SIGNUP_DAILY_CAP = orig_demo_cap
+
+    con.execute("""DELETE FROM tenant_kill_switch WHERE tenant_id IN
+        (SELECT id FROM tenants WHERE kind='demo' AND sender_email LIKE 'demo-test%')""")
+    con.execute("""DELETE FROM offers WHERE tenant_id IN
+        (SELECT id FROM tenants WHERE kind='demo' AND sender_email LIKE 'demo-test%')""")
+    con.execute("DELETE FROM tenants WHERE kind='demo' AND sender_email LIKE 'demo-test%'")
+    con.commit()
 
     print("\n── 送信先リスト(SaaS販売用テナントAPI) ──")
     import offers as OF

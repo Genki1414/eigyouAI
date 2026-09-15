@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>メールを開いてもらえなくても、営業は届く。｜ヒラケル</title>
+<meta name="description" content="リストの企業へ、AIが書いた提案文を「問い合わせフォーム」から直接送信。開封率に依存しない新規開拓を、仕組みで実現する法人営業AI「ヒラケル」。メールアドレスだけで今すぐデモを体験できます。">
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700;900&family=IBM+Plex+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root{ --accent:#2BA9C9; --accent-dark:#1F8CA8; }
+*{box-sizing:border-box}
+body{margin:0;background:#F7F8FA;color:#16202B;font-family:'IBM Plex Sans JP',sans-serif;font-size:16px;line-height:1.75;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{color:var(--accent-dark)}
+h1,h2,h3{font-family:'Zen Kaku Gothic New',sans-serif;letter-spacing:.01em;margin:0}
+p{margin:0}
+.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}
+.grid4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px}
+.grid5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:18px}
+@media (max-width:900px){
+  .grid4{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .grid5{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:640px){
+  .grid2{grid-template-columns:1fr}
+  .grid4{grid-template-columns:1fr}
+  .grid5{grid-template-columns:1fr}
+  .hero-h1{font-size:28px !important}
+  .section-pad{padding:48px 0 !important}
+}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  font-family:'Zen Kaku Gothic New',sans-serif;font-weight:900;font-size:16px;
+  border-radius:8px;padding:15px 28px;cursor:pointer;border:none;white-space:nowrap;
+  transition:filter .12s,transform .12s}
+.btn:hover{filter:brightness(1.06)}
+.btn:active{transform:translateY(1px)}
+.btn:disabled{opacity:.6;cursor:default}
+.btn-outline{background:transparent;border:1.5px solid rgba(255,255,255,.35);color:#fff}
+.btn-outline.on-light{border-color:#D6DBDF;color:#16202B}
+input{font:inherit;font-size:16px;border:1.5px solid #DCE2E6;border-radius:7px;padding:13px 14px;width:100%}
+input:focus{outline:none;border-color:#12233B;box-shadow:0 0 0 3px rgba(18,35,59,.1)}
+label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;display:block}
+.msg{border-radius:8px;padding:12px 14px;font-size:13px;margin-top:12px}
+.msg.ok{background:#EAF6EF;color:#1E7A4D;border:1px solid #A9D8BF}
+.msg.err{background:#FBEAE4;color:#B3402A;border:1px solid #EFC3B4}
+.faq{border-top:1px solid #E4E8EB}
+.faq-item{border-bottom:1px solid #E4E8EB}
+.faq-q{width:100%;text-align:left;background:none;border:none;cursor:pointer;padding:18px 4px;
+  font-family:'Zen Kaku Gothic New';font-weight:700;font-size:15px;color:#16202B;
+  display:flex;justify-content:space-between;align-items:center;gap:12px}
+.faq-q .chevron{transition:transform .15s;flex-shrink:0;color:#8B99A5}
+.faq-item.open .chevron{transform:rotate(180deg)}
+.faq-a{max-height:0;overflow:hidden;transition:max-height .2s ease}
+.faq-item.open .faq-a{max-height:300px}
+.faq-a p{padding:0 4px 18px;font-size:14px;color:#5B6B7A}
+</style>
+</head>
+<body>
+
+<!-- ============ header(常にデモ導線を表示) ============ -->
+<header style="background:#FFFFFF;border-bottom:1px solid #E4E8EB;position:sticky;top:0;z-index:10">
+  <div class="wrap" style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 24px">
+    <div style="display:flex;align-items:baseline;gap:8px">
+      <span style="font-family:'Zen Kaku Gothic New';font-weight:900;font-size:20px;color:#12233B;letter-spacing:.02em">ヒラケル</span>
+      <span style="font-family:'IBM Plex Mono';font-size:11px;color:#8B99A5;letter-spacing:.04em">for B2B Sales</span>
+    </div>
+    <a href="#demo" class="btn" style="background:var(--accent);color:#0D1B2E;padding:11px 20px;font-size:14px">🚀 今すぐデモを試す</a>
+  </div>
+</header>
+
+<!-- ============ hero ============ -->
+<section class="section-pad" style="background:#0D1B2E;color:#fff;padding:76px 0 64px">
+  <div class="wrap" style="max-width:760px">
+    <div style="font-family:'IBM Plex Mono';font-size:12px;letter-spacing:.16em;color:var(--accent);margin-bottom:16px">法人営業のための自動アプローチAI</div>
+    <h1 class="hero-h1" style="font-size:44px;font-weight:900;line-height:1.35;margin-bottom:20px">
+      メールを<u style="text-decoration:none;background:linear-gradient(transparent 62%,rgba(43,169,201,.35) 62%)">開いてもらえなくても</u>、営業は届く。
+    </h1>
+    <p style="font-size:17px;opacity:.88;max-width:34em;margin-bottom:32px">
+      リストの企業へ、AIが書いた提案文を「問い合わせフォーム」から直接送信。
+      開封率に依存しない新規開拓を、仕組みで実現するのがヒラケルです。
+    </p>
+
+    <div class="grid2" style="margin-bottom:32px">
+      <div style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:18px">
+        <div style="font-family:'IBM Plex Mono';font-size:11px;letter-spacing:.08em;color:#8B99A5;margin-bottom:10px">従来のメール営業</div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;opacity:.7">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B99A5" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>
+          <span style="font-size:14px;color:#C6CDD3">開封率に依存し、反応が読めない</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;opacity:.7">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B99A5" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></svg>
+          <span style="font-size:14px;color:#C6CDD3">迷惑メール判定・埋没で届いたか不明</span>
+        </div>
+      </div>
+      <div style="background:rgba(43,169,201,.1);border:1px solid rgba(43,169,201,.4);border-radius:10px;padding:18px">
+        <div style="font-family:'IBM Plex Mono';font-size:11px;letter-spacing:.08em;color:var(--accent);margin-bottom:10px">ヒラケルの直接送信</div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h6"/></svg>
+          <span style="font-size:14px;color:#fff">問い合わせフォームへ直接届く</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9"/></svg>
+          <span style="font-size:14px;color:#fff">送信結果・反応率まで可視化</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <a href="#demo" class="btn" style="background:var(--accent);color:#0D1B2E;font-size:16px">🚀 今すぐ無料でデモを試す</a>
+      <a href="#flow" class="btn btn-outline" style="font-size:15px;padding:15px 22px">使い方を見る</a>
+    </div>
+    <div style="font-size:13px;color:#9AA6B0;display:flex;align-items:center;gap:6px;margin-top:16px">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#1E7A4D" stroke-width="2.5"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
+      メールアドレスだけ・審査なし・その場ですぐ触れます
+    </div>
+  </div>
+</section>
+
+<!-- ============ 課題提起 ============ -->
+<section class="section-pad" style="padding:64px 0">
+  <div class="wrap" style="max-width:760px">
+    <div style="font-family:'IBM Plex Mono';font-size:12px;letter-spacing:.14em;color:#8B99A5;margin-bottom:10px">こんな新規開拓、まだ手作業では？</div>
+    <h2 style="font-size:28px;font-weight:900;margin-bottom:28px">"最初の接触"に、時間と人手を使いすぎていませんか。</h2>
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div style="width:26px;height:26px;border-radius:50%;background:#EDF1F3;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono';font-size:12px;font-weight:600;color:#5B6B7A">1</div>
+        <p style="padding-top:2px">リストを一件ずつ集めるだけで、営業に入る前に力尽きる</p>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div style="width:26px;height:26px;border-radius:50%;background:#EDF1F3;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono';font-size:12px;font-weight:600;color:#5B6B7A">2</div>
+        <p style="padding-top:2px">企業ごとに刺さる文面を考える時間が、そもそも取れない</p>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div style="width:26px;height:26px;border-radius:50%;background:#EDF1F3;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono';font-size:12px;font-weight:600;color:#5B6B7A">3</div>
+        <p style="padding-top:2px">送っても開封されたか分からず、次の一手が打てない</p>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div style="width:26px;height:26px;border-radius:50%;background:#EDF1F3;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono';font-size:12px;font-weight:600;color:#5B6B7A">4</div>
+        <p style="padding-top:2px">配信停止・重複送信の管理が煩雑で、事故が怖い</p>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div style="width:26px;height:26px;border-radius:50%;background:#EDF1F3;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono';font-size:12px;font-weight:600;color:#5B6B7A">5</div>
+        <p style="padding-top:2px">反応がなかった先への追客まで、手が回らない</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 実際の画面 ============ -->
+<section class="section-pad" style="background:#fff;border-top:1px solid #E4E8EB;border-bottom:1px solid #E4E8EB;padding:64px 0">
+  <div class="wrap" style="max-width:900px">
+    <div style="font-family:'IBM Plex Mono';font-size:12px;letter-spacing:.14em;color:#8B99A5;margin-bottom:10px">スクリーンショットではなく、本物の画面</div>
+    <h2 style="font-size:26px;font-weight:900;margin-bottom:20px">これがそのまま、デモで触れる管理画面です。</h2>
+    <div style="border-radius:12px;overflow:hidden;box-shadow:0 12px 40px rgba(15,42,71,.14);border:1px solid #E4E8EB">
+      <img src="/lp_assets/screenshot_filter.png" alt="ヒラケル管理画面(リスト取得)のスクリーンショット" style="display:block;width:100%">
+    </div>
+    <p class="hint" style="font-size:13px;color:#8B99A5;margin-top:12px">実際の管理画面(リスト取得)のスクリーンショットです。作り込んだモックアップではありません。</p>
+  </div>
+</section>
+
+<!-- ============ 機能紹介 ============ -->
+<section class="section-pad" style="padding:64px 0">
+  <div class="wrap">
+    <div style="max-width:640px;margin-bottom:36px">
+      <div style="font-family:'IBM Plex Mono';font-size:12px;letter-spacing:.14em;color:#8B99A5;margin-bottom:10px">ヒラケルにできること</div>
+      <h2 style="font-size:28px;font-weight:900">リスト作成から追客まで、営業の最初の一歩をまるごと自動化。</h2>
+    </div>
+    <div class="grid4">
+      <div style="border:1px solid #E4E8EB;border-radius:12px;padding:22px;display:flex;flex-direction:column;gap:12px;background:#fff">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.8 2.8M15.2 15.2L18 18M18 6l-2.8 2.8M8.8 15.2L6 18"/></svg>
+        <h3 style="font-size:16px;font-weight:700">AIが商材に合わせて文面を作成</h3>
+        <p style="font-size:14px;color:#5B6B7A">売りたい商材を登録すると、AIが対象企業を判断してリストを作り、提案文も自動で書きます。</p>
+      </div>
+      <div style="border:1px solid #E4E8EB;border-radius:12px;padding:22px;display:flex;flex-direction:column;gap:12px;background:#fff">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h6M7 17h4"/></svg>
+        <h3 style="font-size:16px;font-weight:700">問い合わせフォームへ直接送信</h3>
+        <p style="font-size:14px;color:#5B6B7A">メールの開封率に頼らず、企業サイトの問い合わせ窓口から確実に届けます。</p>
+      </div>
+      <div style="border:1px solid #E4E8EB;border-radius:12px;padding:22px;display:flex;flex-direction:column;gap:12px;background:#fff">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4l3 2"/></svg>
+        <h3 style="font-size:16px;font-weight:700">リストの自動拡張</h3>
+        <p style="font-size:14px;color:#5B6B7A">法人番号などの公式データや検索から、リストにない企業も取り込んで対象を広げます。</p>
+      </div>
+      <div style="border:1px solid #E4E8EB;border-radius:12px;padding:22px;display:flex;flex-direction:column;gap:12px;background:#fff">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8"><path d="M4 19V10M12 19V5M20 19v-6"/></svg>
+        <h3 style="font-size:16px;font-weight:700">反応の可視化と学習</h3>
+        <p style="font-size:14px;color:#5B6B7A">送信結果とブロック理由(配信停止中・重複など)を見える化し、スコアリングも学習して改善します。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 使い方の流れ ============ -->
+<section id="flow" class="section-pad" style="background:#fff;border-top:1px solid #E4E8EB;border-bottom:1px solid #E4E8EB;padding:64px 0">
+  <div class="wrap">
+    <div style="max-width:640px;margin-bottom:36px">
+      <div style="font-family:'IBM Plex Mono';font-size:12px;letter-spacing:.14em;color:#8B99A5;margin-bottom:10px">使い方の流れ</div>
+      <h2 style="font-size:28px;font-weight:900">やることは、商材を登録して見守るだけ。</h2>
+    </div>
+    <div class="grid5">
+      <div>
+        <div style="font-family:'IBM Plex Mono';font-weight:600;font-size:13px;color:var(--accent);margin-bottom:8px">01</div>
+        <h3 style="font-size:15px;font-weight:700;margin-bottom:6px">商材を登録</h3>
+        <p style="font-size:13px;color:#5B6B7A">売りたい商品・サービスを説明文で登録するだけ。</p>
+      </div>
+      <div>
+        <div style="font-family:'IBM Plex Mono';font-weight:600;font-size:13px;color:var(--accent);margin-bottom:8px">02</div>
+        <h3 style="font-size:15px;font-weight:700;margin-bottom:6px">AIが対象を判断</h3>
+        <p style="font-size:13px;color:#5B6B7A">商材に合う企業をAIが選び、リストを自動作成。</p>
+      </div>
+      <div>
+        <div style="font-family:'IBM Plex Mono';font-weight:600;font-size:13px;color:var(--accent);margin-bottom:8px">03</div>
+        <h3 style="font-size:15px;font-weight:700;margin-bottom:6px">AIが提案文を作成</h3>
+        <p style="font-size:13px;color:#5B6B7A">商材に合わせた文面をAIが作成。編集もできます。</p>
+      </div>
+      <div>
+        <div style="font-family:'IBM Plex Mono';font-weight:600;font-size:13px;color:var(--accent);margin-bottom:8px">04</div>
+        <h3 style="font-size:15px;font-weight:700;margin-bottom:6px">フォームへ送信</h3>
+        <p style="font-size:13px;color:#5B6B7A">企業の問い合わせフォームへ、自動で直接届けます。</p>
+      </div>
+      <div>
+        <div style="font-family:'IBM Plex Mono';font-weight:600;font-size:13px;color:var(--accent);margin-bottom:8px">05</div>
+        <h3 style="font-size:15px;font-weight:700;margin-bottom:6px">結果を見て改善</h3>
+        <p style="font-size:13px;color:#5B6B7A">送信結果・ブロック理由を確認し、次に活かします。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 仕組み・信頼要素 ============ -->
+<section class="section-pad" style="padding:64px 0">
+  <div class="wrap" style="max-width:900px">
+    <div style="font-family:'IBM Plex Mono';font-size:12px;letter-spacing:.14em;color:#8B99A5;margin-bottom:10px">安心して任せられる理由</div>
+    <h2 style="font-size:28px;font-weight:900;margin-bottom:28px">法令順守の仕組みを、最初から標準搭載。</h2>
+    <div class="grid2" style="margin-bottom:28px">
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#1E7A4D" stroke-width="2" style="flex-shrink:0;margin-top:2px"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
+        <div>
+          <div style="font-weight:700;margin-bottom:4px">配信停止(オプトアウト)を自動反映</div>
+          <p style="font-size:14px;color:#5B6B7A">停止希望を受けた企業には二度と送信しません。解除は本人の意思のみで行われる設計です。</p>
+        </div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#1E7A4D" stroke-width="2" style="flex-shrink:0;margin-top:2px"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
+        <div>
+          <div style="font-weight:700;margin-bottom:4px">重複送信を自動で防止</div>
+          <p style="font-size:14px;color:#5B6B7A">同一グループの企業への重複アプローチを検知し、代表社に集約して送信します。</p>
+        </div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#1E7A4D" stroke-width="2" style="flex-shrink:0;margin-top:2px"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
+        <div>
+          <div style="font-weight:700;margin-bottom:4px">"なぜ送れなかったか"まで確認可能</div>
+          <p style="font-size:14px;color:#5B6B7A">配信停止中・重複などブロック理由の内訳を、件数付きで管理画面から確認できます。</p>
+        </div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#1E7A4D" stroke-width="2" style="flex-shrink:0;margin-top:2px"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
+        <div>
+          <div style="font-weight:700;margin-bottom:4px">テナントごとにデータを分離</div>
+          <p style="font-size:14px;color:#5B6B7A">他社が持ち込んだ非公開の企業データは、あなたの画面には一切表示されません。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 中間CTA ============ -->
+<section class="section-pad" style="background:#12233B;padding:44px 0">
+  <div class="wrap" style="display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap">
+    <h3 style="color:#fff;font-size:20px;font-weight:900">操作画面は、言葉より触った方が早いです。</h3>
+    <a href="#demo" class="btn" style="background:var(--accent);color:#0D1B2E;font-size:15px">🚀 今すぐデモを試す</a>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section class="section-pad" style="padding:64px 0;background:#fff">
+  <div class="wrap" style="max-width:760px">
+    <div style="font-family:'IBM Plex Mono';font-size:12px;letter-spacing:.14em;color:#8B99A5;margin-bottom:10px">よくある質問</div>
+    <h2 style="font-size:26px;font-weight:900;margin-bottom:20px">導入前に気になること</h2>
+    <div class="faq" id="faqList">
+      <div class="faq-item">
+        <button class="faq-q">デモでは何ができますか?<svg class="chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5B6B7A" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
+        <div class="faq-a"><p>実際の管理画面で、企業リストの作成・AIによる対象企業の判断・提案文の生成まで、すべてそのまま操作できます。実際の企業への送信だけは行われません(ドライラン=模擬実行のみ)。</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q">料金はいくらですか?<svg class="chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5B6B7A" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
+        <div class="faq-a"><p>[料金プランは個別にご案内しています。デモ環境をお試しいただいたうえで、お問い合わせください]</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q">既存の企業リストを持っています。使えますか?<svg class="chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5B6B7A" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
+        <div class="faq-a"><p>はい。お手持ちのCSVを取り込めます。会社名だけでも、URLが分かれば問い合わせフォームの自動探索も可能です。</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q">送信して問題になりませんか?<svg class="chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5B6B7A" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
+        <div class="faq-a"><p>配信停止(オプトアウト)の自動反映、重複送信の防止を標準搭載しています。誰にいつ何を送ったかは、すべて管理画面の送信ログから確認できます。</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ デモ(メインCTA) ============ -->
+<section id="demo" class="section-pad" style="background:#0D1B2E;padding:64px 0">
+  <div class="wrap" style="max-width:560px">
+    <div style="background:#fff;border-radius:12px;padding:30px;box-shadow:0 16px 40px rgba(0,0,0,.3)">
+      <h3 style="font-size:22px;font-weight:900;margin-bottom:8px;color:#12233B">今すぐ無料でデモを試す</h3>
+      <p style="font-size:14px;color:#5B6B7A;margin-bottom:18px">メールアドレスを入れるだけで、その場でデモ環境が開きます。
+        審査・お申込み手続きは不要です。</p>
+
+      <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
+        <div style="display:flex;gap:10px;align-items:flex-start">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1E7A4D" stroke-width="2.5" style="flex-shrink:0;margin-top:2px"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
+          <span style="font-size:13px;color:#3A4652">実際の管理画面で、リスト作成・AIの文面生成をそのまま操作できます</span>
+        </div>
+        <div style="display:flex;gap:10px;align-items:flex-start">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1E7A4D" stroke-width="2.5" style="flex-shrink:0;margin-top:2px"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
+          <span style="font-size:13px;color:#3A4652">実際の企業への送信は行われません(ドライラン=模擬実行のみ)</span>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:14px;margin-bottom:16px">
+        <div>
+          <label class="f-label">会社名(任意)</label>
+          <input type="text" id="demoCompany" placeholder="株式会社サンプル">
+        </div>
+        <div>
+          <label class="f-label">メールアドレス</label>
+          <input type="email" id="demoEmail" placeholder="you@example.com" required>
+        </div>
+      </div>
+      <button class="btn" id="btnDemoSignup" style="background:var(--accent);color:#0D1B2E;width:100%;font-size:16px">🚀 デモ環境を今すぐ開く</button>
+      <div id="demoResult"></div>
+
+      <div style="margin-top:20px;padding-top:16px;border-top:1px solid #E4E8EB;font-size:12px;color:#8B99A5">
+        じっくり相談したい方は <a href="mailto:[お問い合わせ先メールアドレス]">こちら</a> からご連絡ください。
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ footer ============ -->
+<footer style="padding:28px 0;background:#0D1B2E">
+  <div class="wrap" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+    <span style="font-family:'Zen Kaku Gothic New';font-weight:900;font-size:14px;color:#fff">ヒラケル</span>
+    <span style="font-family:'IBM Plex Mono';font-size:11px;color:#5B6B7A">© [運営会社名]</span>
+  </div>
+</footer>
+
+<script>
+document.getElementById("btnDemoSignup").addEventListener("click", async () => {
+  const btn = document.getElementById("btnDemoSignup");
+  const resultEl = document.getElementById("demoResult");
+  const email = document.getElementById("demoEmail").value.trim();
+  const companyName = document.getElementById("demoCompany").value.trim();
+  resultEl.innerHTML = "";
+  if (!email) {
+    resultEl.innerHTML = '<div class="msg err">メールアドレスを入力してください</div>';
+    return;
+  }
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "デモ環境を発行中...";
+  try {
+    const res = await fetch("/api/demo/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, company_name: companyName }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+    localStorage.setItem("eigyouai_api_base", location.origin);
+    localStorage.setItem("eigyouai_api_key", body.api_key);
+    resultEl.innerHTML = '<div class="msg ok">デモ環境を準備しました。管理画面へ移動します…</div>';
+    setTimeout(() => { location.href = "/list_builder.html"; }, 700);
+  } catch (e) {
+    resultEl.innerHTML = '<div class="msg err">' + e.message + "</div>";
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+});
+
+// FAQアコーディオン
+document.querySelectorAll("#faqList .faq-q").forEach(btn => {
+  btn.addEventListener("click", () => {
+    btn.closest(".faq-item").classList.toggle("open");
+  });
+});
+</script>
+</body>
+</html>

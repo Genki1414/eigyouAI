@@ -321,8 +321,12 @@ import target_lists as TL
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "dev-secret-change-me")
 LP_URL = os.environ.get("LP_URL", "https://ashibase.jp/sekisan")
 # 認証メール本文に埋め込む、このAPI自身の公開URL(GET /verify/staff/<token>を
-# 実際に叩けるドメイン)。本番では実際の公開ドメインを環境変数で上書きする。
-API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://ashibase.jp")
+# 実際に叩けるドメイン)。本番では環境変数で上書きされる想定だが、デフォルト値
+# 自体がconfig.pyのAPI_PUBLIC_URL(T72で"https://app.ashibase.jp"に修正済み)と
+# 食い違っていた(ashibase.jpは別アプリの独立ドメインで、このAPIサーバは
+# app.ashibase.jpの方)。環境変数が未設定の場合にここだけ古いドメインへの
+# リンクを埋め込んでしまうため、config.pyのデフォルトに合わせて修正する。
+API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://app.ashibase.jp")
 # touch_idが無い流入を、直近何日以内の接触に帰属させるか
 ATTRIBUTION_WINDOW_DAYS = 45
 

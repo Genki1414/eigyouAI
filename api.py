@@ -14,6 +14,9 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            lp_hirakeru.htmlの「契約のお申し込み」「質問する」フォーム用
                            (T85)。inquiriesへ記録しOPS_ALERT_EMAILへ通知(ベストエフォート)。
                            対応は本部がhq.htmlで手動で行う(T53のプラン変更申請と同じ設計)
+  GET  /api/campaign     認証不要。契約キャンペーン(config.CAMPAIGN_*)の現在状況
+                           (累計契約社数・次の1社に適用される月額・その価格の残り枠・
+                           ティア一覧)。lp_hirakeru.htmlの「現在◯社目」表示用(T86)
   POST /api/signup    LPのフォーム送信      → responded=1, signed_up=1
   POST /api/activate  積算を1回実行した     → activated=1
   POST /api/paid      課金webhook          → paid=1, mrr_yen
@@ -2283,6 +2286,32 @@ def h_inquiry_create(con, data):
     return _create_inquiry(con, data, "lp")
 
 
+# ── 契約キャンペーン価格(T86) ─────────────────
+def campaign_status(contracted):
+    """累計契約社数から「次の1社に適用される月額」と「その価格の残り枠」を求める
+    (純関数。テストしやすいようDBアクセスと分離)。ティアを使い切ったら通常価格・残り枠None。"""
+    import config as C
+    next_no = contracted + 1
+    for limit, price in C.CAMPAIGN_TIERS:
+        if next_no <= limit:
+            return {"contracted": contracted, "next_no": next_no, "price_yen": price,
+                    "tier_limit": limit, "remaining_in_tier": limit - contracted}
+    return {"contracted": contracted, "next_no": next_no, "price_yen": C.CAMPAIGN_REGULAR_PRICE_YEN,
+            "tier_limit": None, "remaining_in_tier": None}
+
+
+def h_campaign_get(con):
+    """認証不要。契約社数はhq.htmlで作られた本契約テナント(kind='client'、
+    CAMPAIGN_START以降)の数。申し込み(inquiries)ではなく契約成立で数える。"""
+    import config as C
+    n = con.execute("SELECT COUNT(*) FROM tenants WHERE kind='client' AND created_at >= ?",
+                    (C.CAMPAIGN_START,)).fetchone()[0]
+    s = campaign_status(n)
+    s.update({"plan_label": C.CAMPAIGN_PLAN_LABEL, "regular_price_yen": C.CAMPAIGN_REGULAR_PRICE_YEN,
+              "tiers": [{"limit": limit, "price_yen": price} for limit, price in C.CAMPAIGN_TIERS]})
+    return 200, s
+
+
 def h_tenant_inquiry_create(con, tenant_id, data):
     """list_builder.html用(テナント認証)。デモ利用者の契約申し込み・質問など。
     会社名・メールが未入力ならテナント登録情報で補う。"""
@@ -2852,6 +2881,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Location", url)
                 self.end_headers()
                 return
+            if u.path == "/api/campaign":
+                st, res = h_campaign_get(con)
+                return self._json(st, res)
             if u.path == "/api/optout":
                 body = h_optout_page(con, {k: v[0] for k, v in qs.items()}).encode("utf-8")
                 self.send_response(200)
@@ -4397,6 +4429,25 @@ def self_test(port=8899):
         _api_mod.INQUIRY_PER_EMAIL_DAILY_CAP = orig_inq_cap
     con.execute("DELETE FROM inquiries WHERE email LIKE 'inq-test%' OR tenant_id=?", (tid_a,))
     con.commit()
+
+    print("\n── 契約キャンペーン価格(T86。先着50社1万/〜100社2万/〜150社3万/以降4万) ──")
+    s = campaign_status(0)
+    t("0社→次は1社目・月額1万円・この価格はあと50社",
+      s["next_no"] == 1 and s["price_yen"] == 10000 and s["remaining_in_tier"] == 50)
+    s = campaign_status(49)
+    t("49社→50社目まで1万円(残り1社)", s["price_yen"] == 10000 and s["remaining_in_tier"] == 1)
+    s = campaign_status(50)
+    t("50社→51社目から2万円(残り50社)", s["price_yen"] == 20000 and s["remaining_in_tier"] == 50)
+    s = campaign_status(100)
+    t("100社→101社目から3万円", s["price_yen"] == 30000 and s["tier_limit"] == 150)
+    s = campaign_status(150)
+    t("150社→151社目以降は通常価格4万円・残り枠なし",
+      s["price_yen"] == 40000 and s["remaining_in_tier"] is None)
+    st, r = get_auth("/api/campaign")
+    t("GET /api/campaignは認証不要で現在価格・ティア一覧を返す",
+      st == 200 and r["tiers"] == [{"limit": 50, "price_yen": 10000}, {"limit": 100, "price_yen": 20000},
+                                    {"limit": 150, "price_yen": 30000}]
+      and r["regular_price_yen"] == 40000 and isinstance(r["contracted"], int))
 
     con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (tid_a,))
     con.commit()

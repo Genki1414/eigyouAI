@@ -41,6 +41,7 @@ input,select,textarea{font:inherit;font-size:16px;border:1.5px solid #DCE2E6;bor
 textarea{min-height:120px;resize:vertical}
 input:focus,select:focus,textarea:focus{outline:none;border-color:#12233B;box-shadow:0 0 0 3px rgba(18,35,59,.1)}
 .hp-field{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+.campaign-table tr.current td{background:rgba(43,169,201,.18)}
 .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 @media (max-width:640px){.form-grid{grid-template-columns:1fr} .hdr-link{display:none}}
 label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;display:block}
@@ -119,6 +120,7 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#1E7A4D" stroke-width="2.5"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
       メールアドレスだけ・審査なし・その場ですぐ触れます
     </div>
+    <a href="#pricing" id="heroCampaign" style="display:inline-block;margin-top:14px;background:rgba(43,169,201,.15);border:1px solid rgba(43,169,201,.5);border-radius:6px;padding:7px 12px;font-size:13px;color:#fff">先着50社限定: 4,000件/月プランが月額10,000円(通常40,000円)</a>
   </div>
 </section>
 
@@ -285,7 +287,7 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
           </tr>
           <tr style="border-bottom:1px solid #E4E8EB">
             <td style="padding:12px 14px;font-weight:700;color:#12233B;white-space:nowrap">4,000件送る場合の費用(月)</td>
-            <td style="padding:12px 14px;font-weight:700;color:#12233B;background:rgba(43,169,201,.06)">40,000円</td>
+            <td style="padding:12px 14px;font-weight:700;color:#12233B;background:rgba(43,169,201,.06)">40,000円<br><span style="font-size:12px;font-weight:500;color:#1F8CA8">先着50社は10,000円</span></td>
             <td style="padding:12px 14px;color:#5B6B7A">約376,000円<sup>※1</sup></td>
             <td style="padding:12px 14px;color:#5B6B7A">約120,000円<sup>※2</sup></td>
             <td style="padding:12px 14px;color:#5B6B7A">48,000〜80,000円<sup>※2</sup></td>
@@ -333,8 +335,32 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
   <div class="wrap" style="max-width:820px">
     <div style="max-width:640px;margin-bottom:28px">
       <div style="font-family:'IBM Plex Mono';font-size:12px;letter-spacing:.14em;color:#8B99A5;margin-bottom:10px">料金プラン</div>
-      <h2 style="font-size:28px;font-weight:900">月間の送信数に応じた5つのプラン</h2>
+      <h2 style="font-size:28px;font-weight:900">先着50社は、4,000件/月プランが月額10,000円。</h2>
     </div>
+
+    <div style="background:#12233B;color:#fff;border-radius:12px;padding:26px 28px;margin-bottom:32px">
+      <div style="font-family:'IBM Plex Mono';font-size:11px;letter-spacing:.12em;color:var(--accent);margin-bottom:8px">先着キャンペーン｜ライト(4,000件/月)プラン</div>
+      <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+        <span style="font-size:15px;opacity:.85">先着50社は</span>
+        <span style="font-family:'Zen Kaku Gothic New';font-size:40px;font-weight:900;line-height:1">月額10,000円</span>
+        <span style="font-size:14px;opacity:.75">(通常40,000円)</span>
+      </div>
+      <p style="font-size:14px;opacity:.85;margin-top:10px">ご契約時の価格は、ご契約中ずっと変わりません。何社目かは契約の成立順で数えます。</p>
+      <div style="overflow-x:auto;margin-top:16px">
+        <table class="campaign-table" style="width:100%;border-collapse:collapse;font-size:14px;min-width:420px">
+          <tbody>
+            <tr data-tier-limit="50"><td style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12)">1〜50社目</td><td style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12);text-align:right;font-weight:700">月額10,000円</td><td class="tier-note" style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12);font-size:12px;color:var(--accent)"></td></tr>
+            <tr data-tier-limit="100"><td style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12)">51〜100社目</td><td style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12);text-align:right;font-weight:700">月額20,000円</td><td class="tier-note" style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12);font-size:12px;color:var(--accent)"></td></tr>
+            <tr data-tier-limit="150"><td style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12)">101〜150社目</td><td style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12);text-align:right;font-weight:700">月額30,000円</td><td class="tier-note" style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12);font-size:12px;color:var(--accent)"></td></tr>
+            <tr data-tier-limit="regular"><td style="padding:10px 12px">151社目以降</td><td style="padding:10px 12px;text-align:right;font-weight:700">月額40,000円(通常価格)</td><td class="tier-note" style="padding:10px 12px;font-size:12px;color:var(--accent)"></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="campaignNow" style="margin-top:14px;font-size:14px;font-weight:700"></div>
+      <div style="margin-top:16px"><a href="#contract" class="btn" style="background:var(--accent);color:#0D1B2E;font-size:15px">キャンペーン価格で申し込む</a></div>
+    </div>
+
+    <h3 style="font-size:17px;font-weight:700;margin-bottom:12px">すべてのプラン(通常価格)</h3>
     <div style="overflow-x:auto">
       <table class="price-table" style="width:100%;border-collapse:collapse;font-size:14px;background:#fff;min-width:520px">
         <thead>
@@ -348,14 +374,13 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
         <tbody>
           <tr style="border-bottom:1px solid #E4E8EB"><td style="padding:12px 14px;font-weight:700;color:#12233B">ミニマム</td><td style="padding:12px 14px;text-align:right">500件</td><td style="padding:12px 14px;text-align:right;font-weight:700">8,000円</td><td style="padding:12px 14px;text-align:right;color:#5B6B7A">16円</td></tr>
           <tr style="border-bottom:1px solid #E4E8EB;background:#F7F8FA"><td style="padding:12px 14px;font-weight:700;color:#12233B">スターター</td><td style="padding:12px 14px;text-align:right">1,000件</td><td style="padding:12px 14px;text-align:right;font-weight:700">13,000円</td><td style="padding:12px 14px;text-align:right;color:#5B6B7A">13円</td></tr>
-          <tr style="border-bottom:1px solid #E4E8EB"><td style="padding:12px 14px;font-weight:700;color:#12233B">ライト</td><td style="padding:12px 14px;text-align:right">4,000件</td><td style="padding:12px 14px;text-align:right;font-weight:700">40,000円</td><td style="padding:12px 14px;text-align:right;color:#5B6B7A">10円</td></tr>
+          <tr style="border-bottom:1px solid #E4E8EB"><td style="padding:12px 14px;font-weight:700;color:#12233B">ライト <span style="font-size:11px;color:#1F8CA8;font-weight:700">先着キャンペーン対象</span></td><td style="padding:12px 14px;text-align:right">4,000件</td><td style="padding:12px 14px;text-align:right;font-weight:700">40,000円</td><td style="padding:12px 14px;text-align:right;color:#5B6B7A">10円</td></tr>
           <tr style="border-bottom:1px solid #E4E8EB;background:#F7F8FA"><td style="padding:12px 14px;font-weight:700;color:#12233B">ベーシック</td><td style="padding:12px 14px;text-align:right">10,000件</td><td style="padding:12px 14px;text-align:right;font-weight:700">85,000円</td><td style="padding:12px 14px;text-align:right;color:#5B6B7A">8.5円</td></tr>
           <tr><td style="padding:12px 14px;font-weight:700;color:#12233B">プレミアム</td><td style="padding:12px 14px;text-align:right">20,000件</td><td style="padding:12px 14px;text-align:right;font-weight:700">150,000円</td><td style="padding:12px 14px;text-align:right;color:#5B6B7A">7.5円</td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:#5B6B7A;margin-top:14px">初期費用はかかりません。これより多い送信数や、個別の条件については<a href="#question">質問する</a>からご相談ください。</p>
-    <div style="margin-top:18px"><a href="#contract" class="btn" style="background:#12233B;color:#fff;font-size:15px">契約を申し込む</a></div>
+    <p style="font-size:13px;color:#5B6B7A;margin-top:14px">初期費用はかかりません。キャンペーン価格の対象はライト(4,000件/月)のみです。これより多い送信数や、個別の条件については<a href="#question">質問する</a>からご相談ください。</p>
   </div>
 </section>
 
@@ -382,7 +407,7 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
       </div>
       <div class="faq-item">
         <button class="faq-q">料金はいくらですか?<svg class="chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5B6B7A" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
-        <div class="faq-a"><p>月間の送信数に応じて、月額8,000円(500件)〜150,000円(20,000件)の5プランです。初期費用はかかりません。詳しくは<a href="#pricing">料金プラン</a>をご覧ください。</p></div>
+        <div class="faq-a"><p>月間の送信数に応じて、月額8,000円(500件)〜150,000円(20,000件)の5プランです。初期費用はかかりません。いまは先着キャンペーン中で、ライト(4,000件/月)プランは先着50社が月額10,000円(通常40,000円)、51〜100社目が20,000円、101〜150社目が30,000円です。契約時の価格は契約中ずっと変わりません。詳しくは<a href="#pricing">料金プラン</a>をご覧ください。</p></div>
       </div>
       <div class="faq-item">
         <button class="faq-q">既存の企業リストを持っています。使えますか?<svg class="chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5B6B7A" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
@@ -451,9 +476,10 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
       <div style="margin-bottom:14px">
         <label class="f-label">希望プラン</label>
         <select id="contractPlan">
+          <option id="contractPlanCampaign" value="ライト(4,000件/月) 先着キャンペーン価格(契約成立順に1〜4万円)" selected>ライト(4,000件/月) 先着キャンペーン価格</option>
           <option value="ミニマム(500件/月)8,000円">ミニマム(500件/月) 8,000円</option>
           <option value="スターター(1,000件/月)13,000円">スターター(1,000件/月) 13,000円</option>
-          <option value="ライト(4,000件/月)40,000円" selected>ライト(4,000件/月) 40,000円</option>
+          <option value="ライト(4,000件/月)40,000円">ライト(4,000件/月) 40,000円(通常価格)</option>
           <option value="ベーシック(10,000件/月)85,000円">ベーシック(10,000件/月) 85,000円</option>
           <option value="プレミアム(20,000件/月)150,000円">プレミアム(20,000件/月) 150,000円</option>
           <option value="相談して決めたい">相談して決めたい</option>
@@ -584,6 +610,29 @@ document.getElementById("questionForm").addEventListener("submit", (ev) => {
   }, document.getElementById("btnQuestionSubmit"), document.getElementById("questionResult"),
   "質問を受け付けました。担当者よりメールでお返事いたします。");
 });
+
+// 先着キャンペーンの現在状況(GET /api/campaign。契約成立順=本契約テナントの作成順で数える。T86)
+fetch("/api/campaign").then(r => r.json()).then(c => {
+  const yen = n => n.toLocaleString() + "円";
+  const now = document.getElementById("campaignNow");
+  const curKey = c.tier_limit === null ? "regular" : String(c.tier_limit);
+  document.querySelectorAll(".campaign-table tr[data-tier-limit]").forEach(tr => {
+    const isCur = tr.dataset.tierLimit === curKey;
+    tr.classList.toggle("current", isCur);
+    tr.querySelector(".tier-note").textContent = isCur ? "◀ いまここ" : "";
+  });
+  if (c.remaining_in_tier !== null) {
+    now.textContent = `現在${c.contracted}社が契約済み。次のお申し込みは${c.next_no}社目 → 月額${yen(c.price_yen)}(この価格はあと${c.remaining_in_tier}社)`;
+    document.getElementById("heroCampaign").textContent =
+      `先着キャンペーン: いまのお申し込みは${c.next_no}社目 → 4,000件/月プランが月額${yen(c.price_yen)}(通常40,000円)`;
+    document.getElementById("contractPlanCampaign").textContent =
+      `ライト(4,000件/月) 先着キャンペーン価格 月額${yen(c.price_yen)}(${c.next_no}社目)`;
+  } else {
+    now.textContent = `キャンペーン枠(150社)は終了しました。現在は通常価格 月額${yen(c.price_yen)}です。`;
+    document.getElementById("heroCampaign").style.display = "none";
+    document.getElementById("contractPlanCampaign").remove();
+  }
+}).catch(() => {});
 
 // FAQアコーディオン
 document.querySelectorAll("#faqList .faq-q").forEach(btn => {

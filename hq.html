@@ -211,6 +211,7 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
       <div class="hint">LP(lp_hirakeru.html)の「契約のお申し込み」「質問する」と、管理画面(デモ利用者の「契約を申し込む」「質問する」)から
         届いたものです。連絡後は「対応済みにする」を押してください(デモテナントの本契約化=tenants.kind/plan_name/クォータの更新は、
         ここではなく顧客との合意後に別途手動で行ってください)。</div>
+      <div class="hint" id="campaignStatus" style="margin-bottom:8px"></div>
       <button class="ghost" id="btnRefreshInquiries">再読込</button>
       <table id="inquiryTable" style="display:none">
         <thead><tr><th>状態</th><th>種別</th><th>経路</th><th>会社名</th><th>担当者</th><th>連絡先</th><th>希望プラン</th><th>内容</th><th>受付日</th><th></th></tr></thead>
@@ -310,6 +311,15 @@ async function refreshPlanRequests() {
 }
 
 async function refreshInquiries() {
+  try {
+    const c = await call("/api/campaign");
+    $("campaignStatus").textContent = c.remaining_in_tier === null
+      ? `先着キャンペーン: 150社の枠は終了(現在${c.contracted}社)。次の契約は通常価格 月額${c.price_yen.toLocaleString()}円`
+      : `先着キャンペーン: 現在${c.contracted}社契約済み → 次の契約(${c.next_no}社目)は月額${c.price_yen.toLocaleString()}円(この価格はあと${c.remaining_in_tier}社)。` +
+        `社数は「テナント作成(種別client)」の順で数えるので、契約成立時は必ずテナント作成を行ってください`;
+  } catch (e) {
+    $("campaignStatus").textContent = "";
+  }
   const { inquiries } = await call("/api/ops/inquiries");
   const tbody = $("inquiryTbody");
   tbody.innerHTML = inquiries.map(r => `<tr>

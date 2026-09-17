@@ -366,8 +366,7 @@ _OPS_PLAN_CHANGE_RESOLVE_PATH_RE = re.compile(r"^/api/ops/plan-change-requests/(
 # 別サブドメイン<例: hq.ashibase.jp>へ切り離すことも可能<Caddy側の設定のみで済む>)。
 _STATIC_PAGES = {"/list_builder.html": "list_builder.html", "/": "list_builder.html",
                   "/hq.html": "hq.html",
-                  "/lp_hirakeru.html": "lp_hirakeru.html", "/demo": "lp_hirakeru.html",
-                  "/lp_assets/screenshot_filter.png": "lp_assets/screenshot_filter.png"}
+                  "/lp_hirakeru.html": "lp_hirakeru.html", "/demo": "lp_hirakeru.html"}
 _BASE_DIR = Path(__file__).parent
 
 # GET /api/optout(h_optout_page)の確認画面用。h_verify_staff_email/

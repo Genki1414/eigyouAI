@@ -347,7 +347,7 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
       </div>
       <p style="font-size:14px;opacity:.85;margin-top:10px">ご契約時の価格は、ご契約中ずっと変わりません。何社目かは契約の成立順で数えます。</p>
       <div style="overflow-x:auto;margin-top:16px">
-        <table class="campaign-table" style="width:100%;border-collapse:collapse;font-size:14px;min-width:420px">
+        <table class="campaign-table" style="width:100%;border-collapse:collapse;font-size:14px">
           <tbody>
             <tr data-tier-limit="50"><td style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12)">1〜50社目</td><td style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12);text-align:right;font-weight:700">月額10,000円</td><td class="tier-note" style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12);font-size:12px;color:var(--accent)"></td></tr>
             <tr data-tier-limit="100"><td style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12)">51〜100社目</td><td style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12);text-align:right;font-weight:700">月額20,000円</td><td class="tier-note" style="padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12);font-size:12px;color:var(--accent)"></td></tr>
@@ -356,8 +356,14 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
           </tbody>
         </table>
       </div>
-      <div id="campaignNow" style="margin-top:14px;font-size:14px;font-weight:700"></div>
-      <div style="margin-top:16px"><a href="#contract" class="btn" style="background:var(--accent);color:#0D1B2E;font-size:15px">キャンペーン価格で申し込む</a></div>
+      <div id="campaignNow" style="margin-top:18px;background:var(--accent);color:#0D1B2E;border-radius:10px;padding:18px 22px;display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap">
+        <div>
+          <div id="campLabel" style="font-size:13px;font-weight:700;opacity:.8">月額10,000円で申し込めるのは</div>
+          <div style="font-family:'Zen Kaku Gothic New';font-size:42px;font-weight:900;line-height:1.1">あと<span id="campRemaining">50</span>社</div>
+        </div>
+        <div id="campNext" style="font-size:15px;font-weight:700;line-height:1.7">現在0社が契約済み<br>次のお申し込みは1社目 → 月額10,000円</div>
+        <a href="#contract" class="btn" style="background:#0D1B2E;color:#fff;font-size:15px">キャンペーン価格で申し込む</a>
+      </div>
     </div>
 
     <h3 style="font-size:17px;font-weight:700;margin-bottom:12px">すべてのプラン(通常価格)</h3>
@@ -622,13 +628,16 @@ fetch("/api/campaign").then(r => r.json()).then(c => {
     tr.querySelector(".tier-note").textContent = isCur ? "◀ いまここ" : "";
   });
   if (c.remaining_in_tier !== null) {
-    now.textContent = `現在${c.contracted}社が契約済み。次のお申し込みは${c.next_no}社目 → 月額${yen(c.price_yen)}(この価格はあと${c.remaining_in_tier}社)`;
+    document.getElementById("campLabel").textContent = `月額${yen(c.price_yen)}で申し込めるのは`;
+    document.getElementById("campRemaining").textContent = c.remaining_in_tier;
+    document.getElementById("campNext").innerHTML =
+      `現在${c.contracted}社が契約済み<br>次のお申し込みは${c.next_no}社目 → 月額${yen(c.price_yen)}`;
     document.getElementById("heroCampaign").textContent =
-      `先着キャンペーン: いまのお申し込みは${c.next_no}社目 → 4,000件/月プランが月額${yen(c.price_yen)}(通常40,000円)`;
+      `先着キャンペーン: 4,000件/月プランが月額${yen(c.price_yen)}(通常40,000円)で申し込めるのはあと${c.remaining_in_tier}社`;
     document.getElementById("contractPlanCampaign").textContent =
       `ライト(4,000件/月) 先着キャンペーン価格 月額${yen(c.price_yen)}(${c.next_no}社目)`;
   } else {
-    now.textContent = `キャンペーン枠(150社)は終了しました。現在は通常価格 月額${yen(c.price_yen)}です。`;
+    now.innerHTML = `<div style="font-size:15px;font-weight:700">キャンペーン枠(150社)は終了しました。現在は通常価格 月額${yen(c.price_yen)}です。</div>`;
     document.getElementById("heroCampaign").style.display = "none";
     document.getElementById("contractPlanCampaign").remove();
   }

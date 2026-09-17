@@ -413,7 +413,9 @@ class FormSender(BaseSender):
             if self._tenant_quota is None:
                 self._load_tenant_quota()
             tenant_unlimited = self._tenant_quota[0] == C.QUOTA_UNLIMITED
-        if not tenant_unlimited and self._run_count > C.FORM_MAX_PER_RUN:
+        # FORM_MAX_PER_RUN / FORM_MAX_PER_TENANT_PER_HOUR / FORM_MAX_PER_HOUR / FORM_MAX_PER_DAY は
+        # いずれも.envで件数を入れた場合のみ有効(-1=無効。config.py参照)
+        if C.FORM_MAX_PER_RUN >= 0 and not tenant_unlimited and self._run_count > C.FORM_MAX_PER_RUN:
             return False, f"1回の実行あたりの上限({C.FORM_MAX_PER_RUN}件)に到達"
 
         now = datetime.now()
@@ -421,7 +423,6 @@ class FormSender(BaseSender):
         day_ago = (now - timedelta(hours=24)).isoformat(timespec="seconds")
         month_ago = (now - timedelta(days=30)).isoformat(timespec="seconds")
 
-        # 全体のサーキットブレーカーは.envで件数を入れた場合のみ有効(-1=無効。config.py参照)
         if C.FORM_MAX_PER_HOUR >= 0:
             n_hour = self.con.execute(
                 "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ?", (hour_ago,)).fetchone()[0]
@@ -439,7 +440,7 @@ class FormSender(BaseSender):
 
         monthly_quota, daily_quota = self._tenant_quota
 
-        if not tenant_unlimited:
+        if C.FORM_MAX_PER_TENANT_PER_HOUR >= 0 and not tenant_unlimited:
             n_tenant_hour = self.con.execute(
                 "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
                 (hour_ago, self.tenant_id)).fetchone()[0]
@@ -1323,6 +1324,10 @@ if __name__ == "__main__":
             ok = r1[0] and r2[0] and not r3[0]
             print(f"  {'✓' if ok else '✗'} 1回目:{r1[0]} 2回目:{r2[0]} "
                   f"3回目:{r3[0]}(上限{C.FORM_MAX_PER_RUN}のため False が正しい)")
+            C.FORM_MAX_PER_RUN = -1
+            fq2 = FormSender(con, dry_run=False)
+            ok_off = all(fq2._check_quota()[0] for _ in range(5))
+            print(f"  {'✓' if ok_off else '✗'} FORM_MAX_PER_RUN=-1(既定。無効)なら何件でも止まらない")
         finally:
             C.FORM_MAX_PER_RUN = orig_max_per_run
 
@@ -1354,7 +1359,11 @@ if __name__ == "__main__":
             ra = fa._check_quota()
             ok_a = (not ra[0]) and "1時間" in (ra[1] or "")
             print(f"  {'✓' if ok_a else '✗'} テナント別・直近1時間の上限(={C.FORM_MAX_PER_TENANT_PER_HOUR})"
-                  f"に達すると止まる: {ra}")
+                  f"に達すると止まる(.envで有効にした場合): {ra}")
+            C.FORM_MAX_PER_TENANT_PER_HOUR = -1
+            ra_off = FormSender(con, dry_run=False, tenant_id=tid_qa)._check_quota()
+            print(f"  {'✓' if ra_off[0] is True else '✗'} FORM_MAX_PER_TENANT_PER_HOUR=-1(既定。無効)なら"
+                  f"テナント別1時間の判定をしない: {ra_off}")
 
             fb = FormSender(con, dry_run=False, tenant_id=tid_qb)
             rb = fb._check_quota()

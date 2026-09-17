@@ -986,21 +986,22 @@ SENDER_INFO = {
 #   - tenants.monthly_send_quota / daily_send_quota: プランに応じたテナント別の
 #     クォータ(未設定=NULLの場合は下の_DEFAULT値を使う)。月間が契約プランの
 #     実体、日次は月間クォータ内での使いすぎ防止のブレーキ。
-FORM_MAX_PER_RUN = 50                        # 1回の実行(cron/API呼び出し1回)あたりの上限
-# 全テナント合算のサーキットブレーカー。2026-09-17にユーザー判断で既定を無効(-1)にした
-# (「150社以上の利用に耐えられない」ため。150社×4,000件/月≒20,000件/日で旧上限に
-# 到達する)。異常時に総量を止めたい場合は.envでFORM_MAX_PER_HOUR/DAYに件数を入れる
-# (-1または未設定=無効)。個々のテナントの枠(monthly/daily_send_quota)と、
-# 上限なしでないテナントの1回50件・1時間50件のペーシングは引き続き効く。
-FORM_MAX_PER_HOUR = int(os.environ.get("FORM_MAX_PER_HOUR", "-1"))   # 直近1時間。-1=無効
-FORM_MAX_PER_DAY = int(os.environ.get("FORM_MAX_PER_DAY", "-1"))     # 直近24時間。-1=無効
-FORM_MAX_PER_TENANT_PER_HOUR = 50            # テナント1社・直近1時間のペーシング上限
+# 2026-09-17にユーザー判断で、以下4つの上限はすべて既定で無効(-1)にした:
+#   FORM_MAX_PER_HOUR/DAY(全テナント合算のサーキットブレーカー。「150社以上の利用に
+#   耐えられない」ため。150社×4,000件/月≒20,000件/日で旧上限20,000に到達する)、
+#   FORM_MAX_PER_RUN(1回の実行あたり旧50件)・FORM_MAX_PER_TENANT_PER_HOUR(テナント別
+#   1時間あたり旧50件。リスト全社への一括送信を許すため)。
+# いずれも.envに件数を入れた場合のみ有効(-1または未設定=無効)。残る歯止めは
+# テナントごとの枠(monthly/daily_send_quota)・Kill Switch・can_contact()。
+FORM_MAX_PER_RUN = int(os.environ.get("FORM_MAX_PER_RUN", "-1"))                  # 1回の実行あたり
+FORM_MAX_PER_HOUR = int(os.environ.get("FORM_MAX_PER_HOUR", "-1"))                # 全体・直近1時間
+FORM_MAX_PER_DAY = int(os.environ.get("FORM_MAX_PER_DAY", "-1"))                  # 全体・直近24時間
+FORM_MAX_PER_TENANT_PER_HOUR = int(os.environ.get("FORM_MAX_PER_TENANT_PER_HOUR", "-1"))  # テナント別・直近1時間
 FORM_MAX_PER_TENANT_PER_DAY_DEFAULT = 300    # tenants.daily_send_quota未設定時の既定値
 FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT = 4000  # tenants.monthly_send_quota未設定時の既定値
 # tenants.monthly_send_quota / daily_send_quota にこの値を入れると「上限なし」(T89)。
 # NULL=既定値、0=送信枠なし(デモ)、正の整数=上限、-1=上限なし。上限なしのテナントは
-# 1回の実行あたり・1時間あたりのペーシング上限も外れる(T90)。全体のサーキット
-# ブレーカー(FORM_MAX_PER_HOUR/DAY)は.envで有効にした場合のみ、上限なしでも効く。
+# (.envで有効にしていても)1回の実行あたり・テナント別1時間あたりの上限を受けない(T90)。
 QUOTA_UNLIMITED = -1
                                                # (=最低プランの想定送信数)
 

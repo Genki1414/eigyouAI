@@ -290,14 +290,15 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
   <div class="page" data-page="inquiries">
     <div class="card">
       <div class="hint">LP(lp_hirakeru.html)の「契約のお申し込み」「質問する」と、管理画面(デモ利用者の「契約を申し込む」「質問する」)から
-        届いたものです。連絡後は「対応済みにする」を押してください(デモテナントの本契約化=tenants.kind/plan_name/クォータの更新は、
-        ここではなく顧客との合意後に別途手動で行ってください)。</div>
+        届いたものです。各行の「次にやること」の順に進めてください。</div>
       <div class="hint" id="campaignStatus" style="margin-bottom:8px"></div>
       <button class="ghost" id="btnRefreshInquiries">再読込</button>
+      <div style="overflow-x:auto">
       <table id="inquiryTable" style="display:none">
-        <thead><tr><th>状態</th><th>種別</th><th>経路</th><th>会社名</th><th>担当者</th><th>連絡先</th><th>希望プラン</th><th>内容</th><th>受付日</th><th style="min-width:260px">次にやること</th></tr></thead>
+        <thead><tr><th>状態</th><th>種別・経路</th><th>会社名・担当者・連絡先</th><th>希望プラン・内容</th><th>受付日</th></tr></thead>
         <tbody id="inquiryTbody"></tbody>
       </table>
+      </div>
     </div>
   </div>
 
@@ -500,16 +501,13 @@ async function refreshInquiries() {
   const tbody = $("inquiryTbody");
   tbody.innerHTML = inquiries.map(r => `<tr>
       <td><span class="status ${r.status === "pending" ? "off" : "on"}">${r.status === "pending" ? "未対応" : "対応済み"}</span></td>
-      <td style="white-space:nowrap">${r.kind === "contract" ? "契約申込" : "質問"}</td>
-      <td style="white-space:nowrap">${r.source === "lp" ? "LP" : `管理画面${r.tenant_name ? "(" + escapeHtml(r.tenant_name) + ")" : ""}`}</td>
-      <td style="white-space:nowrap">${escapeHtml(r.company_name || "")}</td>
-      <td style="white-space:nowrap">${escapeHtml(r.contact_name || "")}</td>
-      <td>${escapeHtml(r.email || "")}${r.phone ? "<br>" + escapeHtml(r.phone) : ""}</td>
-      <td>${escapeHtml(r.requested_plan || "")}</td>
-      <td style="white-space:pre-wrap;min-width:200px">${escapeHtml(r.message || "")}</td>
-      <td style="white-space:nowrap">${escapeHtml((r.created_at || "").replace("T", " "))}</td>
-      <td style="font-size:12px;line-height:1.7">${inquiryNextSteps(r)}</td>
-    </tr>`).join("");
+      <td style="white-space:nowrap"><b>${r.kind === "contract" ? "契約申込" : "質問"}</b><br><span style="font-size:12px;color:#8B99A5">${r.source === "lp" ? "LP" : `管理画面${r.tenant_name ? "(" + escapeHtml(r.tenant_name) + ")" : ""}`}</span></td>
+      <td style="font-size:13px"><b>${escapeHtml(r.company_name || "")}</b>${r.contact_name ? " / " + escapeHtml(r.contact_name) : ""}<br>${escapeHtml(r.email || "")}${r.phone ? "<br>" + escapeHtml(r.phone) : ""}</td>
+      <td style="white-space:pre-wrap;min-width:160px;max-width:280px;font-size:13px">${r.requested_plan ? "<b>" + escapeHtml(r.requested_plan) + "</b>" + (r.message ? "<br>" : "") : ""}${escapeHtml(r.message || "")}</td>
+      <td style="white-space:nowrap;font-size:12px">${escapeHtml((r.created_at || "").replace("T", " "))}</td>
+    </tr>
+    <tr><td colspan="5" style="background:${r.status === "pending" ? "#FFF7E6" : "#F7F8FA"};font-size:12px;line-height:1.9;padding:8px 14px 12px;border-bottom:2px solid #E4E8EB">
+      <b style="color:${r.status === "pending" ? "#B3402A" : "#8B99A5"}">次にやること:</b>&nbsp; ${inquiryNextSteps(r)}</td></tr>`).join("");
   tbody.querySelectorAll(".inquiryCreateTenantBtn").forEach(btn =>
     btn.addEventListener("click", () => prefillTenantCreate(inquiries.find(x => String(x.id) === btn.dataset.id))));
   const pending = inquiries.filter(x => x.status === "pending").length;

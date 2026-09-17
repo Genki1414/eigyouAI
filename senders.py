@@ -421,15 +421,18 @@ class FormSender(BaseSender):
         day_ago = (now - timedelta(hours=24)).isoformat(timespec="seconds")
         month_ago = (now - timedelta(days=30)).isoformat(timespec="seconds")
 
-        n_hour = self.con.execute(
-            "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ?", (hour_ago,)).fetchone()[0]
-        if n_hour >= C.FORM_MAX_PER_HOUR:
-            return False, f"全体・直近1時間の上限({C.FORM_MAX_PER_HOUR}件)に到達"
+        # 全体のサーキットブレーカーは.envで件数を入れた場合のみ有効(-1=無効。config.py参照)
+        if C.FORM_MAX_PER_HOUR >= 0:
+            n_hour = self.con.execute(
+                "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ?", (hour_ago,)).fetchone()[0]
+            if n_hour >= C.FORM_MAX_PER_HOUR:
+                return False, f"全体・直近1時間の上限({C.FORM_MAX_PER_HOUR}件)に到達"
 
-        n_day = self.con.execute(
-            "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ?", (day_ago,)).fetchone()[0]
-        if n_day >= C.FORM_MAX_PER_DAY:
-            return False, f"全体・直近24時間の上限({C.FORM_MAX_PER_DAY}件)に到達"
+        if C.FORM_MAX_PER_DAY >= 0:
+            n_day = self.con.execute(
+                "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ?", (day_ago,)).fetchone()[0]
+            if n_day >= C.FORM_MAX_PER_DAY:
+                return False, f"全体・直近24時間の上限({C.FORM_MAX_PER_DAY}件)に到達"
 
         if self.tenant_id is None:
             return True, None
@@ -1412,7 +1415,12 @@ if __name__ == "__main__":
             try:
                 r_g = FormSender(con, dry_run=False, tenant_id=tid_qb)._check_quota()
                 ok_g = (not r_g[0]) and "全体" in (r_g[1] or "")
-                print(f"  {'✓' if ok_g else '✗'} 上限なしテナントでも全体のサーキットブレーカー(=1)は効く: {r_g}")
+                print(f"  {'✓' if ok_g else '✗'} 全体のサーキットブレーカーを.envで有効(=1)にすれば"
+                      f"上限なしテナントでも効く: {r_g}")
+                C.FORM_MAX_PER_HOUR = -1
+                r_g2 = FormSender(con, dry_run=False, tenant_id=tid_qb)._check_quota()
+                print(f"  {'✓' if r_g2[0] is True else '✗'} FORM_MAX_PER_HOUR=-1(既定。無効)なら全体の"
+                      f"上限判定をしない: {r_g2}")
             finally:
                 C.FORM_MAX_PER_HOUR = orig_gh
             con.execute("DELETE FROM form_send_log WHERE tenant_id=? AND started_at>=?",

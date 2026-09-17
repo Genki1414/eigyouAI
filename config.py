@@ -992,6 +992,11 @@ FORM_MAX_PER_DAY = 20000                     # 全テナント合算・直近24�
 FORM_MAX_PER_TENANT_PER_HOUR = 50            # テナント1社・直近1時間のペーシング上限
 FORM_MAX_PER_TENANT_PER_DAY_DEFAULT = 300    # tenants.daily_send_quota未設定時の既定値
 FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT = 4000  # tenants.monthly_send_quota未設定時の既定値
+# tenants.monthly_send_quota / daily_send_quota にこの値を入れると「上限なし」(T89)。
+# NULL=既定値、0=送信枠なし(デモ)、正の整数=上限、-1=上限なし。上限なしでも
+# 全体のサーキットブレーカー(FORM_MAX_PER_HOUR/DAY)とテナント別の1時間あたり上限
+# (FORM_MAX_PER_TENANT_PER_HOUR)は引き続き効く(異常時の被害を止める最終防波堤)。
+QUOTA_UNLIMITED = -1
                                                # (=最低プランの想定送信数)
 
 # senders.send_campaign()が1回の呼び出し内で同時に処理する件数(T41)。

@@ -430,17 +430,20 @@ class FormSender(BaseSender):
         if n_tenant_hour >= C.FORM_MAX_PER_TENANT_PER_HOUR:
             return False, f"テナント別・直近1時間の上限({C.FORM_MAX_PER_TENANT_PER_HOUR}件)に到達"
 
-        n_tenant_day = self.con.execute(
-            "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
-            (day_ago, self.tenant_id)).fetchone()[0]
-        if n_tenant_day >= daily_quota:
-            return False, f"テナント別・直近24時間の上限({daily_quota}件)に到達"
+        # -1(C.QUOTA_UNLIMITED)は上限なし(T89)。上の全体・1時間あたりの上限は既に通過済み
+        if daily_quota != C.QUOTA_UNLIMITED:
+            n_tenant_day = self.con.execute(
+                "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
+                (day_ago, self.tenant_id)).fetchone()[0]
+            if n_tenant_day >= daily_quota:
+                return False, f"テナント別・直近24時間の上限({daily_quota}件)に到達"
 
-        n_tenant_month = self.con.execute(
-            "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
-            (month_ago, self.tenant_id)).fetchone()[0]
-        if n_tenant_month >= monthly_quota:
-            return False, f"テナント別・直近30日間の月間クォータ({monthly_quota}件)に到達"
+        if monthly_quota != C.QUOTA_UNLIMITED:
+            n_tenant_month = self.con.execute(
+                "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
+                (month_ago, self.tenant_id)).fetchone()[0]
+            if n_tenant_month >= monthly_quota:
+                return False, f"テナント別・直近30日間の月間クォータ({monthly_quota}件)に到達"
 
         return True, None
 
@@ -1368,6 +1371,19 @@ if __name__ == "__main__":
         ok_month = (not rb2[0]) and "月間クォータ" in (rb2[1] or "")
         print(f"  {'✓' if ok_month else '✗'} tenants.monthly_send_quota(=2、直近30日)"
               f"に達すると止まる: {rb2}")
+
+        # 上限なし(-1。T89): 同じ消化状況でも月間・日次の判定をしない
+        con.execute("UPDATE tenants SET monthly_send_quota=? WHERE id=?", (C.QUOTA_UNLIMITED, tid_qb))
+        con.execute("UPDATE tenants SET daily_send_quota=? WHERE id=?", (C.QUOTA_UNLIMITED, tid_qa))
+        con.commit()
+        rb_u = FormSender(con, dry_run=False, tenant_id=tid_qb)._check_quota()
+        ra_u = FormSender(con, dry_run=False, tenant_id=tid_qa)._check_quota()
+        ok_unl = rb_u[0] is True and ra_u[0] is True
+        print(f"  {'✓' if ok_unl else '✗'} monthly/daily_send_quota=-1(上限なし)は月間・日次の上限判定を"
+              f"しない: {rb_u}, {ra_u}")
+        con.execute("UPDATE tenants SET monthly_send_quota=2 WHERE id=?", (tid_qb,))
+        con.execute("UPDATE tenants SET daily_send_quota=3 WHERE id=?", (tid_qa,))
+        con.commit()
 
         print("\n── クォータ追加購入(AI入札連携。T55) ──")
         import db

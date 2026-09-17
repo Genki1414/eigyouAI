@@ -1784,7 +1784,8 @@ def h_tenant_dashboard(con, tenant_id):
                      else C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT)
     daily_quota = (tenant_row["daily_send_quota"] if tenant_row["daily_send_quota"] is not None
                    else C.FORM_MAX_PER_TENANT_PER_DAY_DEFAULT)
-    plan_name = tenant_row["plan_name"] or f"月間{monthly_quota:,}通プラン"
+    unlimited = monthly_quota == C.QUOTA_UNLIMITED
+    plan_name = tenant_row["plan_name"] or ("送信数上限なしプラン" if unlimited else f"月間{monthly_quota:,}通プラン")
 
     return 200, {
         "this_month": this_month,
@@ -1792,7 +1793,7 @@ def h_tenant_dashboard(con, tenant_id):
         "outcomes": {"replied": outcomes["replied"] or 0, "deal": outcomes["deal"] or 0,
                      "won": outcomes["won"] or 0},
         "quota": {"plan_name": plan_name, "monthly_send_quota": monthly_quota,
-                   "daily_send_quota": daily_quota},
+                   "daily_send_quota": daily_quota, "unlimited": unlimited},
         # デモ利用者には「プラン変更を相談する」ではなく「契約を申し込む」を出す(T85)
         "is_demo": tenant_row["kind"] == "demo",
     }
@@ -2132,8 +2133,10 @@ def h_ops_tenants_create(con, data):
         value = data.get(key)
         if value is None:
             return None, None
+        if isinstance(value, int) and not isinstance(value, bool) and value == -1:
+            return value, None  # -1=上限なし(config.QUOTA_UNLIMITED。T89)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            return None, f"{label}は正の整数で指定してください"
+            return None, f"{label}は正の整数(上限なしは-1)で指定してください"
         return value, None
     monthly_send_quota, err = opt_positive_int("monthly_send_quota", "monthly_send_quota")
     if err:
@@ -2182,8 +2185,10 @@ def h_ops_tenant_convert(con, tenant_id, data):
         value = data.get(key)
         if value is None:
             return (None, f"{key}は必須です") if required else (None, None)
+        if isinstance(value, int) and not isinstance(value, bool) and value == -1:
+            return value, None  # -1=上限なし(T89)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            return None, f"{key}は正の整数で指定してください"
+            return None, f"{key}は正の整数(上限なしは-1)で指定してください"
         return value, None
     monthly_send_quota, err = positive_int("monthly_send_quota", True)
     if err:
@@ -2312,9 +2317,10 @@ def h_ops_tenant_update(con, tenant_id, data):
     for key in _TENANT_EDITABLE_INT:
         if key in data:
             value = data[key]
-            # 0は「枠なし」(デモテナント等)として有効。nullは既定値(config)に戻す
-            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
-                return 400, {"error": f"{key}は0以上の整数(既定値に戻すならnull)で指定してください"}
+            # 0は「枠なし」(デモテナント等)、-1は「上限なし」(T89)として有効。nullは既定値(config)に戻す
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool)
+                                      or (value < 0 and value != -1)):
+                return 400, {"error": f"{key}は0以上の整数(上限なしは-1、既定値に戻すならnull)で指定してください"}
             sets.append(f"{key}=?")
             params.append(value)
     if "kind" in data:
@@ -4791,7 +4797,21 @@ def self_test(port=8899):
     t("monthly_send_quotaにnullを渡すと既定値に戻る",
       st == 200 and r["tenant"]["monthly_send_quota"] is None
       and r["quota"]["base_monthly_send_quota"] == _C_t88.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT)
-    con.execute("UPDATE tenants SET name=?, monthly_send_quota=?, plan_name=?, monthly_fee_yen=NULL WHERE id=?",
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/update", {"monthly_send_quota": -2}, token=ops_key)
+    t("-1以外の負数は400", st == 400)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/update",
+                       {"monthly_send_quota": -1, "daily_send_quota": -1, "plan_name": None}, token=ops_key)
+    t("送信数-1(上限なし。T89)を保存でき、実効クォータがunlimitedになる",
+      st == 200 and r["quota"]["unlimited"] is True and r["quota"]["remaining_30d"] is None
+      and r["quota"]["effective_quota_30d"] == -1)
+    st, r = get_auth("/api/tenant/dashboard", token=key_a)
+    t("上限なしのテナントはダッシュボードでもunlimited=True・プラン表示が「送信数上限なし」",
+      st == 200 and r["quota"]["unlimited"] is True and r["quota"]["monthly_send_quota"] == -1
+      and "上限なし" in r["quota"]["plan_name"])
+    st, r = get_auth("/api/tenant/quota", token=key_a)
+    t("GET /api/tenant/quota(AI入札連携向け)もunlimited=Trueを返す", st == 200 and r["quota"]["unlimited"] is True)
+    con.execute("UPDATE tenants SET name=?, monthly_send_quota=?, daily_send_quota=NULL, plan_name=?, "
+                "monthly_fee_yen=NULL WHERE id=?",
                 (orig_a["name"], orig_a["monthly_send_quota"], orig_a["plan_name"], tid_a))
     con.commit()
 

@@ -1523,17 +1523,18 @@ async function refreshDashboard() {
     IS_DEMO = !!d.is_demo;
     $("btnOpenPlanChange").textContent = IS_DEMO ? "契約を申し込む" : "プラン変更を相談する";
     $("planBadge").textContent = q.plan_name;
-    $("planUsageText").textContent =
-      `${d.this_month.success.toLocaleString()} / ${q.monthly_send_quota.toLocaleString()}`;
-    const pct = q.monthly_send_quota > 0
+    // monthly_send_quota=-1は上限なし(T89)
+    const quotaLabel = q.unlimited ? "上限なし" : q.monthly_send_quota.toLocaleString();
+    $("planUsageText").textContent = `${d.this_month.success.toLocaleString()} / ${quotaLabel}`;
+    const pct = (!q.unlimited && q.monthly_send_quota > 0)
       ? Math.min(100, Math.round(d.this_month.success / q.monthly_send_quota * 100)) : 0;
-    $("planUsagePct").textContent = `　使用率${pct}%`;
+    $("planUsagePct").textContent = q.unlimited ? "" : `　使用率${pct}%`;
     const bar = $("planUsageBar");
     bar.style.width = `${pct}%`;
     bar.classList.toggle("warn", pct >= 90);
     refreshPlanChangeStatus();
     $("aiStatusMetric").textContent =
-      `今月 ${d.this_month.success.toLocaleString()} / ${q.monthly_send_quota.toLocaleString()} 件送信`;
+      `今月 ${d.this_month.success.toLocaleString()} / ${quotaLabel} 件送信`;
     updateAiStatusBadge();
     $("dashThisMonth").innerHTML = `
       <div class="statcard" data-target="sendlog"><b>${d.this_month.targeted_companies.toLocaleString()}</b><span>営業対象企業数</span></div>

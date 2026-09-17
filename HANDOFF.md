@@ -4659,6 +4659,18 @@ Kill Switch解除/申し込みdone化/campaign加算/二度目400/同じAPIキ�
 Playwright検証で、デモテナント(通数0)の詳細を開いてそのまま保存すると
 「正の整数で」と弾かれる問題が見つかり、通数は0以上(0=枠なし)を許可するよう修正。
 
+**送信数「上限なし」(T89、同日。ユーザー要望「送信数に上限なしを加えて」)**:
+`tenants.monthly_send_quota`/`daily_send_quota`に`-1`(`config.QUOTA_UNLIMITED`)を
+入れると上限なし。値の意味は NULL=既定値 / 0=枠なし(デモ) / 正の整数=上限 /
+-1=上限なし。`db.get_quota_status()`は`unlimited: True`・`effective_quota_30d: -1`
+・`remaining_30d: None`を返し、`senders._check_quota()`は-1のとき月間・日次の判定を
+スキップする(**全体のサーキットブレーカーとテナント別の1時間あたり上限は
+上限なしでも効く**=異常時の最終防波堤は残す)。`/api/tenant/dashboard`と
+`/api/tenant/quota`(AI入札連携)に`unlimited`を追加。管理画面のプラン表示は
+「N / 上限なし」、使用率は非表示。hq.htmlはテナント詳細・デモ→本契約の両方に
+「上限なし」チェックボックス(数値欄を無効化して-1を送る)。テナント作成API・
+convert APIも-1を受け付ける。`senders.py test`に1件、`api.py test`に4件追加。
+
 **確認**: `api.py test`に16件追加(valid_until不正/過去日/month_endの期限/期限切れは
 枠から外れる/詳細401・404・内容/更新401・空・形式不正・負数・kind不正/部分更新と
 実効クォータ反映/nullで既定値へ)。Playwrightでhq.htmlの申込行のナビ→テナント詳細→

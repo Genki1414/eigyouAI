@@ -1009,10 +1009,15 @@ def get_quota_status(con, tenant_id):
     used = con.execute(
         "SELECT COUNT(*) FROM form_send_log WHERE tenant_id=? AND started_at>=?",
         (tenant_id, month_ago)).fetchone()[0]
+    if base == C.QUOTA_UNLIMITED:
+        # 上限なし(T89)。effectiveも-1のまま返し、senders._check_quota()側で判定をスキップする
+        return {"base_monthly_send_quota": base, "addon_quota_30d": addon,
+                "effective_quota_30d": C.QUOTA_UNLIMITED, "used_30d": used,
+                "remaining_30d": None, "plan_name": plan_name, "unlimited": True}
     effective = base + addon
     return {"base_monthly_send_quota": base, "addon_quota_30d": addon,
             "effective_quota_30d": effective, "used_30d": used,
-            "remaining_30d": max(0, effective - used), "plan_name": plan_name}
+            "remaining_30d": max(0, effective - used), "plan_name": plan_name, "unlimited": False}
 
 
 def add_quota_purchase(con, tenant_id, qty, unit_price_yen=None, external_ref=None, expires_at=None):

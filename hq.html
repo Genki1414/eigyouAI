@@ -225,8 +225,10 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
         <div><label>契約時の月額(円)</label><input type="number" id="tdFee" min="0"></div>
       </div>
       <div class="row">
-        <div><label>月間送信数(件。空欄=既定値4,000、0=送信枠なし)</label><input type="number" id="tdMonthly" min="0"></div>
-        <div><label>1日の送信数(件。空欄=既定値300、0=送信枠なし)</label><input type="number" id="tdDaily" min="0"></div>
+        <div><label>月間送信数(件。空欄=既定値4,000、0=送信枠なし)</label><input type="number" id="tdMonthly" min="0">
+          <div class="hint"><label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;cursor:pointer"><input type="checkbox" id="tdMonthlyUnlimited">上限なし</label></div></div>
+        <div><label>1日の送信数(件。空欄=既定値300、0=送信枠なし)</label><input type="number" id="tdDaily" min="0">
+          <div class="hint"><label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;cursor:pointer"><input type="checkbox" id="tdDailyUnlimited">上限なし</label></div></div>
       </div>
       <button id="btnTenantSave">保存</button>
       <div class="result" id="tdSaveResult" style="display:none"></div>
@@ -322,7 +324,8 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
         </select></div>
       </div>
       <div class="row">
-        <div><label>月間送信数(件)</label><input type="number" id="convertQuota" value="4000" min="1"></div>
+        <div><label>月間送信数(件)</label><input type="number" id="convertQuota" value="4000" min="1">
+          <div class="hint"><label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;cursor:pointer"><input type="checkbox" id="convertUnlimited">上限なし(個別契約)</label></div></div>
         <div><label>月額(円。ライトはキャンペーン価格が自動で入ります。個別条件があれば書き換え)</label><input type="number" id="convertFee" value="40000" min="0"></div>
       </div>
       <button id="btnConvert">本契約に切り替える</button>
@@ -432,14 +435,15 @@ function openConvert(tenantId) {
   refreshConvertCampaign();
 }
 $("convertPlan").addEventListener("change", applyConvertPlan);
+$("convertUnlimited").addEventListener("change", () => { $("convertQuota").disabled = $("convertUnlimited").checked; });
 $("btnConvert").addEventListener("click", async () => {
   const el = $("convertResult");
   const tid = $("convertTenant").value;
   if (!tid) { showResult(el, false, "対象のデモテナントを選択してください"); return; }
   const plan = $("convertPlan").value;
-  const quota = Number($("convertQuota").value);
+  const quota = $("convertUnlimited").checked ? -1 : Number($("convertQuota").value);
   const fee = Number($("convertFee").value);
-  if (!confirm(`テナント#${tid} を本契約に切り替えます。\nプラン: ${plan} / 月間${quota.toLocaleString()}件 / 月額${fee.toLocaleString()}円\n送信停止も解除され、実際の企業への送信ができるようになります。よろしいですか?`)) return;
+  if (!confirm(`テナント#${tid} を本契約に切り替えます。\nプラン: ${plan} / 月間${quota === -1 ? "上限なし" : quota.toLocaleString() + "件"} / 月額${fee.toLocaleString()}円\n送信停止も解除され、実際の企業への送信ができるようになります。よろしいですか?`)) return;
   $("btnConvert").disabled = true;
   try {
     const r = await call(`/api/ops/tenants/${tid}/convert`, {
@@ -578,14 +582,24 @@ async function loadTenantDetail() {
   $("tdSenderEmail").value = t.sender_email || ""; $("tdSenderName").value = t.sender_name || "";
   $("tdSenderAddress").value = t.sender_address || ""; $("tdOptoutUrl").value = t.optout_url || "";
   $("tdPlanName").value = t.plan_name || ""; $("tdFee").value = t.monthly_fee_yen ?? "";
-  $("tdMonthly").value = t.monthly_send_quota ?? ""; $("tdDaily").value = t.daily_send_quota ?? "";
+  // -1=上限なし(T89): チェックを入れて数値欄は無効化
+  const setQuotaField = (inputId, cbId, value) => {
+    const unl = value === -1;
+    $(cbId).checked = unl;
+    $(inputId).disabled = unl;
+    $(inputId).value = unl ? "" : (value ?? "");
+  };
+  setQuotaField("tdMonthly", "tdMonthlyUnlimited", t.monthly_send_quota);
+  setQuotaField("tdDaily", "tdDailyUnlimited", t.daily_send_quota);
   const ks = d.kill_switch;
   $("tdKillSwitch").textContent = ks.stopped
     ? `停止中(${ks.reason || "理由未記入"}、${(ks.updated_at || "").replace("T", " ")})。このテナントは実際の企業へ送信できません。`
     : "停止していません(送信できます)。";
   $("btnTenantKsToggle").textContent = ks.stopped ? "停止を解除する" : "このテナントの送信を停止する";
   const q = d.quota;
-  $("tdQuota").textContent = `直近30日: 基本枠${q.base_monthly_send_quota.toLocaleString()}件 + 追加${q.addon_quota_30d.toLocaleString()}件 = ${q.effective_quota_30d.toLocaleString()}件 / 使用${q.used_30d.toLocaleString()}件 / 残り${q.remaining_30d.toLocaleString()}件`;
+  $("tdQuota").textContent = q.unlimited
+    ? `直近30日: 月間の上限なし(使用${q.used_30d.toLocaleString()}件)。追加購入は不要です`
+    : `直近30日: 基本枠${q.base_monthly_send_quota.toLocaleString()}件 + 追加${q.addon_quota_30d.toLocaleString()}件 = ${q.effective_quota_30d.toLocaleString()}件 / 使用${q.used_30d.toLocaleString()}件 / 残り${q.remaining_30d.toLocaleString()}件`;
   $("tdPurchaseTbody").innerHTML = d.purchases.map(p => `<tr><td>${escapeHtml((p.purchased_at || "").replace("T", " "))}</td>` +
     `<td>${p.qty.toLocaleString()}</td><td>${p.unit_price_yen != null ? p.unit_price_yen.toLocaleString() + "円" : ""}</td>` +
     `<td>${p.expires_at ? escapeHtml(p.expires_at.replace("T", " ")) + "まで" : "購入から30日間"}</td></tr>`).join("");
@@ -597,9 +611,12 @@ async function loadTenantDetail() {
   $("tdStaffEmpty").textContent = d.staff.length ? "" : "担当者アカウントはまだありません(テナント作成時のapi_keyでログインしている状態)。";
 }
 $("btnBackToTenants").addEventListener("click", () => goPage("tenantList"));
+$("tdMonthlyUnlimited").addEventListener("change", () => { $("tdMonthly").disabled = $("tdMonthlyUnlimited").checked; });
+$("tdDailyUnlimited").addEventListener("change", () => { $("tdDaily").disabled = $("tdDailyUnlimited").checked; });
 $("btnTenantSave").addEventListener("click", async () => {
   const el = $("tdSaveResult");
   const intOrNull = id => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
+  const quotaValue = (inputId, cbId) => $(cbId).checked ? -1 : intOrNull(inputId);
   try {
     await call(`/api/ops/tenants/${currentTenantId}/update`, {
       method: "POST",
@@ -608,7 +625,8 @@ $("btnTenantSave").addEventListener("click", async () => {
         sender_email: $("tdSenderEmail").value.trim(), sender_name: $("tdSenderName").value.trim() || null,
         sender_address: $("tdSenderAddress").value.trim() || null, optout_url: $("tdOptoutUrl").value.trim() || null,
         plan_name: $("tdPlanName").value.trim() || null, monthly_fee_yen: intOrNull("tdFee"),
-        monthly_send_quota: intOrNull("tdMonthly"), daily_send_quota: intOrNull("tdDaily"),
+        monthly_send_quota: quotaValue("tdMonthly", "tdMonthlyUnlimited"),
+        daily_send_quota: quotaValue("tdDaily", "tdDailyUnlimited"),
       }),
     });
     showResult(el, true, "保存しました。送信通数の変更はすぐに送信判定へ反映されます。");

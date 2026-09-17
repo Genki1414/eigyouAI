@@ -53,7 +53,9 @@ def collect_alerts(con):
                         f"理由: {reason}\n意図的な停止でなければ、kill_switch_cli.py resume "
                         "で解除してください。"))
 
-    tenant_stops = db.list_tenant_kill_switches(con)
+    # デモテナント(T84)は設計上ずっとKill Switch停止なので、異常としては扱わない
+    # (含めるとデモが1件でもある限り警告が出続け、本当の停止が埋もれる)
+    tenant_stops = [t for t in db.list_tenant_kill_switches(con) if t.get("tenant_kind") != "demo"]
     if tenant_stops:
         names = "、".join(f"{t['tenant_name'] or t['tenant_id']}（{t['reason'] or '理由未記録'}）"
                           for t in tenant_stops)

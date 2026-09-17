@@ -4567,6 +4567,17 @@ Kill Switch注記と同じ分岐内)。
 `GET /api/campaign`)を追加。Playwrightで料金セクション・ヒーローのバッジ・
 フォームの既定値・hq.htmlの表示を確認。
 
+**公開前チェック(同日、ユーザー「これで案内しても問題ないか」)で見つけた
+不具合**: `monitor.py`の`collect_alerts()`がテナント別Kill Switchの停止を
+全件warningにしていたため、デモテナント(設計上ずっと停止)が1件でもあると
+「テナント別Kill Switchが◯件停止中」が永久に出続け、本物の停止が埋もれる
+状態だった(ローカルの`monitor.py test`が、検証で作ったデモテナントのせいで
+落ちたことで発覚)。`db.list_tenant_kill_switches()`に`tenant_kind`を足し、
+monitor側で`kind='demo'`を除外するよう修正。
+ローカルで6スイート実行→`test_pipeline.py`の「送信数がDBと一致」だけは
+検証中のドライラン送信で`touches`が増えた(metrics.jsonが古い)ローカル固有の
+不一致で、CIでは`run.py all --demo`から作り直すため通る(実際にCI成功)。
+
 ---
 
 ## 3. やってはいけないこと

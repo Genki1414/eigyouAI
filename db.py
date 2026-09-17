@@ -973,7 +973,7 @@ def set_tenant_kill_switch(con, tenant_id, stopped, reason=None, updated_by=None
 
 
 def list_tenant_kill_switches(con):
-    rows = con.execute("""SELECT k.tenant_id, t.name tenant_name, k.reason, k.updated_at
+    rows = con.execute("""SELECT k.tenant_id, t.name tenant_name, t.kind tenant_kind, k.reason, k.updated_at
         FROM tenant_kill_switch k LEFT JOIN tenants t ON t.id = k.tenant_id
         ORDER BY k.updated_at DESC""").fetchall()
     return [dict(r) for r in rows]

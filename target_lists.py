@@ -82,10 +82,13 @@ CREATE TABLE IF NOT EXISTS search_log (
 CREATE INDEX IF NOT EXISTS idx_search_log_tenant ON search_log(tenant_id);
 """
 
-# 暴走・誤操作の被害を抑えるための保守的な初期値(FormSenderのペーシングと同じ考え方)。
-# 実績を見てから引き上げる想定。
-MAX_LIST_SIZE = 20000
-MAX_CSV_ROWS = 20000
+# リスト1件あたりの企業数の上限とCSV取込の行数上限。当初は暴走・誤操作対策で20,000に
+# していたが、2026-09-17にユーザー指示(「466,593件見つかりました(上限20,000件のため
+# 実際に保存されるのは20,000社)」→「リスト登録も上限なくして」)で既定を無制限(-1)にした。
+# 必要なら.envで件数を入れる。送信の上限とは別物(送信はテナントの送信枠で制御する)。
+import os as _os
+MAX_LIST_SIZE = int(_os.environ.get("MAX_LIST_SIZE", "-1"))   # -1=無制限
+MAX_CSV_ROWS = int(_os.environ.get("MAX_CSV_ROWS", "-1"))     # -1=無制限
 
 # フィルタ項目の許可リスト。顧客からの入力を直接SQLへ混ぜないための唯一の入口。
 _ALLOWED_TRADES = set(C.TARGET_TRADES.values())  # config.TARGET_TRADESの値(コード)一覧
@@ -160,16 +163,19 @@ def preview_filter(con, tenant_id, filters, sample_limit=10):
     sample = con.execute(
         f"SELECT id, name, pref, rank, trades FROM companies WHERE {where} LIMIT ?",
         params + [sample_limit]).fetchall()
-    return {"count": min(total, MAX_LIST_SIZE), "count_before_cap": total,
-            "capped": total > MAX_LIST_SIZE, "sample": [dict(r) for r in sample]}
+    capped = MAX_LIST_SIZE > 0 and total > MAX_LIST_SIZE
+    return {"count": MAX_LIST_SIZE if capped else total, "count_before_cap": total,
+            "capped": capped, "cap": MAX_LIST_SIZE, "sample": [dict(r) for r in sample]}
 
 
 def create_from_filter(con, tenant_id, name, filters, existing_list_id=None):
     """existing_list_idを渡すと新規リストを作らず、そのリストへ追加する
     (MIKOMERUの「リスト保存」モーダルの「既存のリストに追加する」相当)。"""
     where, params = build_filter_sql(tenant_id, filters)
+    limit_sql = " LIMIT ?" if MAX_LIST_SIZE > 0 else ""
     ids = [r[0] for r in con.execute(
-        f"SELECT id FROM companies WHERE {where} LIMIT ?", params + [MAX_LIST_SIZE]).fetchall()]
+        f"SELECT id FROM companies WHERE {where}{limit_sql}",
+        params + ([MAX_LIST_SIZE] if MAX_LIST_SIZE > 0 else [])).fetchall()]
     if existing_list_id:
         result = add_members_to_list(con, tenant_id, existing_list_id, ids)
         if result is None:
@@ -255,7 +261,7 @@ def create_from_csv(con, tenant_id, name, csv_text, discover_urls=False, existin
     import db
 
     reader = csv.DictReader(io.StringIO(csv_text))
-    rows = list(reader)[:MAX_CSV_ROWS]
+    rows = list(reader)[:MAX_CSV_ROWS] if MAX_CSV_ROWS > 0 else list(reader)
     if not rows:
         return {"error": "CSVにデータ行がありません"}
 
@@ -372,7 +378,7 @@ def run_csv_search(con, tenant_id, filename, csv_text, mode="name", name_col=Non
     import db
 
     reader = csv.DictReader(io.StringIO(csv_text))
-    rows = list(reader)[:MAX_CSV_ROWS]
+    rows = list(reader)[:MAX_CSV_ROWS] if MAX_CSV_ROWS > 0 else list(reader)
     if not rows:
         return {"error": "CSVにデータ行がありません"}
 
@@ -1043,6 +1049,6 @@ if __name__ == "__main__":
     elif args.cmd == "preview":
         filters = {"prefs": args.pref, "trades": args.trade, "ranks": args.rank}
         res = preview_filter(con, tenant["id"], filters)
-        print(f"該当 {res['count_before_cap']}社" + ("(上限20,000件でカット)" if res["capped"] else ""))
+        print(f"該当 {res['count_before_cap']}社" + (f"(上限{MAX_LIST_SIZE:,}件でカット)" if res["capped"] else ""))
         for s in res["sample"]:
             print(f"  {s['name']} ({s['pref']})")

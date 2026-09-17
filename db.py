@@ -533,6 +533,8 @@ def migrate(con):
         ("scheduled_sends", "allow_no_solicit", "INTEGER DEFAULT 0"),
         ("scheduled_sends", "cancel_recent_days", "INTEGER"),
         ("scheduled_sends", "sender_override_json", "TEXT"),
+        ("scheduled_sends", "claimed_at", "TEXT"),  # 送信ワーカーが取り込んだ日時(T91。複数ワーカーの取り合い防止)
+        ("scheduled_sends", "worker", "TEXT"),      # 取り込んだワーカーの名前(T91。障害調査用)
         # T29: フォーム送信のペーシングを「全テナント合算の単一プール」から
         # 「テナントごとの公平な取り分」へ再設計。NULL=config.pyの
         # FORM_MAX_PER_TENANT_PER_*_DEFAULTを使う(=契約プラン未設定の
@@ -875,7 +877,8 @@ def resolve_click_token(con, token):
 
 def list_scheduled_sends(con, tenant_id, list_id=None):
     q = """SELECT s.id, s.list_id, tl.name list_name, s.subject, s.dry_run, s.scheduled_at,
-            s.track_clicks, s.sender_template_id, s.status, s.created_at, s.executed_at
+            s.track_clicks, s.sender_template_id, s.status, s.created_at, s.executed_at,
+            s.claimed_at, s.result_json
         FROM scheduled_sends s LEFT JOIN target_lists tl ON tl.id = s.list_id
         WHERE s.tenant_id=?"""
     params = [tenant_id]
@@ -901,6 +904,27 @@ def due_scheduled_sends(con, now_iso):
         FROM scheduled_sends WHERE status='PENDING' AND scheduled_at<=?
         ORDER BY scheduled_at""", (now_iso,)).fetchall()
     return [dict(r) for r in rows]
+
+
+def claim_scheduled_send(con, scheduled_id, worker):
+    """PENDINGの予約を1件、自分(worker)のものとしてRUNNINGにする(T91)。
+    複数の送信ワーカーが同時に動いても、UPDATE ... WHERE status='PENDING'が
+    1行だけ成功する(SQLite/Postgresとも単一UPDATEはアトミック)ため、同じ予約を
+    二重に実行しない。取れたらTrue、他のワーカーに先に取られていたらFalse。"""
+    cur = con.execute("""UPDATE scheduled_sends SET status='RUNNING', claimed_at=?, worker=?
+        WHERE id=? AND status='PENDING'""",
+        (datetime.now().isoformat(timespec="seconds"), worker, scheduled_id))
+    con.commit()
+    return cur.rowcount == 1
+
+
+def requeue_stale_running(con, older_than_iso):
+    """RUNNINGのまま長時間経った予約(ワーカーが途中で落ちた等)をPENDINGへ戻す(T91)。
+    send_list()は送信済みの会社を冪等に飛ばすので、やり直しても二重送信にはならない。"""
+    cur = con.execute("""UPDATE scheduled_sends SET status='PENDING', claimed_at=NULL, worker=NULL
+        WHERE status='RUNNING' AND claimed_at IS NOT NULL AND claimed_at<?""", (older_than_iso,))
+    con.commit()
+    return cur.rowcount
 
 
 def finish_scheduled_send(con, scheduled_id, status, result=None):

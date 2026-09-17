@@ -35,6 +35,23 @@ services:
     depends_on: [api]
     networks: [default]
 
+  # 送信ワーカー(T91)。list_builder.htmlの「送信する」「予約送信」はどちらも
+  # scheduled_sendsキューに入り、このサービスが常駐で拾って実行する(apiは受付だけ)。
+  # 並列数は.envのSENDER_WORKERS(プロセス数)×FORM_SEND_CONCURRENCY(1プロセスの並列数)。
+  # サーバー増強後は.envの値を上げて `docker compose up -d sender` で反映。
+  # さらに別サーバーで動かす場合はDATABASE_URL(Postgres)を共有すれば台数を増やせる
+  # (予約の取り込みはDBのUPDATEでアトミックに行うため二重実行しない)。
+  sender:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    container_name: eigyouai-sender
+    env_file: [../.env]
+    volumes: ["engine-data:/app/out"]
+    command: ["python3", "scheduled_send_cli.py", "loop"]
+    stop_grace_period: 60s
+    restart: unless-stopped
+    depends_on: { postgres: { condition: service_healthy } }
+    networks: [default]
+
   # バッチ（cronで定期実行）
   worker:
     build: { context: .., dockerfile: deploy/Dockerfile }

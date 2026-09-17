@@ -162,7 +162,13 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            "sender_override"} → リストへフォーム自動送信。
                            dry_run既定true(=実サイトへは送らない。list_builder.htmlの
                            UI自体はMIKOMERU同様トグルを持たず常にfalseを送るが、
-                           API自体は引き続きtrueを既定に受け付ける)。can_contact()・
+                           API自体は引き続きtrueを既定に受け付ける)。
+                           **dry_run=falseはこのリクエスト内で送らず、キュー
+                           (scheduled_sends、scheduled_at=今)に入れて
+                           {"queued":true,"scheduled_id"}を即返す(T91)。実行は
+                           送信ワーカー(scheduled_send_cli.py loop)。進捗は
+                           GET /api/tenant/scheduled-sends と自動送信ログで確認**。
+                           dry_run=trueは従来通り同期で結果(stats)を返す。can_contact()・
                            冪等性・ペーシング上限はsend_campaign()経由でそのまま適用
                            される(HANDOFF.mdの原則を厳守)。scheduled_at(未来のISO日時)
                            を指定すると即時実行せずscheduled_sendsへ予約登録するだけに
@@ -1038,6 +1044,29 @@ def h_tenant_send_log_executions(con, tenant_id, qs):
         for k in totals:
             totals[k] += e[k]
     return 200, {"executions": execs, "totals": totals}
+
+
+def h_tenant_send_log_executions_csv(con, tenant_id, qs):
+    """自動送信ログ一覧(実行単位)のCSVダウンロード(T92)。画面と同じ絞り込み
+    (?list_id=/?date_from=/?date_to=)を反映し、件数上限は付けない。"""
+    list_id = qs.get("list_id", [None])[0]
+    date_from = (qs.get("date_from", [""])[0] or "").strip() or None
+    date_to = (qs.get("date_to", [""])[0] or "").strip() or None
+    execs = TL.list_send_executions(con, tenant_id,
+                                     list_id=int(list_id) if list_id and list_id.isdigit() else None,
+                                     date_from=date_from, date_to=date_to)
+    import csv, io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["リストID", "実行日時", "リスト名", "担当者", "送信元会社名", "送信元姓", "送信元名",
+                "送信元メール", "件名", "本文", "備考", "送信成功", "失敗", "フォームなし", "総数",
+                "URLクリック数", "最新クリック日時"])
+    for e in execs:
+        w.writerow([e["list_id"], e["started_at"] or "", e["list_name"] or "", e["staff_name"] or "",
+                    e["company_name"] or "", e["sender_last_name"], e["sender_first_name"], e["sender_email"],
+                    e["subject"], e["body"], e["send_note"], e["success"], e["failed"], e["no_form"],
+                    e["total"], e["click_count"], e["last_clicked_at"] or ""])
+    return 200, {"csv": buf.getvalue(), "count": len(execs)}
 
 
 def h_tenant_send_log_execution_note(con, tenant_id, list_id, data):
@@ -1988,6 +2017,21 @@ def h_tenant_list_send(con, tenant_id, list_id, data, staff_id=None):
                                         sender_override=sender_override)
         return 200, {"scheduled": True, "scheduled_id": sid,
                      "scheduled_at": when.isoformat(timespec="seconds")}
+
+    if not dry_run:
+        # T91: 本番送信はこのリクエスト内で実行せず、キュー(scheduled_sends。scheduled_at=今)に
+        # 入れて送信ワーカー(scheduled_send_cli.py loop)に任せる。api.pyは単一スレッドのため、
+        # 数百件の実送信(1件数秒〜十数秒)を同期で行うと他テナントの操作まで止まり、前段の
+        # nginxもタイムアウトしていた。ドライランは軽い(ブラウザを起動しない)のでこれまで
+        # 通り同期で結果を返す(テスト・デモの体験用)。
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        sid = db.create_scheduled_send(con, tenant_id, list_id, subject, body, False, now_iso,
+                                        track_clicks=track_clicks,
+                                        sender_template_id=sender_template_id,
+                                        allow_no_solicit=allow_no_solicit,
+                                        cancel_recent_days=cancel_recent_days,
+                                        sender_override=sender_override)
+        return 200, {"queued": True, "scheduled_id": sid, "scheduled_at": now_iso, "dry_run": False}
 
     res = TL.send_list(con, tenant_id, list_id, subject, body, dry_run=dry_run,
                         track_clicks=track_clicks, sender_template_id=sender_template_id,
@@ -2977,6 +3021,7 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/send-log"
                 or u.path == "/api/tenant/send-log/csv"
                 or u.path == "/api/tenant/send-log/executions"
+                or u.path == "/api/tenant/send-log/executions/csv"
                 or u.path == "/api/tenant/autofill/pending"
                 or u.path == "/api/tenant/scheduled-sends"
                 or u.path == "/api/tenant/exclusions"
@@ -3006,6 +3051,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_send_log_csv(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/send-log/executions":
                     st, res = h_tenant_send_log_executions(con, tenant["id"], qs)
+                elif u.path == "/api/tenant/send-log/executions/csv":
+                    st, res = h_tenant_send_log_executions_csv(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/autofill/pending":
                     st, res = h_tenant_autofill_pending(con, tenant["id"])
                 elif u.path == "/api/tenant/scheduled-sends":
@@ -3946,6 +3993,37 @@ def self_test(port=8899):
       all(row["send_status"] != "SUCCESS" for row in con.execute(
           "SELECT send_status FROM target_list_members WHERE list_id=?", (list_a_id,)).fetchall()))
 
+    print("\n── 本番送信はキューに入り、送信ワーカーが実行する(T91) ──")
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "キュー件名", "body": "キュー本文", "dry_run": False}, token=key_a)
+    t("dry_run=falseはその場で送らず{queued:true, scheduled_id}を即返す",
+      st == 200 and r.get("queued") is True and bool(r.get("scheduled_id")) and "stats" not in r)
+    q_id = r["scheduled_id"]
+    row = con.execute("SELECT status, scheduled_at, dry_run FROM scheduled_sends WHERE id=?", (q_id,)).fetchone()
+    t("scheduled_sendsにPENDING・scheduled_at=今・dry_run=0で入る",
+      row["status"] == "PENDING" and row["dry_run"] == 0
+      and row["scheduled_at"] <= datetime.now().isoformat(timespec="seconds"))
+    st, r = get_auth(f"/api/tenant/scheduled-sends?list_id={list_a_id}", token=key_a)
+    t("テナントの予約一覧に順番待ち(PENDING)として出る",
+      st == 200 and any(s["id"] == q_id and s["status"] == "PENDING" for s in r["scheduled"]))
+    t("claim: 1回目は取り込める(PENDING→RUNNING)", db.claim_scheduled_send(con, q_id, "worker-1") is True)
+    t("claim: 2回目(別ワーカー)は取り込めない=二重実行しない", db.claim_scheduled_send(con, q_id, "worker-2") is False)
+    con.execute("UPDATE scheduled_sends SET claimed_at='2000-01-01T00:00:00' WHERE id=?", (q_id,))
+    con.commit()
+    stale_cut = (datetime.now() - timedelta(hours=3)).isoformat(timespec="seconds")
+    t("RUNNINGのまま長時間経った予約はPENDINGへ戻る(ワーカー障害からの復旧)",
+      db.requeue_stale_running(con, stale_cut) == 1
+      and con.execute("SELECT status FROM scheduled_sends WHERE id=?", (q_id,)).fetchone()["status"] == "PENDING")
+    import scheduled_send_cli as SSC_test
+    n_run = SSC_test.run_due(con, worker="test-worker", quiet=True)
+    row = con.execute("SELECT status, result_json, worker FROM scheduled_sends WHERE id=?", (q_id,)).fetchone()
+    t("送信ワーカー(run_due)がキューを取り込んで実行しDONEになる(Kill Switch停止中のため実送信はされない)",
+      n_run >= 1 and row["status"] == "DONE" and row["worker"] == "test-worker"
+      and "stats" in (row["result_json"] or ""))
+    st, r = get_auth(f"/api/tenant/scheduled-sends?list_id={list_a_id}", token=key_a)
+    t("予約一覧のDONE行に結果(result_json)が付く",
+      st == 200 and any(s["id"] == q_id and s["status"] == "DONE" and s.get("result_json") for s in r["scheduled"]))
+
     # 単独の小さなリストで、Kill Switch停止時の同期(STOPPED)をクリーンな状態で検証する
     # (list_aは既にdry_run分の送信履歴で埋まっており、can_contact()の判定が絡んで
     # Kill Switchまで到達しない行が混ざるため、別途まっさらな企業で確認する)
@@ -4286,6 +4364,11 @@ def self_test(port=8899):
     t("取り消し後はmanual_sent_atがNoneに戻る",
       st == 200 and next(x for x in r["log"] if x["id"] == log_id)["manual_sent_at"] is None)
 
+    st, r = get_auth("/api/tenant/send-log/executions/csv")
+    t("認証ヘッダなしのGET /api/tenant/send-log/executions/csvは401", st == 401)
+    st, r = get_auth("/api/tenant/send-log/executions/csv", token=key_a)
+    t("GET /api/tenant/send-log/executions/csv で自動送信ログ一覧のCSVが取れる(T92)",
+      st == 200 and r.get("csv", "").startswith("リストID,実行日時,リスト名") and isinstance(r.get("count"), int))
     st, r = get_auth("/api/tenant/send-log/csv")
     t("認証ヘッダなしのGET /api/tenant/send-log/csvは401", st == 401)
     st, r = get_auth("/api/tenant/send-log/csv", token=key_a)

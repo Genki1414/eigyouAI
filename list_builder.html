@@ -385,8 +385,9 @@ tr.clickable:hover{background:var(--accent-soft)}
               <label>送信対象リスト</label>
               <select id="sendLogExecListFilter"><option value="">-- 指定なし --</option></select>
             </div>
-            <div style="display:flex;align-items:flex-end">
+            <div style="display:flex;align-items:flex-end;gap:8px">
               <button id="btnSendLogExecSearch">🔍 検索</button>
+              <button class="ghost" id="btnSendLogExecCsv">📥 一覧をCSVでダウンロード</button>
             </div>
           </div>
         </div>
@@ -423,7 +424,7 @@ tr.clickable:hover{background:var(--accent-soft)}
             </div>
             <div style="display:flex;align-items:flex-end;gap:8px">
               <button class="ghost" id="btnSendLogSearch">検索</button>
-              <button class="ghost" id="btnSendLogCsv">📥 ダウンロード</button>
+              <button class="ghost" id="btnSendLogCsv">📥 会社別の明細をCSVでダウンロード</button>
             </div>
           </div>
           <div id="sendLogCounts" class="countpills"></div>
@@ -1873,6 +1874,26 @@ async function refreshSendLogExecutions() {
   }
 }
 $("btnSendLogExecSearch").addEventListener("click", refreshSendLogExecutions);
+// 自動送信ログ一覧(実行単位)のCSV(T92)。画面の絞り込み(期間・リスト)をそのまま反映
+$("btnSendLogExecCsv").addEventListener("click", async () => {
+  try {
+    const qs = new URLSearchParams();
+    const listId = $("sendLogExecListFilter").value;
+    if (listId) qs.set("list_id", listId);
+    if ($("sendLogExecDateFrom").value) qs.set("date_from", $("sendLogExecDateFrom").value);
+    if ($("sendLogExecDateTo").value) qs.set("date_to", $("sendLogExecDateTo").value);
+    const r = await call(`/api/tenant/send-log/executions/csv?${qs.toString()}`);
+    const blob = new Blob(["﻿" + r.csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `send_log_executions_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (e) {
+    alert("CSVダウンロードに失敗しました: " + e.message);
+  }
+});
 $("btnSendLogDetailBack").addEventListener("click", () => goPage("sendlog"));
 
 async function refreshSendLog() {
@@ -2567,7 +2588,7 @@ async function runFilterSearch() {
         ? `<p class="hint" style="margin-top:4px">先頭${r.sample.length}社を表示(保存前のプレビューのため。全件は保存後に「保存済みリスト」で確認できます)</p>`
         : "");
     el.innerHTML = `<div class="result ok">${r.count_before_cap.toLocaleString()}件見つかりました` +
-      (r.capped ? `(上限20,000件のため実際に保存されるのは20,000社)` : ``) + `</div>` + sampleTable;
+      (r.capped ? `(上限${r.cap.toLocaleString()}件のため実際に保存されるのは${r.cap.toLocaleString()}社)` : ``) + `</div>` + sampleTable;
     if (r.count_before_cap > 0) $("filterSaveRow").style.display = "";
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
@@ -2592,7 +2613,7 @@ async function updateFilterLiveCount() {
     const r = await call("/api/tenant/lists/preview", { method: "POST", body: JSON.stringify({ filters }) });
     if (seq !== filterLiveCountSeq) return;
     el.textContent = `該当 ${r.count_before_cap.toLocaleString()}件` +
-      (r.capped ? `(上限20,000件のため実際に保存されるのは20,000社)` : "");
+      (r.capped ? `(上限${r.cap.toLocaleString()}件のため実際に保存されるのは${r.cap.toLocaleString()}社)` : "");
   } catch (e) {
     if (seq !== filterLiveCountSeq) return;
     el.textContent = "";
@@ -3692,7 +3713,7 @@ async function renderSendForm(container, id) {
       }
       const confirmMsg = scheduling
         ? "指定した日時に本番送信を予約します。実際の企業サイトへ送信され、取り消せません。よろしいですか?"
-        : "本番送信します。実際の企業サイトへ送信され、取り消せません。よろしいですか?";
+        : "本番送信を受け付けます。数分以内に順次、実際の企業サイトへ送信され、取り消せません。よろしいですか?";
       if (!confirm(confirmMsg)) return;
 
       const payload = { subject, body, dry_run: false, track_clicks: trackClicks,
@@ -3713,51 +3734,36 @@ async function renderSendForm(container, id) {
         return;
       }
 
-      // MIKOMERU同様、送信中は専用の進捗表示に切り替える(自動送信は同期処理のため
-      // 実際のパーセンテージは分からず、送信完了までは不定進捗のアニメーションを見せる。
-      // 完了したら100%表示にして「完了」ボタンで結果を確認してもらう)。
+      // T91: 本番送信はサーバー側のキューに入り、送信ワーカーが順次実行する
+      // (この画面は受付だけ。進捗は下の「予約・送信キュー」と「自動送信ログ」で確認)。
       $("btnSend").disabled = true;
-      rEl.innerHTML = "";
-      $("sendProgressWrap").style.display = "block";
-      $("sendProgressBadge").textContent = "処理中";
-      $("sendProgressDoneRow").style.display = "none";
-      const bar = $("sendProgressBar");
-      bar.classList.remove("done"); bar.classList.add("indeterminate");
-
-      let sr = null, err = null;
+      rEl.innerHTML = `<div class="result">受付中…</div>`;
       try {
-        sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
+        const sr = await call(`/api/tenant/lists/${id}/send`, { method: "POST", body: JSON.stringify(payload) });
+        rEl.innerHTML = `<div class="result ok">送信を受け付けました(受付番号 #${sr.scheduled_id})。数分以内に送信ワーカーが順次送信します。` +
+          `進捗は下の一覧と「自動送信ログ」で確認できます。同じリストへもう一度押す必要はありません。</div>`;
+        await refreshScheduledSends(id);
       } catch (e) {
-        err = e;
+        rEl.innerHTML = `<div class="result err">${e.message}</div>`;
+      } finally {
+        $("btnSend").disabled = killSwitchStopped;
       }
-      bar.classList.remove("indeterminate"); bar.classList.add("done");
-      $("sendProgressBadge").textContent = "✓ 完了";
-      $("sendProgressDoneRow").style.display = "block";
-      $("btnSend").disabled = killSwitchStopped;
-
-      $("btnSendProgressDone").onclick = async () => {
-        $("sendProgressWrap").style.display = "none";
-        if (err) {
-          rEl.innerHTML = `<div class="result err">${err.message}</div>`;
-          return;
-        }
-        const blockedReasons = sr.stats.blocked_by_reason || {};
-        const blockedDetail = Object.entries(blockedReasons).map(([reason, n]) => `${reason}${n}`).join("・");
-        rEl.innerHTML = `<div class="result ok">対象${sr.target_count.toLocaleString()}社` +
-          `${sr.cancelled_recent ? `(過去送信対象キャンセルで${sr.cancelled_recent}社除外)` : ""} / ` +
-          `送信${sr.stats.sent} 失敗${sr.stats.failed} ` +
-          `ガードで中止${sr.stats.blocked}${blockedDetail ? `(${blockedDetail})` : ""} ` +
-          `配信停止${sr.stats.suppressed}` +
-          `${sr.stats.stopped ? ` Kill Switchで中止${sr.stats.stopped}` : ""}</div>`;
-        await refreshLists();
-      };
     });
   } catch (e) {
     container.innerHTML = `<div class="result err">${e.message}</div>`;
   }
 }
 
-const SCHEDULED_STATUS_LABELS = { PENDING: "予約中", DONE: "完了", FAILED: "失敗", CANCELLED: "キャンセル済み" };
+const SCHEDULED_STATUS_LABELS = { PENDING: "順番待ち", RUNNING: "送信中", DONE: "完了", FAILED: "失敗", CANCELLED: "キャンセル済み" };
+function scheduledResultSummary(s) {
+  if (!s.result_json) return "";
+  try {
+    const r = JSON.parse(s.result_json);
+    if (r.error) return ` ${r.error}`;
+    const st = r.stats || {};
+    return ` 対象${(r.target_count || 0).toLocaleString()}社 / 送信${st.sent || 0} 失敗${st.failed || 0} 中止${(st.blocked || 0) + (st.suppressed || 0) + (st.stopped || 0)}`;
+  } catch (e) { return ""; }
+}
 
 async function refreshScheduledSends(listId) {
   const el = $("scheduledSendsWrap");
@@ -3769,7 +3775,7 @@ async function refreshScheduledSends(listId) {
     el.innerHTML = `<table><tr><th>開始予定</th><th>件名</th><th>モード</th><th>状態</th><th></th></tr>` +
       r.scheduled.map(s => `<tr><td style="font-family:var(--mono);font-size:11px">${s.scheduled_at}</td>
         <td>${s.subject}</td><td>${s.dry_run ? "ドライラン" : "本番送信"}${s.track_clicks ? " · URL記録" : ""}</td>
-        <td><span class="pill${s.status === "DONE" ? " ok" : (s.status === "FAILED" ? " err" : "")}">${SCHEDULED_STATUS_LABELS[s.status] || s.status}</span></td>
+        <td><span class="pill${s.status === "DONE" ? " ok" : (s.status === "FAILED" ? " err" : "")}">${SCHEDULED_STATUS_LABELS[s.status] || s.status}</span><span style="font-size:11px;color:var(--steel)">${scheduledResultSummary(s)}</span></td>
         <td>${s.status === "PENDING" ? `<button class="ghost cancelScheduledBtn" data-id="${s.id}">キャンセル</button>` : "—"}</td></tr>`).join("") +
       `</table>`;
     el.querySelectorAll(".cancelScheduledBtn").forEach(btn => {

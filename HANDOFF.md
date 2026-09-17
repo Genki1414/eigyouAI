@@ -4596,6 +4596,67 @@ Hetzner(`app.ashibase.jp`=167.233.123.173、ホスト名`ubuntu-4gb-fsn1-7`、
 状態**。OSに`System restart required`(カーネル更新待ち)が出ており、都合の
 よいときに`reboot`が必要(コンテナは`restart: unless-stopped`で自動復帰)。
 
+### T91. 送信のキュー化と送信ワーカーの常駐化(会員増に備えた土台)(2026-09-17)
+
+ユーザーの問い「実利用上はどこまで耐えれる?」への回答: apiが単一スレッドで
+本番送信を同期実行していたため、誰かが数百件送ると十数分は他テナントの操作も
+止まり、nginxの60秒で画面は504。送信の実行能力も1プロセス3並列(1時間500〜
+1,000件)で、150社×4,000件/月(≒1日20,000件)には物理的に届かない。ユーザー判断:
+「会員数増えるの見越して(ワーカー増強とIP分散は)やっておきたい。システム側の
+設定だけして、実際には利用者増えてから契約でもいい」。→ コード側を
+「.envの数字を変えるだけで拡張できる」形にし、サーバー増強・プロキシ契約は
+後回しにした。
+
+- **本番送信は全部キュー経由**: `POST /api/tenant/lists/<id>/send`(dry_run=false)は
+  その場で送らず`scheduled_sends`に`scheduled_at=今`で登録して`{"queued":true,
+  "scheduled_id"}`を即返す。予約送信(scheduled_at指定)と同じテーブル・同じ実行経路。
+  ドライラン(dry_run=true)は軽いので従来通り同期で結果を返す(テスト・デモ用)。
+  `list_builder.html`の「送信する」は「受け付けました(受付番号#N)」と表示し、
+  同じ画面の予約一覧(順番待ち/送信中/完了/失敗+結果の要約)で進捗を見る。
+  不定進捗バーのUIは廃止。
+- **送信ワーカー(`scheduled_send_cli.py loop`)**: docker-composeに`sender`サービスを
+  新設し常駐(`SENDER_WORKERS`個の子プロセスが`SENDER_POLL_INTERVAL`秒おきにキューを
+  見る。子が落ちたら親が起動し直す)。予約は`db.claim_scheduled_send()`
+  (`UPDATE ... WHERE status='PENDING'`のアトミック更新)で取り込むので、
+  プロセス/台数を増やしても二重実行しない。RUNNINGのまま3時間経った予約は
+  PENDINGへ戻す(`requeue_stale_running`。send_list()は送信済みを冪等に飛ばす)。
+  `deploy/crontab`の5分おき`run-due`は外した(workerコンテナ側でChromiumが
+  起動してメモリを取り合うため)。手動の保険: `docker compose run --rm sender
+  python3 scheduled_send_cli.py run-due`。
+- **拡張は.envだけ**: `SENDER_WORKERS`(プロセス数)×`FORM_SEND_CONCURRENCY`
+  (1プロセスの並列数、.env化)=同時送信数。メモリ目安1並列≒400MB。
+  4GB→1×3、8GB→2×3、16GB→4×3。変更後`docker compose up -d sender`。
+  別サーバーで`sender`だけ動かすことも可能(DATABASE_URLでPostgresを共有)。
+- **本番で最初のデプロイ後に確認すること**: `docker compose ps`で
+  `eigyouai-sender`がUpであること、`docker compose logs sender`に
+  「送信ワーカー起動」が出ること。**これが動いていないと本番送信が
+  「順番待ち」のまま進まない**(monitor.pyにこの監視は未追加=要フォローアップ)。
+- **後でやること(契約が要るもの)**: (1)Hetznerでサーバーを8〜16GBへリサイズ→
+  .envの2値を上げる。(2)送信元IPの分散: `FORM_PROXY_POOL`(T42実装済み)に
+  プロキシを入れる。候補はHANDOFFの下記「プロキシ候補」参照。
+
+**確認**: `api.py test`にキュー化(queuedが返る・PENDING行が出来る・run_dueで
+DONEになる・claimの二重取り込み防止・stale requeue)を追加。Playwrightで
+「送信する」→受付表示→一覧に順番待ち→`run-due`実行→完了と要約表示、を確認。
+
+### T92. リスト上限の撤廃・自動送信ログ一覧のCSV(2026-09-17)
+
+ユーザー: 「466,593件見つかりました(上限20,000件のため実際に保存されるのは
+20,000社)。リスト登録も上限なくして」「送信ログをCSVで出せるようにして」。
+
+- `target_lists.py`: `MAX_LIST_SIZE`/`MAX_CSV_ROWS`を`.env`から読み既定-1=無制限。
+  `preview_filter()`の戻りに`cap`を追加(画面の「上限N件のため…」文言は
+  この値を使う。無制限なら`capped`は常にfalse)。`create_from_filter()`は
+  無制限のときLIMITを付けない。`products.build_list()`のcount上限も同様。
+  **注意**: 46万社のリストはtarget_list_membersに46万行入る(数秒〜数十秒)。
+  送信は別途テナントの送信枠と送信ワーカーの処理能力に従う(T91)。
+- 送信ログCSV: 会社別の明細CSV(`GET /api/tenant/send-log/csv`)は元からあったが、
+  「自動送信ログ」ページの上段(実行単位の一覧)にはCSVが無かった。
+  `GET /api/tenant/send-log/executions/csv`(画面と同じ期間・リストの絞り込み)を
+  追加し、一覧の検索ボタン横に「📥 一覧をCSVでダウンロード」を置いた。既存の
+  会社別ボタンは「📥 会社別の明細をCSVでダウンロード」に改名して区別。
+  `api.py test`に2件追加。
+
 ### T87. デモ→本契約の切り替え(hq.html)(2026-09-17)
 
 T85/T86の時点で「契約が決まったらhq.htmlでテナント作成(client)+プラン設定+

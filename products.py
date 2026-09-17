@@ -240,7 +240,9 @@ def build_list_for_product(con, tenant_id, product_id, count, list_name=None):
     product = get_product(con, tenant_id, product_id)
     if not product:
         return {"error": "指定された商材が見つかりません"}
-    count = max(1, min(int(count), TL.MAX_LIST_SIZE))
+    count = max(1, int(count))
+    if TL.MAX_LIST_SIZE > 0:
+        count = min(count, TL.MAX_LIST_SIZE)
 
     try:
         filters, reasoning = classify_targeting(product["name"], product["description"])

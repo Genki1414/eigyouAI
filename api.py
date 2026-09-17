@@ -71,6 +71,11 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/ops/plan-change-requests/<id>/resolve   申請を対応済みにする
                            (実際のプラン変更=tenants.plan_name等の更新は
                            自動化せず、本部が別途手動で行う。T53)
+  POST /api/ops/tenants/<id>/convert  {"plan_name","monthly_send_quota","daily_send_quota"(任意),
+                           "monthly_fee_yen"(任意)} → デモテナントを本契約に切り替える(T87)。
+                           kind='demo'→'client'、プラン・送信枠・月額・contracted_atを設定、
+                           テナント別Kill Switchを解除、pendingの契約申し込みを対応済みに。
+                           何社目の契約か(campaign_status)を返す。hq.html専用
   GET  /api/ops/inquiries              お問い合わせ(契約申し込み・質問)の一覧(T85)
   POST /api/ops/inquiries/<id>/resolve 対応済みにする(契約の成立・本契約化は自動化しない)
   POST /api/ops/tenants/<id>/quota-purchase  {"qty","unit_price_yen"(任意),
@@ -373,6 +378,7 @@ _OPS_TENANT_STAFF_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/staff$")
 _OPS_TENANT_QUOTA_PURCHASE_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/quota-purchase$")
 _OPS_PLAN_CHANGE_RESOLVE_PATH_RE = re.compile(r"^/api/ops/plan-change-requests/(\d+)/resolve$")
 _OPS_INQUIRY_RESOLVE_PATH_RE = re.compile(r"^/api/ops/inquiries/(\d+)/resolve$")
+_OPS_TENANT_CONVERT_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/convert$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
@@ -2089,7 +2095,8 @@ def h_tenant_kill_switch_status(con, tenant_id):
 def h_ops_tenants_list(con):
     """api_keyは含めない(発行時に一度きり表示する運用。list_builder.htmlの
     担当者一覧が個々のapi_keyを返さないのと同じ方針)。"""
-    rows = con.execute("""SELECT id, name, kind, sender_name, sender_email, created_at
+    rows = con.execute("""SELECT id, name, kind, sender_name, sender_email, created_at,
+            plan_name, monthly_send_quota, monthly_fee_yen, contracted_at
         FROM tenants ORDER BY created_at DESC""").fetchall()
     return 200, {"tenants": [dict(r) for r in rows]}
 
@@ -2124,12 +2131,74 @@ def h_ops_tenants_create(con, data):
     if err:
         return 400, {"error": err}
 
+    monthly_fee_yen = data.get("monthly_fee_yen")
+    if monthly_fee_yen is not None and (not isinstance(monthly_fee_yen, int)
+                                        or isinstance(monthly_fee_yen, bool) or monthly_fee_yen < 0):
+        return 400, {"error": "monthly_fee_yenは0以上の整数で指定してください"}
+    plan_name = (data.get("plan_name") or "").strip() or None
+
     tenant_id, api_key = offers.add_tenant(con, name, sender_email, kind=kind,
                                             sender_name=sender_name, sender_address=sender_address,
                                             optout_url=optout_url,
                                             monthly_send_quota=monthly_send_quota,
                                             daily_send_quota=daily_send_quota)
+    # 本契約テナント(client)は作成=契約成立とみなしcontracted_atを入れる
+    # (キャンペーンの「何社目」はこの日時順。T86/T87)
+    con.execute("UPDATE tenants SET plan_name=?, monthly_fee_yen=?, contracted_at=? WHERE id=?",
+                (plan_name, monthly_fee_yen,
+                 datetime.now().isoformat(timespec="seconds") if kind == "client" else None, tenant_id))
+    con.commit()
     return 200, {"ok": True, "tenant_id": tenant_id, "api_key": api_key}
+
+
+def h_ops_tenant_convert(con, tenant_id, data):
+    """デモテナント(T84)を本契約に切り替える(T87)。手作業だった
+    「kind変更・プラン/送信枠の設定・Kill Switch解除・申し込みの対応済み化」を
+    1回の操作にまとめる。デモ利用者はAPIキーもlocalStorageの接続情報もそのまま
+    使い続けられる(テナントIDが変わらないため、作ったリスト・商材も引き継がれる)。
+    契約時の月額(monthly_fee_yen)はキャンペーン価格を契約中据え置くための記録で、
+    課金処理は行わない(請求は別途)。"""
+    row = con.execute("SELECT id, kind FROM tenants WHERE id=?", (tenant_id,)).fetchone()
+    if not row:
+        return 404, {"error": "テナントが見つかりません"}
+    if row["kind"] != "demo":
+        return 400, {"error": f"デモテナントではありません(kind={row['kind']})。既に本契約済みか、別種別のテナントです"}
+    plan_name = (data.get("plan_name") or "").strip()
+    if not plan_name:
+        return 400, {"error": "plan_nameは必須です"}
+
+    def positive_int(key, required):
+        value = data.get(key)
+        if value is None:
+            return (None, f"{key}は必須です") if required else (None, None)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            return None, f"{key}は正の整数で指定してください"
+        return value, None
+    monthly_send_quota, err = positive_int("monthly_send_quota", True)
+    if err:
+        return 400, {"error": err}
+    daily_send_quota, err = positive_int("daily_send_quota", False)
+    if err:
+        return 400, {"error": err}
+    monthly_fee_yen = data.get("monthly_fee_yen")
+    if monthly_fee_yen is not None and (not isinstance(monthly_fee_yen, int)
+                                        or isinstance(monthly_fee_yen, bool) or monthly_fee_yen < 0):
+        return 400, {"error": "monthly_fee_yenは0以上の整数で指定してください"}
+
+    now = datetime.now().isoformat(timespec="seconds")
+    con.execute("""UPDATE tenants SET kind='client', plan_name=?, monthly_send_quota=?,
+        daily_send_quota=?, monthly_fee_yen=?, contracted_at=? WHERE id=?""",
+        (plan_name, monthly_send_quota, daily_send_quota, monthly_fee_yen, now, tenant_id))
+    con.execute("""UPDATE inquiries SET status='done', resolved_at=?
+        WHERE tenant_id=? AND kind='contract' AND status='pending'""", (now, tenant_id))
+    con.commit()
+    db.set_tenant_kill_switch(con, tenant_id, False, updated_by="hq_convert")
+
+    import config as C
+    n = con.execute("""SELECT COUNT(*) FROM tenants WHERE kind='client'
+        AND COALESCE(contracted_at, created_at) >= ?""", (C.CAMPAIGN_START,)).fetchone()[0]
+    return 200, {"ok": True, "tenant_id": tenant_id, "contract_no": n,
+                 "campaign": campaign_status(n)}
 
 
 def h_ops_tenant_staff_create(con, tenant_id, data):
@@ -2301,11 +2370,13 @@ def campaign_status(contracted):
 
 
 def h_campaign_get(con):
-    """認証不要。契約社数はhq.htmlで作られた本契約テナント(kind='client'、
-    CAMPAIGN_START以降)の数。申し込み(inquiries)ではなく契約成立で数える。"""
+    """認証不要。契約社数は本契約テナント(kind='client')のうち契約成立日時
+    (contracted_at。無い旧データはcreated_at)がCAMPAIGN_START以降のものの数。
+    hq.htmlのテナント作成・デモ→本契約の切り替え(T87)のどちらでも増える。
+    申し込み(inquiries)ではなく契約成立で数える。"""
     import config as C
-    n = con.execute("SELECT COUNT(*) FROM tenants WHERE kind='client' AND created_at >= ?",
-                    (C.CAMPAIGN_START,)).fetchone()[0]
+    n = con.execute("""SELECT COUNT(*) FROM tenants WHERE kind='client'
+        AND COALESCE(contracted_at, created_at) >= ?""", (C.CAMPAIGN_START,)).fetchone()[0]
     s = campaign_status(n)
     s.update({"plan_label": C.CAMPAIGN_PLAN_LABEL, "regular_price_yen": C.CAMPAIGN_REGULAR_PRICE_YEN,
               "tiers": [{"limit": limit, "price_yen": price} for limit, price in C.CAMPAIGN_TIERS]})
@@ -2435,6 +2506,17 @@ class Handler(BaseHTTPRequestHandler):
             con = self._con()
             try:
                 st, res = h_ops_tenant_quota_purchase(con, int(ops_quota_purchase_match.group(1)), data)
+                return self._json(st, res)
+            finally:
+                con.close()
+
+        ops_convert_match = _OPS_TENANT_CONVERT_PATH_RE.match(path)
+        if ops_convert_match:
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                st, res = h_ops_tenant_convert(con, int(ops_convert_match.group(1)), data)
                 return self._json(st, res)
             finally:
                 con.close()
@@ -4448,6 +4530,56 @@ def self_test(port=8899):
       st == 200 and r["tiers"] == [{"limit": 50, "price_yen": 10000}, {"limit": 100, "price_yen": 20000},
                                     {"limit": 150, "price_yen": 30000}]
       and r["regular_price_yen"] == 40000 and isinstance(r["contracted"], int))
+
+    print("\n── デモ→本契約の切り替え(T87。POST /api/ops/tenants/<id>/convert) ──")
+    con.execute("DELETE FROM inquiries WHERE tenant_id IN (SELECT id FROM tenants WHERE sender_email='demo-test-convert@example.co.jp')")
+    con.execute("DELETE FROM tenant_kill_switch WHERE tenant_id IN (SELECT id FROM tenants WHERE sender_email='demo-test-convert@example.co.jp')")
+    con.execute("DELETE FROM offers WHERE tenant_id IN (SELECT id FROM tenants WHERE sender_email='demo-test-convert@example.co.jp')")
+    con.execute("DELETE FROM tenants WHERE sender_email='demo-test-convert@example.co.jp'")
+    con.commit()
+    st, r = post("/api/demo/signup", {"email": "demo-test-convert@example.co.jp", "company_name": "本契約化テスト社"})
+    conv_tid, conv_key = r["tenant_id"], r["api_key"]
+    post_auth("/api/tenant/inquiry", {"kind": "contract", "contact_name": "担当", "requested_plan": "ライト"}, token=conv_key)
+    conv_body = {"plan_name": "ライト", "monthly_send_quota": 4000, "monthly_fee_yen": 10000}
+    st, r = post_auth(f"/api/ops/tenants/{conv_tid}/convert", conv_body)
+    t("認証ヘッダなしは401", st == 401)
+    st, r = post_auth("/api/ops/tenants/999999999/convert", conv_body, token=ops_key)
+    t("存在しないテナントは404", st == 404)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/convert", conv_body, token=ops_key)
+    t("デモ以外のテナントは400", st == 400)
+    st, r = post_auth(f"/api/ops/tenants/{conv_tid}/convert", {"plan_name": "ライト"}, token=ops_key)
+    t("monthly_send_quota未指定は400", st == 400)
+    st, r = get_auth("/api/campaign")
+    conv_before = r["contracted"]
+    st, r = post_auth(f"/api/ops/tenants/{conv_tid}/convert", conv_body, token=ops_key)
+    t("切り替え成功。何社目の契約かが返る", st == 200 and r["contract_no"] == conv_before + 1
+      and r["campaign"]["contracted"] == conv_before + 1)
+    row = con.execute("SELECT kind, plan_name, monthly_send_quota, daily_send_quota, monthly_fee_yen, contracted_at "
+                      "FROM tenants WHERE id=?", (conv_tid,)).fetchone()
+    t("kind=client・プラン名・送信枠・月額・契約日時が入る",
+      row["kind"] == "client" and row["plan_name"] == "ライト" and row["monthly_send_quota"] == 4000
+      and row["daily_send_quota"] is None and row["monthly_fee_yen"] == 10000 and bool(row["contracted_at"]))
+    t("テナント別Kill Switchが解除される",
+      con.execute("SELECT 1 FROM tenant_kill_switch WHERE tenant_id=?", (conv_tid,)).fetchone() is None)
+    t("pendingだった契約申し込みが対応済みになる",
+      con.execute("SELECT status FROM inquiries WHERE tenant_id=? AND kind='contract'", (conv_tid,)).fetchone()["status"] == "done")
+    st, r = get_auth("/api/campaign")
+    t("GET /api/campaignのcontractedが1増える", r["contracted"] == conv_before + 1)
+    st, r = post_auth(f"/api/ops/tenants/{conv_tid}/convert", conv_body, token=ops_key)
+    t("二度目の切り替えは400(既にclient)", st == 400)
+    st, r = get_auth("/api/tenant/dashboard", token=conv_key)
+    t("同じAPIキーのまま管理画面はデモ扱いでなくなり、プラン表示が契約内容になる",
+      st == 200 and r["is_demo"] is False and r["quota"]["plan_name"] == "ライト"
+      and r["quota"]["monthly_send_quota"] == 4000)
+    st, r = get_auth("/api/ops/tenants", token=ops_key)
+    conv_row = next((x for x in r["tenants"] if x["id"] == conv_tid), None)
+    t("GET /api/ops/tenantsにプラン・月額・契約日が出る",
+      conv_row is not None and conv_row["plan_name"] == "ライト" and conv_row["monthly_fee_yen"] == 10000
+      and bool(conv_row["contracted_at"]))
+    con.execute("DELETE FROM inquiries WHERE tenant_id=?", (conv_tid,))
+    con.execute("DELETE FROM offers WHERE tenant_id=?", (conv_tid,))
+    con.execute("DELETE FROM tenants WHERE id=?", (conv_tid,))
+    con.commit()
 
     con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (tid_a,))
     con.commit()

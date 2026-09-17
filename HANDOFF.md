@@ -4596,6 +4596,36 @@ Hetzner(`app.ashibase.jp`=167.233.123.173、ホスト名`ubuntu-4gb-fsn1-7`、
 状態**。OSに`System restart required`(カーネル更新待ち)が出ており、都合の
 よいときに`reboot`が必要(コンテナは`restart: unless-stopped`で自動復帰)。
 
+### T87. デモ→本契約の切り替え(hq.html)(2026-09-17)
+
+T85/T86の時点で「契約が決まったらhq.htmlでテナント作成(client)+プラン設定+
+Kill Switch解除を手作業で」という運用だったのを、ユーザー指示「整備して」で
+1操作にまとめた。デモテナントはテナントIDもAPIキーもそのままで本契約に
+なる(利用者は再ログイン不要、デモ中に作ったリスト・商材も引き継がれる)。
+
+- `db.py`: `tenants`に`contracted_at`(契約成立日時)・`monthly_fee_yen`(契約時の
+  月額。キャンペーン価格の据え置き記録)を後付け。
+- `api.py`: `POST /api/ops/tenants/<id>/convert`(hq専用)。kind='demo'以外は400。
+  `plan_name`・`monthly_send_quota`必須、`daily_send_quota`/`monthly_fee_yen`任意。
+  kind→client、プラン・枠・月額・contracted_atを設定、テナント別Kill Switch解除、
+  そのテナントのpendingな契約申し込み(inquiries)を対応済み化、何社目の契約か
+  (`contract_no`)を返す。`h_ops_tenants_create`もclient作成時に
+  `contracted_at`(+任意の`plan_name`/`monthly_fee_yen`)を入れるようにした。
+  **キャンペーンの社数(`/api/campaign`)は`COALESCE(contracted_at, created_at)`
+  で数える**ため、テナント作成・デモ切り替えのどちらでも正しく増える。
+  `GET /api/ops/tenants`にプラン・月額・契約日を追加。
+- `hq.html`: 「デモ→本契約」ページ(デモテナント選択・プラン選択→送信枠と月額を
+  自動入力。ライトはキャンペーンの現在価格が入る・確認ダイアログ→実行→
+  「◯社目の契約」を表示)。テナント一覧のデモ行と、お問い合わせ一覧のデモ利用者
+  からの契約申し込み行に「本契約に切り替える」ボタンを置き、同ページへ遷移して
+  対象を選択済みにする。
+- 請求・決済はしない(別途)。契約社数はこの操作(または手動のテナント作成)で
+  しか増えないので、**契約成立時に必ずこの操作を行う**(T86の注意と同じ)。
+
+**確認**: `api.py test`に12件追加(401/404/デモ以外400/必須項目/成功時のDB内容/
+Kill Switch解除/申し込みdone化/campaign加算/二度目400/同じAPIキーで管理画面が
+本契約表示/ops一覧の列)。Playwrightでhq.htmlの一覧→切り替え→結果表示まで確認。
+
 ---
 
 ## 3. やってはいけないこと

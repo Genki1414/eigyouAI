@@ -88,6 +88,7 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
       <div class="navitem" data-page="tenantList">テナント一覧</div>
       <div class="navitem" data-page="planRequests">プラン変更申請</div>
       <div class="navitem" data-page="inquiries">お問い合わせ・契約申込</div>
+      <div class="navitem" data-page="convert">デモ→本契約</div>
     </div>
   </nav>
   <div class="foot">list_builder.html等の顧客向け画面とは<br>完全に切り離しています</div>
@@ -188,7 +189,7 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
     <div class="card">
       <button class="ghost" id="btnRefreshTenants">再読込</button>
       <table id="tenantTable" style="display:none">
-        <thead><tr><th>ID</th><th>会社名</th><th>種別</th><th>送信元</th><th>作成日</th></tr></thead>
+        <thead><tr><th>ID</th><th>会社名</th><th>種別</th><th>プラン</th><th>月額</th><th>送信元</th><th>作成日</th><th>契約日</th><th></th></tr></thead>
         <tbody id="tenantTbody"></tbody>
       </table>
     </div>
@@ -220,6 +221,34 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
     </div>
   </div>
 
+  <div class="page" data-page="convert">
+    <div class="card">
+      <div class="hint">デモ利用者との契約が決まったら、ここで本契約に切り替えます。1回の操作で「種別をclientに変更・プランと
+        送信枠を設定・送信停止(Kill Switch)を解除・契約申し込みを対応済み化」が行われ、利用者は同じログイン情報のまま
+        送信できるようになります。月額はキャンペーンの何社目かで自動計算されます(契約中はこの金額で据え置き)。
+        請求・決済は行いません(別途)。</div>
+      <div class="hint" id="convertCampaign" style="margin-top:6px"></div>
+      <div class="row">
+        <div><label>対象のデモテナント</label>
+          <select id="convertTenant"><option value="">-- 選択してください --</option></select></div>
+        <div><label>プラン</label>
+        <select id="convertPlan">
+          <option value="ミニマム" data-quota="500" data-fee="8000">ミニマム(500件/月) 8,000円</option>
+          <option value="スターター" data-quota="1000" data-fee="13000">スターター(1,000件/月) 13,000円</option>
+          <option value="ライト" data-quota="4000" data-fee="40000" selected>ライト(4,000件/月) 40,000円 ※先着キャンペーン対象</option>
+          <option value="ベーシック" data-quota="10000" data-fee="85000">ベーシック(10,000件/月) 85,000円</option>
+          <option value="プレミアム" data-quota="20000" data-fee="150000">プレミアム(20,000件/月) 150,000円</option>
+        </select></div>
+      </div>
+      <div class="row">
+        <div><label>月間送信数(件)</label><input type="number" id="convertQuota" value="4000" min="1"></div>
+        <div><label>月額(円。ライトはキャンペーン価格が自動で入ります。個別条件があれば書き換え)</label><input type="number" id="convertFee" value="40000" min="0"></div>
+      </div>
+      <button id="btnConvert">本契約に切り替える</button>
+      <div class="result" id="convertResult" style="display:none"></div>
+    </div>
+  </div>
+
 </div>
 </div>
 </div>
@@ -240,6 +269,7 @@ const PAGE_TITLES = {
   tenantList: "テナント一覧",
   planRequests: "プラン変更申請",
   inquiries: "お問い合わせ・契約申込",
+  convert: "デモ→本契約の切り替え",
 };
 function goPage(pageId) {
   document.querySelectorAll(".navitem").forEach(n => n.classList.toggle("active", n.dataset.page === pageId));
@@ -269,16 +299,80 @@ function showResult(el, ok, text) {
 async function refreshTenants() {
   const { tenants } = await call("/api/ops/tenants");
   const tbody = $("tenantTbody");
+  const fmtDate = s => escapeHtml((s || "").replace("T", " "));
   tbody.innerHTML = tenants.map(t =>
     `<tr><td>${t.id}</td><td>${escapeHtml(t.name)}</td><td>${escapeHtml(t.kind)}</td>` +
-    `<td>${escapeHtml(t.sender_email)}</td><td>${escapeHtml(t.created_at || "")}</td></tr>`
+    `<td>${escapeHtml(t.plan_name || "")}</td>` +
+    `<td>${t.monthly_fee_yen != null ? t.monthly_fee_yen.toLocaleString() + "円" : ""}</td>` +
+    `<td>${escapeHtml(t.sender_email)}</td><td>${fmtDate(t.created_at)}</td><td>${fmtDate(t.contracted_at)}</td>` +
+    `<td>${t.kind === "demo" ? `<button class="ghost convertBtn" data-id="${t.id}">本契約に切り替える</button>` : ""}</td></tr>`
   ).join("");
+  tbody.querySelectorAll(".convertBtn").forEach(btn => btn.addEventListener("click", () => openConvert(btn.dataset.id)));
   $("tenantTable").style.display = tenants.length ? "table" : "none";
   const sel = $("sTenantId");
   const prev = sel.value;
   sel.innerHTML = tenants.map(t => `<option value="${t.id}">${t.id}: ${escapeHtml(t.name)}</option>`).join("");
   if (prev && tenants.some(t => String(t.id) === prev)) sel.value = prev;
+  // デモ→本契約ページのプルダウン(デモテナントのみ)
+  const csel = $("convertTenant");
+  const cprev = csel.value;
+  csel.innerHTML = `<option value="">-- 選択してください --</option>` +
+    tenants.filter(t => t.kind === "demo").map(t =>
+      `<option value="${t.id}">${t.id}: ${escapeHtml(t.name)} (${escapeHtml(t.sender_email)})</option>`).join("");
+  if (cprev && tenants.some(t => String(t.id) === cprev && t.kind === "demo")) csel.value = cprev;
 }
+
+// ── デモ→本契約の切り替え(T87) ──
+let campaignNow = null;
+async function refreshConvertCampaign() {
+  try {
+    campaignNow = await call("/api/campaign");
+    $("convertCampaign").textContent = campaignNow.remaining_in_tier === null
+      ? `キャンペーン枠は終了。次の契約は通常価格 月額${campaignNow.price_yen.toLocaleString()}円`
+      : `次の契約は${campaignNow.next_no}社目 → ライトプランはキャンペーン価格 月額${campaignNow.price_yen.toLocaleString()}円(この価格はあと${campaignNow.remaining_in_tier}社)`;
+  } catch (e) {
+    campaignNow = null;
+    $("convertCampaign").textContent = "";
+  }
+  applyConvertPlan();
+}
+function applyConvertPlan() {
+  const opt = $("convertPlan").selectedOptions[0];
+  $("convertQuota").value = opt.dataset.quota;
+  const isCampaign = opt.value === "ライト" && campaignNow && campaignNow.remaining_in_tier !== null;
+  $("convertFee").value = isCampaign ? campaignNow.price_yen : opt.dataset.fee;
+}
+function openConvert(tenantId) {
+  goPage("convert");
+  $("convertTenant").value = String(tenantId);
+  $("convertResult").style.display = "none";
+  refreshConvertCampaign();
+}
+$("convertPlan").addEventListener("change", applyConvertPlan);
+$("btnConvert").addEventListener("click", async () => {
+  const el = $("convertResult");
+  const tid = $("convertTenant").value;
+  if (!tid) { showResult(el, false, "対象のデモテナントを選択してください"); return; }
+  const plan = $("convertPlan").value;
+  const quota = Number($("convertQuota").value);
+  const fee = Number($("convertFee").value);
+  if (!confirm(`テナント#${tid} を本契約に切り替えます。\nプラン: ${plan} / 月間${quota.toLocaleString()}件 / 月額${fee.toLocaleString()}円\n送信停止も解除され、実際の企業への送信ができるようになります。よろしいですか?`)) return;
+  $("btnConvert").disabled = true;
+  try {
+    const r = await call(`/api/ops/tenants/${tid}/convert`, {
+      method: "POST",
+      body: JSON.stringify({ plan_name: plan, monthly_send_quota: quota, monthly_fee_yen: fee }),
+    });
+    showResult(el, true, `切り替えました。この契約は${r.contract_no}社目です(月額${fee.toLocaleString()}円)。利用者は同じログイン情報のまま送信できます。`);
+    await refreshTenants();
+    await refreshInquiries();
+    await refreshConvertCampaign();
+  } catch (e) {
+    showResult(el, false, e.message);
+  } finally {
+    $("btnConvert").disabled = false;
+  }
+});
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -332,7 +426,8 @@ async function refreshInquiries() {
       <td>${escapeHtml(r.requested_plan || "")}</td>
       <td style="white-space:pre-wrap;min-width:200px">${escapeHtml(r.message || "")}</td>
       <td style="white-space:nowrap">${escapeHtml((r.created_at || "").replace("T", " "))}</td>
-      <td style="white-space:nowrap">${r.status === "pending" ? `<button class="ghost inquiryResolveBtn" data-id="${r.id}">対応済みにする</button>` : ""}</td>
+      <td style="white-space:nowrap">${r.status === "pending" ? `<button class="ghost inquiryResolveBtn" data-id="${r.id}">対応済みにする</button>` : ""}
+        ${r.status === "pending" && r.kind === "contract" && r.tenant_id ? `<button class="ghost inquiryConvertBtn" data-tenant="${r.tenant_id}" style="margin-top:4px">本契約に切り替える</button>` : ""}</td>
     </tr>`).join("");
   tbody.querySelectorAll(".inquiryResolveBtn").forEach(btn => {
     btn.addEventListener("click", async () => {
@@ -346,6 +441,8 @@ async function refreshInquiries() {
       }
     });
   });
+  tbody.querySelectorAll(".inquiryConvertBtn").forEach(btn =>
+    btn.addEventListener("click", () => openConvert(btn.dataset.tenant)));
   $("inquiryTable").style.display = inquiries.length ? "table" : "none";
 }
 $("btnRefreshInquiries").addEventListener("click", () => refreshInquiries().catch(e => alert(e.message)));
@@ -359,6 +456,7 @@ async function doConnect() {
     await refreshTenants();
     await refreshPlanRequests();
     await refreshInquiries();
+    await refreshConvertCampaign();
     $("connStatus").textContent = "接続済み";
     $("connStatus").className = "status on";
     $("navGated").classList.add("show");

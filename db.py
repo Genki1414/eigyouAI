@@ -969,7 +969,9 @@ def get_quota_status(con, tenant_id):
     import config as C
     row = con.execute("SELECT monthly_send_quota, plan_name FROM tenants WHERE id=?",
                        (tenant_id,)).fetchone()
-    base = (row["monthly_send_quota"] if row and row["monthly_send_quota"]
+    # 0は「送信枠なし」(デモテナント。T84)として尊重する。truthy判定だと0が
+    # 既定値4000へ化けて、枠ゼロのつもりが通常プラン相当の枠になってしまう
+    base = (row["monthly_send_quota"] if row and row["monthly_send_quota"] is not None
             else C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT)
     plan_name = row["plan_name"] if row else None
     month_ago = (datetime.now() - timedelta(days=30)).isoformat(timespec="seconds")

@@ -1380,7 +1380,7 @@ async function refreshKillSwitch() {
     const r = await call("/api/tenant/kill-switch");
     killSwitchStopped = !!r.stopped;
     if (killSwitchStopped) {
-      banner.textContent = `⚠ 現在、本番送信は停止されています(${r.reason || "理由未記入"})。ドライランは引き続き利用できます。`;
+      banner.textContent = `⚠ 現在、本番送信は停止されています(${r.reason || "理由未記入"})。`;
       banner.style.display = "block";
     } else {
       banner.style.display = "none";

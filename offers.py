@@ -172,9 +172,9 @@ DEMO_SIGNUP_DAILY_CAP = 50
 def create_demo_tenant(con, email, company_name=None):
     """LPの「今すぐデモを試す」から呼ばれる、承認不要・自己発行のデモアカウント
     (T84)。add_tenant()を土台にしつつ、本番送信を絶対にできないようテナント別
-    Kill Switchで最初から停止済みにする — senders.pyのdry_run分岐は
-    Kill Switch・クォータの両方をバイパスするため、ドライラン(「何件中何件
-    送れるか」等のシミュレーション)は通常通り体験できる。
+    Kill Switchで最初から停止済みにし、送信枠(monthly/daily_send_quota)も0にする。
+    list_builder.htmlはKill Switch停止中は送信ボタン自体を無効化するため、
+    デモ利用者はリスト作成・AI判断・文面生成までを操作でき、送信だけができない。
 
     本番のAPIキー発行(add_tenant)と違い、ここは認証なしで誰でも呼べる公開
     エンドポイント(POST /api/demo/signup)から使われるため、悪用を見込んだ
@@ -203,9 +203,10 @@ def create_demo_tenant(con, email, company_name=None):
     name = (company_name or "").strip()[:200] or f"デモ利用({email})"
     tid, api_key = add_tenant(con, name, email, kind="demo",
                                monthly_send_quota=0, daily_send_quota=0)
+    con.execute("UPDATE tenants SET plan_name='デモ' WHERE id=?", (tid,))
     import db
     db.set_tenant_kill_switch(con, tid, True,
-        reason="デモアカウントのため本番送信はできません(ドライランのみ利用可能)",
+        reason="デモアカウントのため、実際の企業への送信はできません",
         updated_by="demo_signup")
     return {"tenant_id": tid, "api_key": api_key, "name": name}
 

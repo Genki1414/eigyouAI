@@ -419,7 +419,7 @@ class FormSender(BaseSender):
             monthly_q = db.get_quota_status(self.con, self.tenant_id)["effective_quota_30d"]
             row = self.con.execute(
                 "SELECT daily_send_quota FROM tenants WHERE id=?", (self.tenant_id,)).fetchone()
-            daily_q = (row["daily_send_quota"] if row and row["daily_send_quota"]
+            daily_q = (row["daily_send_quota"] if row and row["daily_send_quota"] is not None
                        else C.FORM_MAX_PER_TENANT_PER_DAY_DEFAULT)
             self._tenant_quota = (monthly_q, daily_q)
         monthly_quota, daily_quota = self._tenant_quota

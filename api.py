@@ -1747,8 +1747,10 @@ def h_tenant_dashboard(con, tenant_id):
     tenant_row = con.execute(
         "SELECT plan_name, monthly_send_quota, daily_send_quota FROM tenants WHERE id=?",
         (tenant_id,)).fetchone()
-    monthly_quota = tenant_row["monthly_send_quota"] or C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT
-    daily_quota = tenant_row["daily_send_quota"] or C.FORM_MAX_PER_TENANT_PER_DAY_DEFAULT
+    monthly_quota = (tenant_row["monthly_send_quota"] if tenant_row["monthly_send_quota"] is not None
+                     else C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT)
+    daily_quota = (tenant_row["daily_send_quota"] if tenant_row["daily_send_quota"] is not None
+                   else C.FORM_MAX_PER_TENANT_PER_DAY_DEFAULT)
     plan_name = tenant_row["plan_name"] or f"月間{monthly_quota:,}通プラン"
 
     return 200, {
@@ -2967,6 +2969,13 @@ def self_test(port=8899):
                                   (demo_tenant_id,)).fetchone()
     t("monthly/daily_send_quotaも0で二重に防御されている",
       demo_quota_row["monthly_send_quota"] == 0 and demo_quota_row["daily_send_quota"] == 0)
+    # 0がtruthy判定で既定値(4000)へ化けると「枠ゼロ」の防御が空振りする
+    # (2026-09-17にローカル検証で発覚し修正)。表示側・判定側の両方で0のまま扱われること
+    t("クォータ0は既定値へ化けず、実効クォータも0のまま(db.get_quota_status)",
+      db.get_quota_status(con, demo_tenant_id)["effective_quota_30d"] == 0)
+    st, r = get_auth("/api/tenant/dashboard", token=demo_api_key)
+    t("ダッシュボードのプラン表示もデモ用(plan_name='デモ'・月間上限0)",
+      st == 200 and r["quota"]["plan_name"] == "デモ" and r["quota"]["monthly_send_quota"] == 0)
 
     # kill_switch_status()は全体停止を最優先で返すため、テナント別の理由文言を
     # 確認する間だけ一時的に全体停止を解除する(Kill Switchのテスト章と同じ手法)

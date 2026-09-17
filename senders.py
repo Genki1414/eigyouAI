@@ -374,6 +374,22 @@ class FormSender(BaseSender):
                                     # 初回呼び出し時に1回だけtenantsを読んでキャッシュする
                                     # (1回の一括送信中に何百回も呼ばれるため)
 
+    def _load_tenant_quota(self):
+        """テナントの(月間実効クォータ, 日次クォータ)を1回だけ読んでキャッシュする。
+        月間クォータはdb.get_quota_status()に委譲する(tenants.monthly_send_quotaに
+        T55のクォータ追加購入<quota_purchases、直近30日分>を足した実効値。
+        ここと表示側<GET /api/tenant/quota>で別々に計算すると、表示上は余裕が
+        あるのに送信はブロックされるという食い違いが起きるため一本化している)。
+        -1(C.QUOTA_UNLIMITED)は上限なし。"""
+        import config as C
+        import db
+        monthly_q = db.get_quota_status(self.con, self.tenant_id)["effective_quota_30d"]
+        row = self.con.execute(
+            "SELECT daily_send_quota FROM tenants WHERE id=?", (self.tenant_id,)).fetchone()
+        daily_q = (row["daily_send_quota"] if row and row["daily_send_quota"] is not None
+                   else C.FORM_MAX_PER_TENANT_PER_DAY_DEFAULT)
+        self._tenant_quota = (monthly_q, daily_q)
+
     def _check_quota(self):
         """グローバル(全テナント合算)のサーキットブレーカーと、テナントごとの
         公平な取り分の両方を見る。件数は成否を問わず試行数でカウントする
@@ -389,7 +405,15 @@ class FormSender(BaseSender):
         import config as C
 
         self._run_count += 1
-        if self._run_count > C.FORM_MAX_PER_RUN:
+        # テナントの月間クォータが「上限なし」(-1。T89/T90)なら、1回の実行あたりの上限と
+        # テナント別の1時間あたり上限も外す(リスト全社への一括送信を許す)。全体の
+        # サーキットブレーカー(FORM_MAX_PER_HOUR/DAY)だけは最終防波堤として残す。
+        tenant_unlimited = False
+        if self.tenant_id is not None:
+            if self._tenant_quota is None:
+                self._load_tenant_quota()
+            tenant_unlimited = self._tenant_quota[0] == C.QUOTA_UNLIMITED
+        if not tenant_unlimited and self._run_count > C.FORM_MAX_PER_RUN:
             return False, f"1回の実行あたりの上限({C.FORM_MAX_PER_RUN}件)に到達"
 
         now = datetime.now()
@@ -410,25 +434,14 @@ class FormSender(BaseSender):
         if self.tenant_id is None:
             return True, None
 
-        if self._tenant_quota is None:
-            import db
-            # 月間クォータはdb.get_quota_status()に委譲する(tenants.monthly_send_quotaに
-            # T55のクォータ追加購入<quota_purchases、直近30日分>を足した実効値。
-            # ここと表示側<GET /api/tenant/quota>で別々に計算すると、表示上は余裕が
-            # あるのに送信はブロックされるという食い違いが起きるため一本化している)
-            monthly_q = db.get_quota_status(self.con, self.tenant_id)["effective_quota_30d"]
-            row = self.con.execute(
-                "SELECT daily_send_quota FROM tenants WHERE id=?", (self.tenant_id,)).fetchone()
-            daily_q = (row["daily_send_quota"] if row and row["daily_send_quota"] is not None
-                       else C.FORM_MAX_PER_TENANT_PER_DAY_DEFAULT)
-            self._tenant_quota = (monthly_q, daily_q)
         monthly_quota, daily_quota = self._tenant_quota
 
-        n_tenant_hour = self.con.execute(
-            "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
-            (hour_ago, self.tenant_id)).fetchone()[0]
-        if n_tenant_hour >= C.FORM_MAX_PER_TENANT_PER_HOUR:
-            return False, f"テナント別・直近1時間の上限({C.FORM_MAX_PER_TENANT_PER_HOUR}件)に到達"
+        if not tenant_unlimited:
+            n_tenant_hour = self.con.execute(
+                "SELECT COUNT(*) FROM form_send_log WHERE started_at >= ? AND tenant_id=?",
+                (hour_ago, self.tenant_id)).fetchone()[0]
+            if n_tenant_hour >= C.FORM_MAX_PER_TENANT_PER_HOUR:
+                return False, f"テナント別・直近1時間の上限({C.FORM_MAX_PER_TENANT_PER_HOUR}件)に到達"
 
         # -1(C.QUOTA_UNLIMITED)は上限なし(T89)。上の全体・1時間あたりの上限は既に通過済み
         if daily_quota != C.QUOTA_UNLIMITED:
@@ -1381,6 +1394,32 @@ if __name__ == "__main__":
         ok_unl = rb_u[0] is True and ra_u[0] is True
         print(f"  {'✓' if ok_unl else '✗'} monthly/daily_send_quota=-1(上限なし)は月間・日次の上限判定を"
               f"しない: {rb_u}, {ra_u}")
+        # 上限なしテナントは1回の実行あたり(FORM_MAX_PER_RUN)とテナント別1時間(FORM_MAX_PER_TENANT_PER_HOUR)
+        # の上限も外れる(T90: リスト全社への一括送信)。全体のサーキットブレーカーは残る
+        orig_run, orig_th = C.FORM_MAX_PER_RUN, C.FORM_MAX_PER_TENANT_PER_HOUR
+        C.FORM_MAX_PER_RUN, C.FORM_MAX_PER_TENANT_PER_HOUR = 1, 1
+        try:
+            con.execute("""INSERT INTO form_send_log (company_id, tenant_id, started_at, status)
+                VALUES (999990, ?, ?, 'SUCCESS')""", (tid_qb, now_q.isoformat(timespec="seconds")))
+            con.commit()
+            fb_run = FormSender(con, dry_run=False, tenant_id=tid_qb)
+            r_run = [fb_run._check_quota() for _ in range(3)]
+            ok_run = all(r[0] is True for r in r_run)
+            print(f"  {'✓' if ok_run else '✗'} 上限なしテナントは1回の実行上限(=1)・テナント別1時間上限(=1)も"
+                  f"外れる: {r_run}")
+            orig_gh = C.FORM_MAX_PER_HOUR
+            C.FORM_MAX_PER_HOUR = 1
+            try:
+                r_g = FormSender(con, dry_run=False, tenant_id=tid_qb)._check_quota()
+                ok_g = (not r_g[0]) and "全体" in (r_g[1] or "")
+                print(f"  {'✓' if ok_g else '✗'} 上限なしテナントでも全体のサーキットブレーカー(=1)は効く: {r_g}")
+            finally:
+                C.FORM_MAX_PER_HOUR = orig_gh
+            con.execute("DELETE FROM form_send_log WHERE tenant_id=? AND started_at>=?",
+                        (tid_qb, (now_q - timedelta(hours=1)).isoformat(timespec="seconds")))
+            con.commit()
+        finally:
+            C.FORM_MAX_PER_RUN, C.FORM_MAX_PER_TENANT_PER_HOUR = orig_run, orig_th
         con.execute("UPDATE tenants SET monthly_send_quota=2 WHERE id=?", (tid_qb,))
         con.execute("UPDATE tenants SET daily_send_quota=3 WHERE id=?", (tid_qa,))
         con.commit()

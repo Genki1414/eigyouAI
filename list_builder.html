@@ -262,6 +262,7 @@ tr.clickable:hover{background:var(--accent-soft)}
           </div>
           <div>
             <button class="ghost" id="btnOpenPlanChange">プラン変更を相談する</button>
+            <button class="ghost" id="btnOpenQuestion">質問する</button>
             <div class="hint" id="planChangeStatus" style="text-align:right"></div>
           </div>
         </div>
@@ -1086,10 +1087,10 @@ tr.clickable:hover{background:var(--accent-soft)}
 <div class="imgmodal" id="planChangeModal">
   <div class="imgmodal-inner" style="max-width:820px">
     <div class="imgmodal-head">
-      <b>プラン変更のご相談</b>
+      <b id="planChangeModalTitle">プラン変更のご相談</b>
       <button class="ghost" id="planChangeModalClose">閉じる</button>
     </div>
-    <p class="hint">申請いただいた内容をもとに、後ほど担当者よりご連絡します。実際のプラン切替は本申請の送信だけでは行われません。</p>
+    <p class="hint" id="planChangeModalHint">申請いただいた内容をもとに、後ほど担当者よりご連絡します。実際のプラン切替は本申請の送信だけでは行われません。</p>
 
     <details open style="margin:10px 0">
       <summary style="cursor:pointer;font-size:13px;font-weight:700">プラン比較表・他社サービスとの比較</summary>
@@ -1130,12 +1131,33 @@ tr.clickable:hover{background:var(--accent-soft)}
         <option value="その他・相談したい">その他・相談したい</option>
       </select>
     </div>
+    <div id="planChangeContactWrap" style="margin-top:10px;display:none">
+      <label>ご担当者名</label>
+      <input type="text" id="planChangeContactName" placeholder="山田 太郎">
+    </div>
     <div style="margin-top:10px">
       <label>補足(任意)</label>
       <textarea id="planChangeMessage" rows="3" placeholder="ご要望があればご記入ください"></textarea>
     </div>
     <div id="planChangeModalResult"></div>
     <div class="btnrow" style="justify-content:flex-end"><button id="planChangeModalSubmit">この内容で相談する</button></div>
+  </div>
+</div>
+
+<!-- 質問する(T85。契約前後を問わず、本部へ質問を送るだけの単純なフォーム) -->
+<div class="imgmodal" id="questionModal">
+  <div class="imgmodal-inner" style="max-width:640px">
+    <div class="imgmodal-head">
+      <b>質問する</b>
+      <button class="ghost" id="questionModalClose">閉じる</button>
+    </div>
+    <p class="hint">送信いただいた内容に、担当者からご登録のメールアドレス宛にお返事します。</p>
+    <div style="margin-top:10px">
+      <label>質問内容</label>
+      <textarea id="questionMessage" rows="5" placeholder="例: 手持ちのCSVで取り込める項目を教えてください"></textarea>
+    </div>
+    <div id="questionModalResult"></div>
+    <div class="btnrow" style="justify-content:flex-end"><button id="questionModalSubmit">送信する</button></div>
   </div>
 </div>
 <script>
@@ -1497,6 +1519,8 @@ async function refreshDashboard() {
     $("dashHeadline").innerHTML = `今月、AI営業社員が${d.this_month.targeted_companies.toLocaleString()}社へ営業しました <span>OVERVIEW</span>`;
 
     const q = d.quota;
+    IS_DEMO = !!d.is_demo;
+    $("btnOpenPlanChange").textContent = IS_DEMO ? "契約を申し込む" : "プラン変更を相談する";
     $("planBadge").textContent = q.plan_name;
     $("planUsageText").textContent =
       `${d.this_month.success.toLocaleString()} / ${q.monthly_send_quota.toLocaleString()}`;
@@ -1637,10 +1661,24 @@ $("saveListModalSave").addEventListener("click", async () => {
 // ── プラン変更申請(T53。ホームのプラン表示ウィジェットから、希望プランを
 // 選んで本部へ相談を送るだけの単純なフォーム。実際のプラン切替は自動化せず、
 // 送信後は本部からの連絡を待つ運用) ──
+// デモテナント(GET /api/tenant/dashboardのis_demo)では同じモーダルを「契約のお申し込み」
+// として使い、送信先を/api/tenant/inquiry(kind=contract)に切り替える(T85)。
+let IS_DEMO = false;
 async function refreshPlanChangeStatus() {
   const btn = $("btnOpenPlanChange");
   const status = $("planChangeStatus");
   try {
+    if (IS_DEMO) {
+      const r = await call("/api/tenant/inquiry");
+      if (r.inquiry && r.inquiry.status === "pending") {
+        btn.disabled = true;
+        status.textContent = `お申し込み済み(${r.inquiry.requested_plan || "プラン相談"})— 担当者からの連絡をお待ちください`;
+      } else {
+        btn.disabled = false;
+        status.textContent = "";
+      }
+      return;
+    }
     const r = await call("/api/tenant/plan-change-request");
     if (r.request && r.request.status === "pending") {
       btn.disabled = true;
@@ -1653,28 +1691,71 @@ async function refreshPlanChangeStatus() {
     // ダッシュボード全体は壊さない(申請状態が取れないだけなので静かに諦める)
   }
 }
-$("btnOpenPlanChange").addEventListener("click", () => {
+function openPlanChangeModal() {
+  $("planChangeModalTitle").textContent = IS_DEMO ? "契約のお申し込み" : "プラン変更のご相談";
+  $("planChangeModalHint").textContent = IS_DEMO
+    ? "お申し込み内容をもとに、担当者からご登録のメールアドレス宛にご連絡し、契約手続きをご案内します。この送信だけで契約が成立することはありません。"
+    : "申請いただいた内容をもとに、後ほど担当者よりご連絡します。実際のプラン切替は本申請の送信だけでは行われません。";
+  $("planChangeContactWrap").style.display = IS_DEMO ? "block" : "none";
+  $("planChangeModalSubmit").textContent = IS_DEMO ? "この内容で申し込む" : "この内容で相談する";
   $("planChangeSelect").value = $("planChangeSelect").options[0].value;
+  $("planChangeContactName").value = "";
   $("planChangeMessage").value = "";
   $("planChangeModalResult").innerHTML = "";
   $("planChangeModal").classList.add("open");
-});
+}
+$("btnOpenPlanChange").addEventListener("click", openPlanChangeModal);
 $("planChangeModalClose").addEventListener("click", () => $("planChangeModal").classList.remove("open"));
 $("planChangeModal").addEventListener("click", (e) => { if (e.target.id === "planChangeModal") $("planChangeModal").classList.remove("open"); });
 $("planChangeModalSubmit").addEventListener("click", async () => {
   const el = $("planChangeModalResult");
   el.innerHTML = `<div class="result">送信中…</div>`;
   try {
-    await call("/api/tenant/plan-change-request", {
-      method: "POST",
-      body: JSON.stringify({
-        requested_plan: $("planChangeSelect").value,
-        message: $("planChangeMessage").value.trim(),
-      }),
-    });
-    el.innerHTML = `<div class="result ok">相談を送信しました。担当者よりご連絡いたします。</div>`;
+    if (IS_DEMO) {
+      await call("/api/tenant/inquiry", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "contract",
+          requested_plan: $("planChangeSelect").value,
+          contact_name: $("planChangeContactName").value.trim(),
+          message: $("planChangeMessage").value.trim(),
+        }),
+      });
+      el.innerHTML = `<div class="result ok">お申し込みを受け付けました。担当者よりご連絡いたします。</div>`;
+    } else {
+      await call("/api/tenant/plan-change-request", {
+        method: "POST",
+        body: JSON.stringify({
+          requested_plan: $("planChangeSelect").value,
+          message: $("planChangeMessage").value.trim(),
+        }),
+      });
+      el.innerHTML = `<div class="result ok">相談を送信しました。担当者よりご連絡いたします。</div>`;
+    }
     await refreshPlanChangeStatus();
     setTimeout(() => $("planChangeModal").classList.remove("open"), 1200);
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+});
+
+// ── 質問する(T85) ──
+$("btnOpenQuestion").addEventListener("click", () => {
+  $("questionMessage").value = "";
+  $("questionModalResult").innerHTML = "";
+  $("questionModal").classList.add("open");
+});
+$("questionModalClose").addEventListener("click", () => $("questionModal").classList.remove("open"));
+$("questionModal").addEventListener("click", (e) => { if (e.target.id === "questionModal") $("questionModal").classList.remove("open"); });
+$("questionModalSubmit").addEventListener("click", async () => {
+  const el = $("questionModalResult");
+  const message = $("questionMessage").value.trim();
+  if (!message) { el.innerHTML = `<div class="result err">質問内容を入力してください</div>`; return; }
+  el.innerHTML = `<div class="result">送信中…</div>`;
+  try {
+    await call("/api/tenant/inquiry", { method: "POST", body: JSON.stringify({ kind: "question", message }) });
+    el.innerHTML = `<div class="result ok">質問を送信しました。担当者よりご連絡いたします。</div>`;
+    setTimeout(() => $("questionModal").classList.remove("open"), 1200);
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
   }
@@ -3558,6 +3639,12 @@ async function renderSendForm(container, id) {
     // MIKOMERU同様、この画面にドライラン(動作確認用の疑似送信)の選択肢は無い。
     // 「送信する」を押すと常に実送信になる(Kill Switch停止中は送信自体をブロックする)。
     if (killSwitchStopped) {
+      if (IS_DEMO) {
+        $("killSwitchSendNote").innerHTML =
+          `デモ環境のため、実際の企業への送信はできません。ご契約後に送信できるようになります。 ` +
+          `<button class="ghost" id="btnDemoContractFromSend" style="margin-left:8px">契約を申し込む</button>`;
+        $("btnDemoContractFromSend").addEventListener("click", () => { goPage("home"); openPlanChangeModal(); });
+      }
       $("killSwitchSendNote").style.display = "block";
       $("btnSend").disabled = true;
     }

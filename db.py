@@ -38,6 +38,8 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_sends_due ON scheduled_sends(status, sc
 CREATE INDEX IF NOT EXISTS idx_planreq_tenant ON plan_change_requests(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_planreq_status ON plan_change_requests(status);
 CREATE INDEX IF NOT EXISTS idx_quotapurchase_tenant ON quota_purchases(tenant_id, purchased_at);
+CREATE INDEX IF NOT EXISTS idx_inquiries_status ON inquiries(status);
+CREATE INDEX IF NOT EXISTS idx_inquiries_tenant ON inquiries(tenant_id);
 """
 
 SCHEMA = """
@@ -271,6 +273,26 @@ CREATE TABLE IF NOT EXISTS plan_change_requests (
   requested_plan TEXT,           -- 選択したプラン名(list_builder.html側のプルダウン文言。
                                   -- 料金改定のたびにDB側は変更不要なよう固定enumにはしない)
   message TEXT,                  -- 任意の自由記述(補足・相談したい内容等)
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+
+-- お問い合わせ(契約申し込み・質問。T85)。lp_hirakeru.html(認証なし)と
+-- list_builder.html(テナント認証。デモ利用者の契約申し込み等)の両方から届く。
+-- plan_change_requests(T53)と同じ「相談キュー」で、対応は本部がhq.htmlで手動で行う
+-- (契約の成立・テナントの本契約化はここでは自動化しない)。
+CREATE TABLE IF NOT EXISTS inquiries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,            -- 'contract'(契約申し込み) | 'question'(質問)
+  source TEXT NOT NULL,          -- 'lp' | 'console'
+  tenant_id INTEGER,             -- console経由ならそのテナント(LPからはNULL)
+  company_name TEXT,
+  contact_name TEXT,
+  email TEXT NOT NULL,
+  phone TEXT,
+  requested_plan TEXT,           -- contractのみ。画面側のプルダウン文言をそのまま保持
+  message TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL,
   resolved_at TEXT

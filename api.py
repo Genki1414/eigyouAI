@@ -9,6 +9,11 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            試す」フォーム用。offers.create_demo_tenant()でその場で
                            テナントを自己発行し、api_keyを返す。テナント別Kill Switchで
                            最初から本番送信不可の状態にする(悪用防止ガードはoffers.py参照)
+  POST /api/inquiry      {"kind":"contract"|"question","company_name","contact_name",
+                           "email","phone","requested_plan","message"} → 認証不要。
+                           lp_hirakeru.htmlの「契約のお申し込み」「質問する」フォーム用
+                           (T85)。inquiriesへ記録しOPS_ALERT_EMAILへ通知(ベストエフォート)。
+                           対応は本部がhq.htmlで手動で行う(T53のプラン変更申請と同じ設計)
   POST /api/signup    LPのフォーム送信      → responded=1, signed_up=1
   POST /api/activate  積算を1回実行した     → activated=1
   POST /api/paid      課金webhook          → paid=1, mrr_yen
@@ -63,6 +68,8 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/ops/plan-change-requests/<id>/resolve   申請を対応済みにする
                            (実際のプラン変更=tenants.plan_name等の更新は
                            自動化せず、本部が別途手動で行う。T53)
+  GET  /api/ops/inquiries              お問い合わせ(契約申し込み・質問)の一覧(T85)
+  POST /api/ops/inquiries/<id>/resolve 対応済みにする(契約の成立・本契約化は自動化しない)
   POST /api/ops/tenants/<id>/quota-purchase  {"qty","unit_price_yen"(任意),
                            "external_ref"(任意)} → 送信可能件数を追加する
                            (直近30日分をtenants.monthly_send_quotaへ加算。
@@ -271,6 +278,11 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            (ベストエフォート。メール送信基盤未設定・失敗時も
                            申請自体は成立する。承認は自動化せず本部が個別に
                            対応する。T53)
+  GET  /api/tenant/inquiry    自テナントの直近の契約申し込み(無ければnull。デモ利用者が
+                           申し込み済みかを画面側で表示するため。T85)
+  POST /api/tenant/inquiry    {"kind":"contract"|"question","contact_name","phone",
+                           "requested_plan","message"} → /api/inquiryのテナント認証版。
+                           会社名・メールはテナント登録情報で補う(T85)
   ※ Authorization: Bearer <tenant.api_key または staff.api_key>。テナントIDは
     このキーからサーバ側で解決し、リクエストボディのtenant_idは一切信用しない
     (offers.resolve_tenant_by_key。担当者ごとのキーでもテナント全体のキーでも
@@ -357,6 +369,7 @@ _RESET_PASSWORD_PATH_RE = re.compile(r"^/reset-password/([A-Za-z0-9_-]+)$")
 _OPS_TENANT_STAFF_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/staff$")
 _OPS_TENANT_QUOTA_PURCHASE_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/quota-purchase$")
 _OPS_PLAN_CHANGE_RESOLVE_PATH_RE = re.compile(r"^/api/ops/plan-change-requests/(\d+)/resolve$")
+_OPS_INQUIRY_RESOLVE_PATH_RE = re.compile(r"^/api/ops/inquiries/(\d+)/resolve$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
@@ -1745,7 +1758,7 @@ def h_tenant_dashboard(con, tenant_id):
 
     import config as C
     tenant_row = con.execute(
-        "SELECT plan_name, monthly_send_quota, daily_send_quota FROM tenants WHERE id=?",
+        "SELECT plan_name, monthly_send_quota, daily_send_quota, kind FROM tenants WHERE id=?",
         (tenant_id,)).fetchone()
     monthly_quota = (tenant_row["monthly_send_quota"] if tenant_row["monthly_send_quota"] is not None
                      else C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT)
@@ -1760,6 +1773,8 @@ def h_tenant_dashboard(con, tenant_id):
                      "won": outcomes["won"] or 0},
         "quota": {"plan_name": plan_name, "monthly_send_quota": monthly_quota,
                    "daily_send_quota": daily_quota},
+        # デモ利用者には「プラン変更を相談する」ではなく「契約を申し込む」を出す(T85)
+        "is_demo": tenant_row["kind"] == "demo",
     }
 
 
@@ -2184,6 +2199,129 @@ def h_ops_plan_change_request_resolve(con, request_id, data):
     return 200, {"ok": True}
 
 
+# ── お問い合わせ(契約申し込み・質問。T85) ─────────────
+INQUIRY_KINDS = ("contract", "question")
+INQUIRY_PER_EMAIL_DAILY_CAP = 5    # 同一メールアドレスからの1日あたり受付上限
+INQUIRY_DAILY_CAP = 200            # 全体の1日あたり受付上限(スクリプトによる大量投稿対策)
+
+
+def _create_inquiry(con, data, source, tenant_row=None):
+    """契約申し込み(kind=contract)・質問(kind=question)を1件記録し、OPS_ALERT_EMAILへ
+    知らせる。LP(認証なし)とlist_builder.html(テナント認証)の共通部。T53のプラン変更
+    申請と同じ「相談キュー」設計で、対応は本部がhq.htmlで手動で行う。
+    認証なしで叩ける前提のガード: honeypot(website欄に値があればbotとみなし保存せず
+    200を返す)、同一メール/全体の1日あたり上限、各項目の長さ制限。"""
+    kind = (data.get("kind") or "").strip()
+    if kind not in INQUIRY_KINDS:
+        return 400, {"error": "kindはcontractまたはquestionで指定してください"}
+    if (data.get("website") or "").strip():
+        return 200, {"ok": True}
+
+    def _field(key, limit=200):
+        v = data.get(key)
+        return str(v).strip()[:limit] if v is not None else ""
+
+    email = _field("email").lower() or ((tenant_row["sender_email"] or "").lower() if tenant_row else "")
+    if not offers._EMAIL_RE.match(email):
+        return 400, {"error": "メールアドレスの形式が正しくありません"}
+    company_name = _field("company_name") or (tenant_row["name"] if tenant_row else "")
+    contact_name = _field("contact_name")
+    phone = _field("phone", 50)
+    requested_plan = _field("requested_plan") if kind == "contract" else ""
+    message = _field("message", 4000)
+    if kind == "contract" and not company_name:
+        return 400, {"error": "会社名を入力してください"}
+    if kind == "contract" and not contact_name:
+        return 400, {"error": "担当者名を入力してください"}
+    if kind == "question" and not message:
+        return 400, {"error": "質問内容を入力してください"}
+
+    today = datetime.now().date().isoformat()
+    n_email = con.execute("SELECT COUNT(*) FROM inquiries WHERE email=? AND created_at>=?",
+                          (email, today)).fetchone()[0]
+    if n_email >= INQUIRY_PER_EMAIL_DAILY_CAP:
+        return 400, {"error": "本日の送信回数が上限に達しました。お手数ですが翌日以降にお試しください"}
+    n_all = con.execute("SELECT COUNT(*) FROM inquiries WHERE created_at>=?", (today,)).fetchone()[0]
+    if n_all >= INQUIRY_DAILY_CAP:
+        return 400, {"error": "現在お問い合わせが混み合っています。お手数ですが時間をおいてお試しください"}
+
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = con.execute("""INSERT INTO inquiries
+        (kind, source, tenant_id, company_name, contact_name, email, phone, requested_plan,
+         message, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,'pending',?)""",
+        (kind, source, tenant_row["id"] if tenant_row else None, company_name or None,
+         contact_name or None, email, phone or None, requested_plan or None, message or None, now))
+    con.commit()
+    inquiry_id = cur.lastrowid
+
+    to_email = os.environ.get("OPS_ALERT_EMAIL")
+    if to_email:
+        try:
+            import senders
+            import config as C
+            label = "契約のお申し込み" if kind == "contract" else "ご質問"
+            route = "LP" if source == "lp" else f"管理画面(テナントid={tenant_row['id']})"
+            subject = f"【ヒラケル】{label}({company_name or email})"
+            body = (f"種別: {label}\n経路: {route}\n受付ID: {inquiry_id}\n"
+                    f"会社名: {company_name or '(記載なし)'}\n担当者: {contact_name or '(記載なし)'}\n"
+                    f"メール: {email}\n電話: {phone or '(記載なし)'}\n"
+                    f"希望プラン: {requested_plan or '(記載なし)'}\n\n"
+                    f"内容:\n{message or '(記載なし)'}\n\n"
+                    f"hq.htmlの「お問い合わせ・契約申込」から対応してください。")
+            default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
+                                             address="", optout_url=C.OPTOUT_URL)
+            mailer = senders.MailSender(con, dry_run=False)
+            mailer._deliver(senders.Recipient(company_id=0, name="運用担当", email=to_email),
+                            default_sender, subject, body)
+        except Exception:  # noqa: BLE001
+            pass  # メール失敗は受付の成立を妨げない(hq.htmlの一覧が正のデータ源)
+    return 200, {"ok": True, "inquiry_id": inquiry_id}
+
+
+def h_inquiry_create(con, data):
+    """lp_hirakeru.htmlの「契約のお申し込み」「質問する」フォーム用(認証不要)。"""
+    return _create_inquiry(con, data, "lp")
+
+
+def h_tenant_inquiry_create(con, tenant_id, data):
+    """list_builder.html用(テナント認証)。デモ利用者の契約申し込み・質問など。
+    会社名・メールが未入力ならテナント登録情報で補う。"""
+    row = con.execute("SELECT id, name, sender_email FROM tenants WHERE id=?", (tenant_id,)).fetchone()
+    return _create_inquiry(con, data, "console", tenant_row=row)
+
+
+def h_tenant_inquiry_get(con, tenant_id):
+    """自テナントの直近の契約申し込み(pending中は画面側でボタンを「申し込み済み」にする)。"""
+    row = con.execute("""SELECT id, requested_plan, status, created_at, resolved_at FROM inquiries
+        WHERE tenant_id=? AND kind='contract' ORDER BY created_at DESC LIMIT 1""",
+        (tenant_id,)).fetchone()
+    return 200, {"inquiry": dict(row) if row else None}
+
+
+def h_ops_inquiries_list(con):
+    """hq.html用: LP・管理画面から届いたお問い合わせを新しい順に(直近200件)。"""
+    rows = con.execute("""SELECT i.id, i.kind, i.source, i.tenant_id, t.name AS tenant_name,
+            i.company_name, i.contact_name, i.email, i.phone, i.requested_plan, i.message,
+            i.status, i.created_at, i.resolved_at
+        FROM inquiries i LEFT JOIN tenants t ON t.id=i.tenant_id
+        ORDER BY i.created_at DESC LIMIT 200""").fetchall()
+    return 200, {"inquiries": [dict(r) for r in rows]}
+
+
+def h_ops_inquiry_resolve(con, inquiry_id, data):
+    """対応済みにする。契約の成立・デモテナントの本契約化(kind/plan_name/quota更新)は
+    ここでは行わない(本部が顧客との合意後に別途手動で行う。T53と同じ方針)。"""
+    row = con.execute("SELECT status FROM inquiries WHERE id=?", (inquiry_id,)).fetchone()
+    if not row:
+        return 404, {"error": "お問い合わせが見つかりません"}
+    if row["status"] == "done":
+        return 200, {"ok": True}
+    now = datetime.now().isoformat(timespec="seconds")
+    con.execute("UPDATE inquiries SET status='done', resolved_at=? WHERE id=?", (now, inquiry_id))
+    con.commit()
+    return 200, {"ok": True}
+
+
 # ── HTTPサーバ ──────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def _json(self, status, obj):
@@ -2283,6 +2421,17 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
+        ops_inquiry_resolve_match = _OPS_INQUIRY_RESOLVE_PATH_RE.match(path)
+        if ops_inquiry_resolve_match:
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                st, res = h_ops_inquiry_resolve(con, int(ops_inquiry_resolve_match.group(1)), data)
+                return self._json(st, res)
+            finally:
+                con.close()
+
         send_match = _SEND_PATH_RE.match(path)
         outcome_match = _OUTCOME_PATH_RE.match(path)
         autofill_match = _AUTOFILL_QUEUE_PATH_RE.match(path)
@@ -2300,7 +2449,8 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/api/tenant/lists/preview", "/api/tenant/lists", "/api/tenant/lists/csv",
                      "/api/tenant/lists/delete", "/api/tenant/lists/restore",
                      "/api/tenant/search/filter", "/api/tenant/search/csv",
-                     "/api/tenant/products", "/api/tenant/plan-change-request") \
+                     "/api/tenant/products", "/api/tenant/plan-change-request",
+                     "/api/tenant/inquiry") \
                 or send_match or outcome_match or autofill_match or note_match \
                 or manual_sent_match or exec_note_match or preview_msg_match \
                 or rename_match or duplicate_match or remove_members_match \
@@ -2336,6 +2486,8 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == "/api/tenant/plan-change-request":
                     st, res = h_tenant_plan_change_request_create(con, tenant["id"], data,
                                                                     staff_id=tenant.get("_staff_id"))
+                elif path == "/api/tenant/inquiry":
+                    st, res = h_tenant_inquiry_create(con, tenant["id"], data)
                 elif search_log_save_match:
                     st, res = h_tenant_search_log_save(con, tenant["id"],
                                                         int(search_log_save_match.group(1)), data)
@@ -2476,6 +2628,8 @@ class Handler(BaseHTTPRequestHandler):
                 st, res = h_signup(con, data)
             elif path == "/api/demo/signup":
                 st, res = h_demo_signup(con, data)
+            elif path == "/api/inquiry":
+                st, res = h_inquiry_create(con, data)
             elif path == "/api/activate":
                 st, res = h_activate(con, data)
             elif path == "/api/paid":
@@ -2569,7 +2723,7 @@ class Handler(BaseHTTPRequestHandler):
                 con.close()
 
         if u.path in ("/api/ops/status", "/api/ops/metrics", "/api/ops/kill-switch", "/api/ops/tenants",
-                       "/api/ops/plan-change-requests"):
+                       "/api/ops/plan-change-requests", "/api/ops/inquiries"):
             if not verify_ops_bearer(self.headers.get("Authorization")):
                 return self._json(401, {"error": "unauthorized"})
             con = self._con()
@@ -2584,6 +2738,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(st, res)
                 if u.path == "/api/ops/plan-change-requests":
                     st, res = h_ops_plan_change_requests_list(con)
+                    return self._json(st, res)
+                if u.path == "/api/ops/inquiries":
+                    st, res = h_ops_inquiries_list(con)
                     return self._json(st, res)
                 campaign = qs.get("campaignId", [None])[0]
                 return self._json(200, metrics.compute(con, int(campaign) if campaign else None))
@@ -2609,6 +2766,7 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/kill-switch"
                 or u.path == "/api/tenant/dashboard"
                 or u.path == "/api/tenant/plan-change-request"
+                or u.path == "/api/tenant/inquiry"
                 or u.path == "/api/tenant/quota"
                 or u.path == "/api/tenant/trades"):
             con = self._con()
@@ -2656,6 +2814,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_trades_get()
                 elif u.path == "/api/tenant/plan-change-request":
                     st, res = h_tenant_plan_change_request_get(con, tenant["id"])
+                elif u.path == "/api/tenant/inquiry":
+                    st, res = h_tenant_inquiry_get(con, tenant["id"])
                 elif u.path == "/api/tenant/lists":
                     st, res = h_tenant_lists_list(con, tenant["id"], qs)
                 else:
@@ -4157,6 +4317,86 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/plan-change-request", token=key_a)
     t("対応済みにすると自テナント側の直近申請もstatus=doneに変わる",
       st == 200 and r["request"]["status"] == "done")
+
+    print("\n── お問い合わせ(契約申し込み・質問。T85。LP=認証不要/管理画面=テナント認証) ──")
+    con.execute("DELETE FROM inquiries WHERE email LIKE 'inq-test%' OR tenant_id=?", (tid_a,))
+    con.commit()
+    st, r = post("/api/inquiry", {"kind": "other", "email": "inq-test1@example.co.jp", "message": "x"})
+    t("kindが不正なら400", st == 400)
+    st, r = post("/api/inquiry", {"kind": "question", "email": "こわれた", "message": "x"})
+    t("メールアドレス不正は400", st == 400)
+    st, r = post("/api/inquiry", {"kind": "question", "email": "inq-test1@example.co.jp"})
+    t("質問は内容必須(400)", st == 400)
+    st, r = post("/api/inquiry", {"kind": "contract", "email": "inq-test1@example.co.jp", "contact_name": "担当"})
+    t("契約申し込みは会社名必須(400)", st == 400)
+    st, r = post("/api/inquiry", {"kind": "question", "email": "inq-test-bot@example.co.jp",
+                                  "message": "bot", "website": "http://spam.example"})
+    t("honeypot(website欄)に値があれば保存せずに200を返す",
+      st == 200 and con.execute("SELECT COUNT(*) FROM inquiries WHERE email='inq-test-bot@example.co.jp'"
+                                ).fetchone()[0] == 0)
+    st, r = post("/api/inquiry", {"kind": "contract", "company_name": "テスト株式会社", "contact_name": "山田",
+                                  "email": "INQ-Test1@example.co.jp", "phone": "03-0000-0000",
+                                  "requested_plan": "ライト", "message": "来月から"})
+    t("LPからの契約申し込みが受け付けられる(認証不要)", st == 200 and bool(r.get("inquiry_id")))
+    inq_id = r.get("inquiry_id")
+    row = con.execute("SELECT * FROM inquiries WHERE id=?", (inq_id,)).fetchone()
+    t("source='lp'・tenant_id=NULL・メールは小文字化・pendingで保存される",
+      row["source"] == "lp" and row["tenant_id"] is None and row["email"] == "inq-test1@example.co.jp"
+      and row["requested_plan"] == "ライト" and row["status"] == "pending")
+    st, r = post("/api/inquiry", {"kind": "question", "email": "inq-test1@example.co.jp", "message": "質問です"})
+    t("LPからの質問が受け付けられる", st == 200 and bool(r.get("inquiry_id")))
+
+    st, r = post_auth("/api/tenant/inquiry", {"kind": "question", "message": "x"})
+    t("認証ヘッダなしのPOST /api/tenant/inquiryは401", st == 401)
+    st, r = get_auth("/api/tenant/inquiry", token=key_a)
+    t("GET /api/tenant/inquiry: 申し込み前はNone", st == 200 and r["inquiry"] is None)
+    st, r = post_auth("/api/tenant/inquiry",
+                       {"kind": "contract", "contact_name": "佐藤", "requested_plan": "ベーシック"}, token=key_a)
+    t("管理画面からの契約申し込み: 会社名・メール未入力でもテナント登録情報で補われる",
+      st == 200 and bool(r.get("inquiry_id")))
+    console_inq_id = r.get("inquiry_id")
+    row = con.execute("SELECT * FROM inquiries WHERE id=?", (console_inq_id,)).fetchone()
+    tenant_a_row = con.execute("SELECT name, sender_email FROM tenants WHERE id=?", (tid_a,)).fetchone()
+    t("source='console'・tenant_id・会社名・メールがテナントのものになる",
+      row["source"] == "console" and row["tenant_id"] == tid_a
+      and row["company_name"] == tenant_a_row["name"]
+      and row["email"] == tenant_a_row["sender_email"].lower())
+    st, r = get_auth("/api/tenant/inquiry", token=key_a)
+    t("GET /api/tenant/inquiry: 直近の契約申し込み(pending)が返る",
+      st == 200 and bool(r["inquiry"]) and r["inquiry"]["status"] == "pending")
+    st, r = get_auth("/api/tenant/inquiry", token=key_b)
+    t("【テナント分離監査】他テナント(key_b)からは見えない", st == 200 and r["inquiry"] is None)
+
+    st, r = get_auth("/api/ops/inquiries")
+    t("認証ヘッダなしのGET /api/ops/inquiriesは401", st == 401)
+    st, r = get_auth("/api/ops/inquiries", token=ops_key)
+    mine = [x for x in r.get("inquiries", []) if x["id"] in (inq_id, console_inq_id)]
+    t("GET /api/ops/inquiriesにLP・管理画面の両方が出る(管理画面分はテナント名付き)",
+      st == 200 and len(mine) == 2
+      and all(x["tenant_name"] for x in mine if x["id"] == console_inq_id))
+    st, r = post_auth(f"/api/ops/inquiries/{console_inq_id}/resolve", {})
+    t("認証ヘッダなしのresolveは401", st == 401)
+    st, r = post_auth("/api/ops/inquiries/999999999/resolve", {}, token=ops_key)
+    t("存在しないIDのresolveは404", st == 404)
+    st, r = post_auth(f"/api/ops/inquiries/{console_inq_id}/resolve", {}, token=ops_key)
+    t("resolveで対応済みにできる", st == 200 and r.get("ok"))
+    st, r = post_auth(f"/api/ops/inquiries/{console_inq_id}/resolve", {}, token=ops_key)
+    t("resolveは冪等(再クリックしても200)", st == 200 and r.get("ok"))
+    st, r = get_auth("/api/tenant/inquiry", token=key_a)
+    t("対応済みにするとテナント側の直近申し込みもdoneになる", st == 200 and r["inquiry"]["status"] == "done")
+
+    import sys as _sys_inq
+    _api_mod = _sys_inq.modules[__name__]
+    orig_inq_cap = _api_mod.INQUIRY_PER_EMAIL_DAILY_CAP
+    _api_mod.INQUIRY_PER_EMAIL_DAILY_CAP = 1
+    try:
+        st, r = post("/api/inquiry", {"kind": "question", "email": "inq-test1@example.co.jp", "message": "3通目"})
+        t("同一メールの1日あたり上限に達すると400(上限を1に絞って検証)",
+          st == 400 and "上限" in r.get("error", ""))
+    finally:
+        _api_mod.INQUIRY_PER_EMAIL_DAILY_CAP = orig_inq_cap
+    con.execute("DELETE FROM inquiries WHERE email LIKE 'inq-test%' OR tenant_id=?", (tid_a,))
+    con.commit()
 
     con.execute("DELETE FROM form_send_log WHERE tenant_id=?", (tid_a,))
     con.commit()

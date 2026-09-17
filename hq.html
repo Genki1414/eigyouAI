@@ -87,6 +87,7 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
       <div class="navitem" data-page="staffCreate">スタッフ代行作成</div>
       <div class="navitem" data-page="tenantList">テナント一覧</div>
       <div class="navitem" data-page="planRequests">プラン変更申請</div>
+      <div class="navitem" data-page="inquiries">お問い合わせ・契約申込</div>
     </div>
   </nav>
   <div class="foot">list_builder.html等の顧客向け画面とは<br>完全に切り離しています</div>
@@ -205,6 +206,19 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
     </div>
   </div>
 
+  <div class="page" data-page="inquiries">
+    <div class="card">
+      <div class="hint">LP(lp_hirakeru.html)の「契約のお申し込み」「質問する」と、管理画面(デモ利用者の「契約を申し込む」「質問する」)から
+        届いたものです。連絡後は「対応済みにする」を押してください(デモテナントの本契約化=tenants.kind/plan_name/クォータの更新は、
+        ここではなく顧客との合意後に別途手動で行ってください)。</div>
+      <button class="ghost" id="btnRefreshInquiries">再読込</button>
+      <table id="inquiryTable" style="display:none">
+        <thead><tr><th>状態</th><th>種別</th><th>経路</th><th>会社名</th><th>担当者</th><th>連絡先</th><th>希望プラン</th><th>内容</th><th>受付日</th><th></th></tr></thead>
+        <tbody id="inquiryTbody"></tbody>
+      </table>
+    </div>
+  </div>
+
 </div>
 </div>
 </div>
@@ -224,6 +238,7 @@ const PAGE_TITLES = {
   staffCreate: "スタッフアカウントの代行作成",
   tenantList: "テナント一覧",
   planRequests: "プラン変更申請",
+  inquiries: "お問い合わせ・契約申込",
 };
 function goPage(pageId) {
   document.querySelectorAll(".navitem").forEach(n => n.classList.toggle("active", n.dataset.page === pageId));
@@ -294,6 +309,37 @@ async function refreshPlanRequests() {
   $("planRequestTable").style.display = requests.length ? "table" : "none";
 }
 
+async function refreshInquiries() {
+  const { inquiries } = await call("/api/ops/inquiries");
+  const tbody = $("inquiryTbody");
+  tbody.innerHTML = inquiries.map(r => `<tr>
+      <td><span class="status ${r.status === "pending" ? "off" : "on"}">${r.status === "pending" ? "未対応" : "対応済み"}</span></td>
+      <td style="white-space:nowrap">${r.kind === "contract" ? "契約申込" : "質問"}</td>
+      <td style="white-space:nowrap">${r.source === "lp" ? "LP" : `管理画面${r.tenant_name ? "(" + escapeHtml(r.tenant_name) + ")" : ""}`}</td>
+      <td style="white-space:nowrap">${escapeHtml(r.company_name || "")}</td>
+      <td style="white-space:nowrap">${escapeHtml(r.contact_name || "")}</td>
+      <td>${escapeHtml(r.email || "")}${r.phone ? "<br>" + escapeHtml(r.phone) : ""}</td>
+      <td>${escapeHtml(r.requested_plan || "")}</td>
+      <td style="white-space:pre-wrap;min-width:200px">${escapeHtml(r.message || "")}</td>
+      <td style="white-space:nowrap">${escapeHtml((r.created_at || "").replace("T", " "))}</td>
+      <td style="white-space:nowrap">${r.status === "pending" ? `<button class="ghost inquiryResolveBtn" data-id="${r.id}">対応済みにする</button>` : ""}</td>
+    </tr>`).join("");
+  tbody.querySelectorAll(".inquiryResolveBtn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await call(`/api/ops/inquiries/${btn.dataset.id}/resolve`, { method: "POST", body: "{}" });
+        await refreshInquiries();
+      } catch (e) {
+        alert(e.message);
+        btn.disabled = false;
+      }
+    });
+  });
+  $("inquiryTable").style.display = inquiries.length ? "table" : "none";
+}
+$("btnRefreshInquiries").addEventListener("click", () => refreshInquiries().catch(e => alert(e.message)));
+
 async function doConnect() {
   API = $("apiBase").value.trim();
   KEY = $("apiKey").value.trim();
@@ -302,6 +348,7 @@ async function doConnect() {
   try {
     await refreshTenants();
     await refreshPlanRequests();
+    await refreshInquiries();
     $("connStatus").textContent = "接続済み";
     $("connStatus").className = "status on";
     $("navGated").classList.add("show");

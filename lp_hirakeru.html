@@ -37,8 +37,12 @@ p{margin:0}
 .btn:disabled{opacity:.6;cursor:default}
 .btn-outline{background:transparent;border:1.5px solid rgba(255,255,255,.35);color:#fff}
 .btn-outline.on-light{border-color:#D6DBDF;color:#16202B}
-input{font:inherit;font-size:16px;border:1.5px solid #DCE2E6;border-radius:7px;padding:13px 14px;width:100%}
-input:focus{outline:none;border-color:#12233B;box-shadow:0 0 0 3px rgba(18,35,59,.1)}
+input,select,textarea{font:inherit;font-size:16px;border:1.5px solid #DCE2E6;border-radius:7px;padding:13px 14px;width:100%;background:#fff;color:#16202B}
+textarea{min-height:120px;resize:vertical}
+input:focus,select:focus,textarea:focus{outline:none;border-color:#12233B;box-shadow:0 0 0 3px rgba(18,35,59,.1)}
+.hp-field{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:640px){.form-grid{grid-template-columns:1fr} .hdr-link{display:none}}
 label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;display:block}
 .msg{border-radius:8px;padding:12px 14px;font-size:13px;margin-top:12px}
 .msg.ok{background:#EAF6EF;color:#1E7A4D;border:1px solid #A9D8BF}
@@ -63,7 +67,11 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
     <div style="display:flex;align-items:baseline;gap:8px">
       <span style="font-family:'Zen Kaku Gothic New';font-weight:900;font-size:20px;color:#12233B;letter-spacing:.02em">ヒラケル</span>
     </div>
-    <a href="#demo" class="btn" style="background:var(--accent);color:#0D1B2E;padding:11px 20px;font-size:14px">🚀 今すぐデモを試す</a>
+    <div style="display:flex;align-items:center;gap:18px">
+      <a href="#contract" class="hdr-link" style="font-size:14px;font-weight:700;color:#16202B">契約のお申し込み</a>
+      <a href="#question" class="hdr-link" style="font-size:14px;font-weight:700;color:#16202B">質問する</a>
+      <a href="#demo" class="btn" style="background:var(--accent);color:#0D1B2E;padding:11px 20px;font-size:14px">🚀 今すぐデモを試す</a>
+    </div>
   </div>
 </header>
 
@@ -346,7 +354,8 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:#5B6B7A;margin-top:14px">初期費用はかかりません。これより多い送信数や、個別の条件についてはご相談ください。</p>
+    <p style="font-size:13px;color:#5B6B7A;margin-top:14px">初期費用はかかりません。これより多い送信数や、個別の条件については<a href="#question">質問する</a>からご相談ください。</p>
+    <div style="margin-top:18px"><a href="#contract" class="btn" style="background:#12233B;color:#fff;font-size:15px">契約を申し込む</a></div>
   </div>
 </section>
 
@@ -354,7 +363,10 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
 <section class="section-pad" style="background:#12233B;padding:44px 0">
   <div class="wrap" style="display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap">
     <h3 style="color:#fff;font-size:20px;font-weight:900">実際の画面は、デモで確認できます。</h3>
-    <a href="#demo" class="btn" style="background:var(--accent);color:#0D1B2E;font-size:15px">🚀 今すぐデモを試す</a>
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      <a href="#demo" class="btn" style="background:var(--accent);color:#0D1B2E;font-size:15px">🚀 今すぐデモを試す</a>
+      <a href="#contract" class="btn btn-outline" style="font-size:15px">契約を申し込む</a>
+    </div>
   </div>
 </section>
 
@@ -417,9 +429,66 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
       <div id="demoResult"></div>
 
       <div style="margin-top:20px;padding-top:16px;border-top:1px solid #E4E8EB;font-size:12px;color:#8B99A5">
-        じっくり相談したい方は <a href="mailto:[お問い合わせ先メールアドレス]">こちら</a> からご連絡ください。
+        デモを触らずに申し込む方は<a href="#contract">契約のお申し込み</a>へ。分からないことは<a href="#question">質問する</a>からどうぞ。
       </div>
     </div>
+  </div>
+</section>
+
+<!-- ============ 契約のお申し込み ============ -->
+<section id="contract" class="section-pad" style="padding:64px 0;background:#fff">
+  <div class="wrap" style="max-width:640px">
+    <div style="font-family:'IBM Plex Mono';font-size:12px;letter-spacing:.14em;color:#8B99A5;margin-bottom:10px">契約のお申し込み</div>
+    <h2 style="font-size:26px;font-weight:900;margin-bottom:10px">契約を申し込む</h2>
+    <p style="font-size:14px;color:#5B6B7A;margin-bottom:24px">送信いただいた内容をもとに、担当者からメールでご連絡し、契約の手続きをご案内します。このフォームの送信だけで契約が成立することはありません。</p>
+    <form id="contractForm" novalidate>
+      <div class="form-grid" style="margin-bottom:14px">
+        <div><label class="f-label">会社名</label><input type="text" id="contractCompany" placeholder="株式会社サンプル" required></div>
+        <div><label class="f-label">ご担当者名</label><input type="text" id="contractName" placeholder="山田 太郎" required></div>
+        <div><label class="f-label">メールアドレス</label><input type="email" id="contractEmail" placeholder="you@example.com" required></div>
+        <div><label class="f-label">電話番号(任意)</label><input type="tel" id="contractPhone" placeholder="03-0000-0000"></div>
+      </div>
+      <div style="margin-bottom:14px">
+        <label class="f-label">希望プラン</label>
+        <select id="contractPlan">
+          <option value="ミニマム(500件/月)8,000円">ミニマム(500件/月) 8,000円</option>
+          <option value="スターター(1,000件/月)13,000円">スターター(1,000件/月) 13,000円</option>
+          <option value="ライト(4,000件/月)40,000円" selected>ライト(4,000件/月) 40,000円</option>
+          <option value="ベーシック(10,000件/月)85,000円">ベーシック(10,000件/月) 85,000円</option>
+          <option value="プレミアム(20,000件/月)150,000円">プレミアム(20,000件/月) 150,000円</option>
+          <option value="相談して決めたい">相談して決めたい</option>
+        </select>
+      </div>
+      <div style="margin-bottom:16px">
+        <label class="f-label">備考(任意)</label>
+        <textarea id="contractMessage" placeholder="利用開始の希望時期、送りたい業種、その他ご要望など"></textarea>
+      </div>
+      <div class="hp-field" aria-hidden="true"><label>website<input type="text" id="contractWebsite" tabindex="-1" autocomplete="off"></label></div>
+      <button type="submit" class="btn" id="btnContractSubmit" style="background:#12233B;color:#fff;width:100%;font-size:16px">この内容で申し込む</button>
+      <div id="contractResult"></div>
+    </form>
+  </div>
+</section>
+
+<!-- ============ 質問する ============ -->
+<section id="question" class="section-pad" style="padding:64px 0">
+  <div class="wrap" style="max-width:640px">
+    <div style="font-family:'IBM Plex Mono';font-size:12px;letter-spacing:.14em;color:#8B99A5;margin-bottom:10px">質問する</div>
+    <h2 style="font-size:26px;font-weight:900;margin-bottom:10px">分からないことを質問する</h2>
+    <p style="font-size:14px;color:#5B6B7A;margin-bottom:24px">料金・使い方・送信の仕組みなど、どんなことでも構いません。担当者がメールでお返事します。</p>
+    <form id="questionForm" novalidate>
+      <div class="form-grid" style="margin-bottom:14px">
+        <div><label class="f-label">お名前・会社名(任意)</label><input type="text" id="questionName" placeholder="山田 太郎 / 株式会社サンプル"></div>
+        <div><label class="f-label">メールアドレス</label><input type="email" id="questionEmail" placeholder="you@example.com" required></div>
+      </div>
+      <div style="margin-bottom:16px">
+        <label class="f-label">質問内容</label>
+        <textarea id="questionMessage" placeholder="例: 手持ちのCSVには会社名しかありません。使えますか?" required></textarea>
+      </div>
+      <div class="hp-field" aria-hidden="true"><label>website<input type="text" id="questionWebsite" tabindex="-1" autocomplete="off"></label></div>
+      <button type="submit" class="btn" id="btnQuestionSubmit" style="background:var(--accent);color:#0D1B2E;width:100%;font-size:16px">質問を送る</button>
+      <div id="questionResult"></div>
+    </form>
   </div>
 </section>
 
@@ -427,6 +496,12 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
 <footer style="padding:28px 0;background:#0D1B2E">
   <div class="wrap" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
     <span style="font-family:'Zen Kaku Gothic New';font-weight:900;font-size:14px;color:#fff">ヒラケル</span>
+    <span style="display:flex;gap:16px;font-size:12px">
+      <a href="#demo" style="color:#C6CDD3">デモ</a>
+      <a href="#pricing" style="color:#C6CDD3">料金プラン</a>
+      <a href="#contract" style="color:#C6CDD3">契約のお申し込み</a>
+      <a href="#question" style="color:#C6CDD3">質問する</a>
+    </span>
     <span style="font-family:'IBM Plex Mono';font-size:11px;color:#5B6B7A">© [運営会社名]</span>
   </div>
 </footer>
@@ -462,6 +537,52 @@ document.getElementById("btnDemoSignup").addEventListener("click", async () => {
     btn.disabled = false;
     btn.textContent = originalLabel;
   }
+});
+
+// 契約のお申し込み・質問(POST /api/inquiry。認証不要。T85)
+async function submitInquiry(kind, fields, btn, resultEl, successText) {
+  resultEl.innerHTML = "";
+  if (kind === "contract" && !fields.company_name) { resultEl.innerHTML = '<div class="msg err">会社名を入力してください</div>'; return; }
+  if (kind === "contract" && !fields.contact_name) { resultEl.innerHTML = '<div class="msg err">ご担当者名を入力してください</div>'; return; }
+  if (!fields.email) { resultEl.innerHTML = '<div class="msg err">メールアドレスを入力してください</div>'; return; }
+  if (kind === "question" && !fields.message) { resultEl.innerHTML = '<div class="msg err">質問内容を入力してください</div>'; return; }
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "送信中...";
+  try {
+    const res = await fetch("/api/inquiry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, ...fields }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+    resultEl.innerHTML = '<div class="msg ok">' + successText + "</div>";
+    btn.textContent = "送信しました";
+  } catch (e) {
+    resultEl.innerHTML = '<div class="msg err">' + e.message + "</div>";
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+}
+document.getElementById("contractForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const v = id => document.getElementById(id).value.trim();
+  submitInquiry("contract", {
+    company_name: v("contractCompany"), contact_name: v("contractName"), email: v("contractEmail"),
+    phone: v("contractPhone"), requested_plan: v("contractPlan"), message: v("contractMessage"),
+    website: v("contractWebsite"),
+  }, document.getElementById("btnContractSubmit"), document.getElementById("contractResult"),
+  "お申し込みを受け付けました。担当者よりメールでご連絡いたします。");
+});
+document.getElementById("questionForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const v = id => document.getElementById(id).value.trim();
+  submitInquiry("question", {
+    company_name: v("questionName"), email: v("questionEmail"), message: v("questionMessage"),
+    website: v("questionWebsite"),
+  }, document.getElementById("btnQuestionSubmit"), document.getElementById("questionResult"),
+  "質問を受け付けました。担当者よりメールでお返事いたします。");
 });
 
 // FAQアコーディオン

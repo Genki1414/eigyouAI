@@ -4586,6 +4586,16 @@ monitor側で`kind='demo'`を除外するよう修正。
 個別手続きで成立するため今回は置いていない(LP上で決済まで完結させる場合は
 必要になる)。フッターの©はユーザー判断でサービス名(+会社名)。
 
+**本番側の確認結果(2026-09-17、ユーザーがサーバーで実施)**: 本番サーバーは
+Hetzner(`app.ashibase.jp`=167.233.123.173、ホスト名`ubuntu-4gb-fsn1-7`、
+リポジトリは`/opt/eigyouai`、`ssh root@...`)。`ANTHROPIC_API_KEY`はコンテナ内で
+設定済み(=デモのAI機能は動く)。`OPS_ALERT_EMAIL`は未設定だったため
+`nakagawa@tohoku-mikamikizai.co.jp`を`.env`へ追記し`docker compose up -d`で
+反映(`RESEND_API_KEY`は設定済み)。`GET /api/campaign`は`contracted: 0`
+(=キャンペーンは1社目から)。**この時点でLP・デモ・申し込み導線は案内可能な
+状態**。OSに`System restart required`(カーネル更新待ち)が出ており、都合の
+よいときに`reboot`が必要(コンテナは`restart: unless-stopped`で自動復帰)。
+
 ---
 
 ## 3. やってはいけないこと

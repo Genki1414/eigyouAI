@@ -496,6 +496,7 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
         <textarea id="contractMessage" placeholder="利用開始の希望時期、送りたい業種、その他ご要望など"></textarea>
       </div>
       <div class="hp-field" aria-hidden="true"><label>website<input type="text" id="contractWebsite" tabindex="-1" autocomplete="off"></label></div>
+      <p style="font-size:12px;color:#8B99A5;margin-bottom:12px">ご入力いただいた情報は<a href="#privacy" onclick="document.getElementById('privacy').open=true">プライバシーポリシー</a>に従って取り扱います。</p>
       <button type="submit" class="btn" id="btnContractSubmit" style="background:#12233B;color:#fff;width:100%;font-size:16px">この内容で申し込む</button>
       <div id="contractResult"></div>
     </form>
@@ -518,6 +519,7 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
         <textarea id="questionMessage" placeholder="例: 手持ちのCSVには会社名しかありません。使えますか?" required></textarea>
       </div>
       <div class="hp-field" aria-hidden="true"><label>website<input type="text" id="questionWebsite" tabindex="-1" autocomplete="off"></label></div>
+      <p style="font-size:12px;color:#8B99A5;margin-bottom:12px">ご入力いただいた情報は<a href="#privacy" onclick="document.getElementById('privacy').open=true">プライバシーポリシー</a>に従って取り扱います。</p>
       <button type="submit" class="btn" id="btnQuestionSubmit" style="background:var(--accent);color:#0D1B2E;width:100%;font-size:16px">質問を送る</button>
       <div id="questionResult"></div>
     </form>
@@ -525,16 +527,45 @@ label.f-label{font-size:13px;font-weight:700;color:#5B6B7A;margin-bottom:6px;dis
 </section>
 
 <!-- ============ footer ============ -->
-<footer style="padding:28px 0;background:#0D1B2E">
-  <div class="wrap" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-    <span style="font-family:'Zen Kaku Gothic New';font-weight:900;font-size:14px;color:#fff">ヒラケル</span>
-    <span style="display:flex;gap:16px;font-size:12px">
-      <a href="#demo" style="color:#C6CDD3">デモ</a>
-      <a href="#pricing" style="color:#C6CDD3">料金プラン</a>
-      <a href="#contract" style="color:#C6CDD3">契約のお申し込み</a>
-      <a href="#question" style="color:#C6CDD3">質問する</a>
-    </span>
-    <span style="font-family:'IBM Plex Mono';font-size:11px;color:#5B6B7A">© ヒラケル</span>
+<footer style="padding:36px 0 28px;background:#0D1B2E;color:#C6CDD3">
+  <div class="wrap">
+    <div class="legal" style="max-width:760px;margin-bottom:26px;font-size:13px;line-height:1.8">
+      <details id="company" style="border-top:1px solid rgba(255,255,255,.12);padding:12px 0">
+        <summary style="cursor:pointer;font-weight:700;color:#fff">運営会社</summary>
+        <table style="border-collapse:collapse;margin-top:10px;font-size:13px">
+          <tr><td style="padding:4px 18px 4px 0;color:#8B99A5;white-space:nowrap">サービス名</td><td style="padding:4px 0">ヒラケル</td></tr>
+          <tr><td style="padding:4px 18px 4px 0;color:#8B99A5;white-space:nowrap">運営会社</td><td style="padding:4px 0">東北三上機材株式会社</td></tr>
+          <tr><td style="padding:4px 18px 4px 0;color:#8B99A5;white-space:nowrap">所在地</td><td style="padding:4px 0">宮城県名取市牛野八幡23</td></tr>
+          <tr><td style="padding:4px 18px 4px 0;color:#8B99A5;white-space:nowrap">電話</td><td style="padding:4px 0">022-738-7913</td></tr>
+          <tr><td style="padding:4px 18px 4px 0;color:#8B99A5;white-space:nowrap">お問い合わせ</td><td style="padding:4px 0"><a href="#question" style="color:var(--accent)">質問フォーム</a>または上記電話番号</td></tr>
+        </table>
+      </details>
+      <details id="privacy" style="border-top:1px solid rgba(255,255,255,.12);border-bottom:1px solid rgba(255,255,255,.12);padding:12px 0">
+        <summary style="cursor:pointer;font-weight:700;color:#fff">プライバシーポリシー</summary>
+        <div style="margin-top:10px">
+          <p>東北三上機材株式会社(以下「当社」)は、ヒラケル(以下「本サービス」)の提供にあたり、お客様の個人情報を次のとおり取り扱います。</p>
+          <p style="margin-top:8px"><b style="color:#fff">1. 取得する情報</b><br>デモ環境のお申し込み、契約のお申し込み、質問フォームでご入力いただく会社名・ご担当者名・メールアドレス・電話番号・ご記入内容。および本サービスの管理画面の操作記録。</p>
+          <p style="margin-top:8px"><b style="color:#fff">2. 利用目的</b><br>デモ環境の発行と本人確認、お申し込み・ご質問へのご連絡と契約手続きのご案内、本サービスの提供・運用・改善、重要なお知らせの送付。</p>
+          <p style="margin-top:8px"><b style="color:#fff">3. 第三者提供</b><br>法令に基づく場合を除き、ご本人の同意なく第三者に提供しません。</p>
+          <p style="margin-top:8px"><b style="color:#fff">4. 安全管理</b><br>取得した情報は、不正アクセス・漏えい・滅失を防ぐための措置を講じたうえで管理します。</p>
+          <p style="margin-top:8px"><b style="color:#fff">5. 開示・訂正・削除</b><br>ご本人からの開示・訂正・利用停止・削除のご請求には、本人確認のうえ速やかに対応します。上記の電話番号または<a href="#question" style="color:var(--accent)">質問フォーム</a>からご連絡ください。</p>
+          <p style="margin-top:8px"><b style="color:#fff">6. 改定</b><br>本ポリシーは必要に応じて改定し、改定後の内容は本ページに掲載した時点から適用します。</p>
+          <p style="margin-top:8px;color:#8B99A5">制定日: 2026年9月17日</p>
+        </div>
+      </details>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+      <span style="font-family:'Zen Kaku Gothic New';font-weight:900;font-size:14px;color:#fff">ヒラケル</span>
+      <span style="display:flex;gap:16px;font-size:12px;flex-wrap:wrap">
+        <a href="#demo" style="color:#C6CDD3">デモ</a>
+        <a href="#pricing" style="color:#C6CDD3">料金プラン</a>
+        <a href="#contract" style="color:#C6CDD3">契約のお申し込み</a>
+        <a href="#question" style="color:#C6CDD3">質問する</a>
+        <a href="#company" style="color:#C6CDD3" onclick="document.getElementById('company').open=true">運営会社</a>
+        <a href="#privacy" style="color:#C6CDD3" onclick="document.getElementById('privacy').open=true">プライバシーポリシー</a>
+      </span>
+      <span style="font-family:'IBM Plex Mono';font-size:11px;color:#5B6B7A">© ヒラケル / 東北三上機材株式会社</span>
+    </div>
   </div>
 </footer>
 

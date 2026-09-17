@@ -195,6 +195,86 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
     </div>
   </div>
 
+  <div class="page" data-page="tenantDetail">
+    <div class="card">
+      <button class="ghost" id="btnBackToTenants">← テナント一覧へ</button>
+      <h2 id="tdTitle" style="margin:10px 0 4px;font-size:16px"></h2>
+      <div class="hint" id="tdMeta"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 6px;font-size:14px">基本情報・プラン・送信通数</h3>
+      <div class="row">
+        <div><label>会社名 *</label><input type="text" id="tdName"></div>
+        <div><label>種別</label>
+          <select id="tdKind">
+            <option value="client">client(通常の販売先)</option>
+            <option value="demo">demo(デモ利用)</option>
+            <option value="acquirer">acquirer(買収元等)</option>
+            <option value="own">own(自社)</option>
+          </select></div>
+      </div>
+      <div class="row">
+        <div><label>送信元メールアドレス *</label><input type="email" id="tdSenderEmail"></div>
+        <div><label>送信元表示名</label><input type="text" id="tdSenderName"></div>
+      </div>
+      <label>送信元住所</label><input type="text" id="tdSenderAddress">
+      <label>オプトアウト連絡先URL</label><input type="text" id="tdOptoutUrl">
+      <div class="row">
+        <div><label>プラン名</label><input type="text" id="tdPlanName" placeholder="例: ライト"></div>
+        <div><label>契約時の月額(円)</label><input type="number" id="tdFee" min="0"></div>
+      </div>
+      <div class="row">
+        <div><label>月間送信数(件。空欄=既定値4,000、0=送信枠なし)</label><input type="number" id="tdMonthly" min="0"></div>
+        <div><label>1日の送信数(件。空欄=既定値300、0=送信枠なし)</label><input type="number" id="tdDaily" min="0"></div>
+      </div>
+      <button id="btnTenantSave">保存</button>
+      <div class="result" id="tdSaveResult" style="display:none"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 6px;font-size:14px">送信停止(Kill Switch)</h3>
+      <div class="hint" id="tdKillSwitch"></div>
+      <button class="ghost" id="btnTenantKsToggle"></button>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 6px;font-size:14px">送信数の状況と追加(当月のみ)</h3>
+      <div class="hint" id="tdQuota"></div>
+      <div class="row">
+        <div><label>追加する件数</label><input type="number" id="tdAddQty" value="500" min="1"></div>
+        <div><label>単価(円。参考記録。任意)</label><input type="number" id="tdAddPrice" min="0"></div>
+      </div>
+      <div class="hint">追加分は<b>当月末まで</b>有効で、翌月には持ち越しません(基本プランの枠は変わりません)。</div>
+      <button id="btnTenantAddQuota">当月分として追加する</button>
+      <div class="result" id="tdAddResult" style="display:none"></div>
+      <table id="tdPurchaseTable" style="display:none;margin-top:8px">
+        <thead><tr><th>追加日</th><th>件数</th><th>単価</th><th>有効期限</th></tr></thead>
+        <tbody id="tdPurchaseTbody"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 6px;font-size:14px">担当者アカウント(このテナントのログイン情報)</h3>
+      <table id="tdStaffTable" style="display:none">
+        <thead><tr><th>ID</th><th>担当者名</th><th>メール(ログインID)</th><th>権限</th><th>状態</th><th>作成日</th></tr></thead>
+        <tbody id="tdStaffTbody"></tbody>
+      </table>
+      <div class="hint" id="tdStaffEmpty"></div>
+      <div class="hint" style="margin-top:10px">本人確認済みの担当者に、本部がログイン情報を発行します(メール認証なしで即使えます)。</div>
+      <div class="row">
+        <div><label>担当者名 *</label><input type="text" id="tdsName"></div>
+        <div><label>権限</label><select id="tdsRole"><option value="一般">一般</option><option value="管理者">管理者</option></select></div>
+      </div>
+      <div class="row">
+        <div><label>メールアドレス(ログインID) *</label><input type="email" id="tdsEmail"></div>
+        <div><label>初期パスワード * (8〜64文字)</label><input type="text" id="tdsPassword"></div>
+      </div>
+      <button id="btnTenantAddStaff">アカウントを発行</button>
+      <div class="result" id="tdStaffResult" style="display:none"></div>
+    </div>
+  </div>
+
   <div class="page" data-page="planRequests">
     <div class="card">
       <div class="hint">list_builder.htmlのプラン表示から届いた相談です。対応後は「対応済みにする」を押してください
@@ -215,7 +295,7 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
       <div class="hint" id="campaignStatus" style="margin-bottom:8px"></div>
       <button class="ghost" id="btnRefreshInquiries">再読込</button>
       <table id="inquiryTable" style="display:none">
-        <thead><tr><th>状態</th><th>種別</th><th>経路</th><th>会社名</th><th>担当者</th><th>連絡先</th><th>希望プラン</th><th>内容</th><th>受付日</th><th></th></tr></thead>
+        <thead><tr><th>状態</th><th>種別</th><th>経路</th><th>会社名</th><th>担当者</th><th>連絡先</th><th>希望プラン</th><th>内容</th><th>受付日</th><th style="min-width:260px">次にやること</th></tr></thead>
         <tbody id="inquiryTbody"></tbody>
       </table>
     </div>
@@ -270,6 +350,7 @@ const PAGE_TITLES = {
   planRequests: "プラン変更申請",
   inquiries: "お問い合わせ・契約申込",
   convert: "デモ→本契約の切り替え",
+  tenantDetail: "テナント詳細",
 };
 function goPage(pageId) {
   document.querySelectorAll(".navitem").forEach(n => n.classList.toggle("active", n.dataset.page === pageId));
@@ -301,13 +382,14 @@ async function refreshTenants() {
   const tbody = $("tenantTbody");
   const fmtDate = s => escapeHtml((s || "").replace("T", " "));
   tbody.innerHTML = tenants.map(t =>
-    `<tr><td>${t.id}</td><td>${escapeHtml(t.name)}</td><td>${escapeHtml(t.kind)}</td>` +
+    `<tr><td>${t.id}</td><td><a href="#" class="tenantOpen" data-id="${t.id}">${escapeHtml(t.name)}</a></td><td>${escapeHtml(t.kind)}</td>` +
     `<td>${escapeHtml(t.plan_name || "")}</td>` +
     `<td>${t.monthly_fee_yen != null ? t.monthly_fee_yen.toLocaleString() + "円" : ""}</td>` +
     `<td>${escapeHtml(t.sender_email)}</td><td>${fmtDate(t.created_at)}</td><td>${fmtDate(t.contracted_at)}</td>` +
     `<td>${t.kind === "demo" ? `<button class="ghost convertBtn" data-id="${t.id}">本契約に切り替える</button>` : ""}</td></tr>`
   ).join("");
   tbody.querySelectorAll(".convertBtn").forEach(btn => btn.addEventListener("click", () => openConvert(btn.dataset.id)));
+  tbody.querySelectorAll(".tenantOpen").forEach(a => a.addEventListener("click", (e) => { e.preventDefault(); openTenantDetail(a.dataset.id); }));
   $("tenantTable").style.display = tenants.length ? "table" : "none";
   const sel = $("sTenantId");
   const prev = sel.value;
@@ -426,9 +508,13 @@ async function refreshInquiries() {
       <td>${escapeHtml(r.requested_plan || "")}</td>
       <td style="white-space:pre-wrap;min-width:200px">${escapeHtml(r.message || "")}</td>
       <td style="white-space:nowrap">${escapeHtml((r.created_at || "").replace("T", " "))}</td>
-      <td style="white-space:nowrap">${r.status === "pending" ? `<button class="ghost inquiryResolveBtn" data-id="${r.id}">対応済みにする</button>` : ""}
-        ${r.status === "pending" && r.kind === "contract" && r.tenant_id ? `<button class="ghost inquiryConvertBtn" data-tenant="${r.tenant_id}" style="margin-top:4px">本契約に切り替える</button>` : ""}</td>
+      <td style="font-size:12px;line-height:1.7">${inquiryNextSteps(r)}</td>
     </tr>`).join("");
+  tbody.querySelectorAll(".inquiryCreateTenantBtn").forEach(btn =>
+    btn.addEventListener("click", () => prefillTenantCreate(inquiries.find(x => String(x.id) === btn.dataset.id))));
+  const pending = inquiries.filter(x => x.status === "pending").length;
+  const nav = document.querySelector('.navitem[data-page="inquiries"]');
+  nav.textContent = pending ? `お問い合わせ・契約申込(未対応${pending})` : "お問い合わせ・契約申込";
   tbody.querySelectorAll(".inquiryResolveBtn").forEach(btn => {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
@@ -445,6 +531,135 @@ async function refreshInquiries() {
     btn.addEventListener("click", () => openConvert(btn.dataset.tenant)));
   $("inquiryTable").style.display = inquiries.length ? "table" : "none";
 }
+
+// 申込・質問ごとの「次にやること」(T88。本部の操作ナビ)
+function inquiryNextSteps(r) {
+  if (r.status !== "pending") return `<span style="color:#8B99A5">対応済み(${escapeHtml((r.resolved_at || "").replace("T", " "))})</span>`;
+  const resolveBtn = `<button class="ghost inquiryResolveBtn" data-id="${r.id}">対応済みにする</button>`;
+  if (r.kind === "question") {
+    return `① ${escapeHtml(r.email)} へ回答を返信<br>② 返信したら → ${resolveBtn}`;
+  }
+  if (r.tenant_id) {
+    return `① ${escapeHtml(r.email)}${r.phone ? " / " + escapeHtml(r.phone) : ""} へ連絡し、プランと条件を確定<br>` +
+      `② 確定したら → <button class="ghost inquiryConvertBtn" data-tenant="${r.tenant_id}">本契約に切り替える</button>` +
+      `<span style="color:#8B99A5">(デモ利用者。切り替えると申込も自動で対応済みになります)</span><br>` +
+      `③ 利用者へ「同じログイン情報のまま送信できる」と案内`;
+  }
+  return `① ${escapeHtml(r.email)}${r.phone ? " / " + escapeHtml(r.phone) : ""} へ連絡し、プランと条件を確定<br>` +
+    `② 確定したら → <button class="ghost inquiryCreateTenantBtn" data-id="${r.id}">テナントを作成する</button>` +
+    `<span style="color:#8B99A5">(会社名・メールを入力済みの作成画面が開きます)</span><br>` +
+    `③ 作成時に表示されるapi_key(または担当者アカウント)と管理画面URLを案内<br>` +
+    `④ 案内したら → ${resolveBtn}`;
+}
+function prefillTenantCreate(inq) {
+  if (!inq) return;
+  goPage("tenantCreate");
+  $("tName").value = inq.company_name || "";
+  $("tSenderEmail").value = inq.email || "";
+  $("tSenderName").value = "";
+  $("tKind").value = "client";
+  $("tenantResult").style.display = "none";
+  window.scrollTo(0, 0);
+}
+
+// ── テナント詳細(T88): 編集・送信停止・送信数の追加(当月のみ)・担当者アカウント ──
+let currentTenantId = null;
+async function openTenantDetail(tenantId) {
+  currentTenantId = Number(tenantId);
+  goPage("tenantDetail");
+  ["tdSaveResult", "tdAddResult", "tdStaffResult"].forEach(id => $(id).style.display = "none");
+  await loadTenantDetail();
+}
+async function loadTenantDetail() {
+  const d = await call(`/api/ops/tenants/${currentTenantId}`);
+  const t = d.tenant;
+  $("tdTitle").textContent = `#${t.id} ${t.name}`;
+  $("tdMeta").textContent = `種別: ${t.kind} / 作成: ${(t.created_at || "").replace("T", " ")}` +
+    (t.contracted_at ? ` / 契約成立: ${t.contracted_at.replace("T", " ")}` : "");
+  $("tdName").value = t.name || ""; $("tdKind").value = t.kind || "client";
+  $("tdSenderEmail").value = t.sender_email || ""; $("tdSenderName").value = t.sender_name || "";
+  $("tdSenderAddress").value = t.sender_address || ""; $("tdOptoutUrl").value = t.optout_url || "";
+  $("tdPlanName").value = t.plan_name || ""; $("tdFee").value = t.monthly_fee_yen ?? "";
+  $("tdMonthly").value = t.monthly_send_quota ?? ""; $("tdDaily").value = t.daily_send_quota ?? "";
+  const ks = d.kill_switch;
+  $("tdKillSwitch").textContent = ks.stopped
+    ? `停止中(${ks.reason || "理由未記入"}、${(ks.updated_at || "").replace("T", " ")})。このテナントは実際の企業へ送信できません。`
+    : "停止していません(送信できます)。";
+  $("btnTenantKsToggle").textContent = ks.stopped ? "停止を解除する" : "このテナントの送信を停止する";
+  const q = d.quota;
+  $("tdQuota").textContent = `直近30日: 基本枠${q.base_monthly_send_quota.toLocaleString()}件 + 追加${q.addon_quota_30d.toLocaleString()}件 = ${q.effective_quota_30d.toLocaleString()}件 / 使用${q.used_30d.toLocaleString()}件 / 残り${q.remaining_30d.toLocaleString()}件`;
+  $("tdPurchaseTbody").innerHTML = d.purchases.map(p => `<tr><td>${escapeHtml((p.purchased_at || "").replace("T", " "))}</td>` +
+    `<td>${p.qty.toLocaleString()}</td><td>${p.unit_price_yen != null ? p.unit_price_yen.toLocaleString() + "円" : ""}</td>` +
+    `<td>${p.expires_at ? escapeHtml(p.expires_at.replace("T", " ")) + "まで" : "購入から30日間"}</td></tr>`).join("");
+  $("tdPurchaseTable").style.display = d.purchases.length ? "table" : "none";
+  $("tdStaffTbody").innerHTML = d.staff.map(s => `<tr><td>${s.id}</td><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.email || "")}</td>` +
+    `<td>${escapeHtml(s.role || "")}</td><td>${s.has_password ? (s.email_verified_at ? "有効" : "メール認証待ち") : "APIキーのみ"}</td>` +
+    `<td>${escapeHtml((s.created_at || "").replace("T", " "))}</td></tr>`).join("");
+  $("tdStaffTable").style.display = d.staff.length ? "table" : "none";
+  $("tdStaffEmpty").textContent = d.staff.length ? "" : "担当者アカウントはまだありません(テナント作成時のapi_keyでログインしている状態)。";
+}
+$("btnBackToTenants").addEventListener("click", () => goPage("tenantList"));
+$("btnTenantSave").addEventListener("click", async () => {
+  const el = $("tdSaveResult");
+  const intOrNull = id => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
+  try {
+    await call(`/api/ops/tenants/${currentTenantId}/update`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("tdName").value.trim(), kind: $("tdKind").value,
+        sender_email: $("tdSenderEmail").value.trim(), sender_name: $("tdSenderName").value.trim() || null,
+        sender_address: $("tdSenderAddress").value.trim() || null, optout_url: $("tdOptoutUrl").value.trim() || null,
+        plan_name: $("tdPlanName").value.trim() || null, monthly_fee_yen: intOrNull("tdFee"),
+        monthly_send_quota: intOrNull("tdMonthly"), daily_send_quota: intOrNull("tdDaily"),
+      }),
+    });
+    showResult(el, true, "保存しました。送信通数の変更はすぐに送信判定へ反映されます。");
+    await loadTenantDetail();
+    await refreshTenants();
+  } catch (e) {
+    showResult(el, false, "エラー: " + e.message);
+  }
+});
+$("btnTenantKsToggle").addEventListener("click", async () => {
+  const stoppedNow = $("btnTenantKsToggle").textContent.includes("解除");
+  if (!confirm(stoppedNow ? "このテナントの送信停止を解除します。実際の企業へ送信できるようになります。よろしいですか?"
+                          : "このテナントの送信を停止します。よろしいですか?")) return;
+  try {
+    await call("/api/ops/kill-switch", { method: "POST", body: JSON.stringify({
+      scope: "tenant", tenant_id: currentTenantId, stopped: !stoppedNow,
+      reason: stoppedNow ? null : "本部(hq.html)で手動停止", updated_by: "hq" }) });
+    await loadTenantDetail();
+  } catch (e) {
+    alert(e.message);
+  }
+});
+$("btnTenantAddQuota").addEventListener("click", async () => {
+  const el = $("tdAddResult");
+  const qty = Number($("tdAddQty").value);
+  const price = $("tdAddPrice").value.trim();
+  if (!Number.isInteger(qty) || qty <= 0) { showResult(el, false, "追加する件数は正の整数で指定してください"); return; }
+  if (!confirm(`${qty.toLocaleString()}件を当月分として追加します(当月末まで有効)。よろしいですか?`)) return;
+  try {
+    const r = await call(`/api/ops/tenants/${currentTenantId}/quota-purchase`, { method: "POST", body: JSON.stringify({
+      qty, unit_price_yen: price === "" ? undefined : Number(price), valid_until: "month_end" }) });
+    showResult(el, true, `追加しました(${r.purchase.expires_at.replace("T", " ")}まで有効)。実効枠: ${r.quota.effective_quota_30d.toLocaleString()}件`);
+    await loadTenantDetail();
+  } catch (e) {
+    showResult(el, false, "エラー: " + e.message);
+  }
+});
+$("btnTenantAddStaff").addEventListener("click", async () => {
+  const el = $("tdStaffResult");
+  try {
+    const res = await call(`/api/ops/tenants/${currentTenantId}/staff`, { method: "POST", body: JSON.stringify({
+      name: $("tdsName").value.trim(), email: $("tdsEmail").value.trim(), password: $("tdsPassword").value, role: $("tdsRole").value }) });
+    showResult(el, true, `発行しました。メール認証は不要で、そのままログインできます。\n\nstaff_id: ${res.staff_id}\napi_key: ${res.api_key}\n(顧客にはメールアドレス・パスワードでのログイン、またはこのapi_keyを案内してください)`);
+    $("tdsName").value = ""; $("tdsEmail").value = ""; $("tdsPassword").value = "";
+    await loadTenantDetail();
+  } catch (e) {
+    showResult(el, false, "エラー: " + e.message);
+  }
+});
 $("btnRefreshInquiries").addEventListener("click", () => refreshInquiries().catch(e => alert(e.message)));
 
 async function doConnect() {

@@ -71,6 +71,13 @@ CACもチャネル別成績も出せない = 売り物にならない。
   POST /api/ops/plan-change-requests/<id>/resolve   申請を対応済みにする
                            (実際のプラン変更=tenants.plan_name等の更新は
                            自動化せず、本部が別途手動で行う。T53)
+  GET  /api/ops/tenants/<id>          テナント詳細(hq.html用。T88): 基本情報・プラン・実効
+                           クォータ(db.get_quota_status)・テナント別Kill Switch・担当者一覧・
+                           送信数追加の履歴。api_keyは含めない
+  POST /api/ops/tenants/<id>/update   {"name","kind","sender_name","sender_email","sender_address",
+                           "optout_url","plan_name","monthly_send_quota","daily_send_quota",
+                           "monthly_fee_yen"} → 指定した項目だけ更新(T88。hq.htmlの
+                           テナント詳細の編集フォーム用。送信通数のテナントごとの変更もここ)
   POST /api/ops/tenants/<id>/convert  {"plan_name","monthly_send_quota","daily_send_quota"(任意),
                            "monthly_fee_yen"(任意)} → デモテナントを本契約に切り替える(T87)。
                            kind='demo'→'client'、プラン・送信枠・月額・contracted_atを設定、
@@ -79,7 +86,9 @@ CACもチャネル別成績も出せない = 売り物にならない。
   GET  /api/ops/inquiries              お問い合わせ(契約申し込み・質問)の一覧(T85)
   POST /api/ops/inquiries/<id>/resolve 対応済みにする(契約の成立・本契約化は自動化しない)
   POST /api/ops/tenants/<id>/quota-purchase  {"qty","unit_price_yen"(任意),
-                           "external_ref"(任意)} → 送信可能件数を追加する
+                           "external_ref"(任意),"valid_until"(任意。"month_end"=当月末まで
+                           有効、またはYYYY-MM-DD。未指定なら従来通り30日間。T88)}
+                           → 送信可能件数を追加する
                            (直近30日分をtenants.monthly_send_quotaへ加算。
                            AI入札連携(T55)向け: 決済自体はAI入札側のStripeで
                            完結させ、成功後にこのAPIで記録するだけ。ここでは
@@ -379,6 +388,8 @@ _OPS_TENANT_QUOTA_PURCHASE_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/quota-
 _OPS_PLAN_CHANGE_RESOLVE_PATH_RE = re.compile(r"^/api/ops/plan-change-requests/(\d+)/resolve$")
 _OPS_INQUIRY_RESOLVE_PATH_RE = re.compile(r"^/api/ops/inquiries/(\d+)/resolve$")
 _OPS_TENANT_CONVERT_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/convert$")
+_OPS_TENANT_DETAIL_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)$")
+_OPS_TENANT_UPDATE_PATH_RE = re.compile(r"^/api/ops/tenants/(\d+)/update$")
 
 # list_builder.htmlを同一オリジン(このAPIサーバ自身)から配信する。
 # 別ドメイン(例: Vercel/HTTPS)からの配信だと、このAPIが未だ平文HTTPのため
@@ -2238,10 +2249,86 @@ def h_ops_tenant_quota_purchase(con, tenant_id, data):
     if unit_price_yen is not None and (not isinstance(unit_price_yen, int) or isinstance(unit_price_yen, bool)):
         return 400, {"error": "unit_price_yenは整数で指定してください"}
     external_ref = (data.get("external_ref") or "").strip() or None
+    # valid_until(T88): "month_end"=当月末まで、"YYYY-MM-DD"=その日の終わりまで。
+    # 未指定は従来通り(購入から30日間。AI入札連携の既存呼び出しを壊さない)
+    valid_until = (data.get("valid_until") or "").strip() or None
+    expires_at = None
+    if valid_until == "month_end":
+        now = datetime.now()
+        first_next = (now.replace(day=1) + timedelta(days=32)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        expires_at = first_next.isoformat(timespec="seconds")
+    elif valid_until:
+        try:
+            expires_at = datetime.fromisoformat(valid_until).replace(hour=23, minute=59, second=59).isoformat(timespec="seconds")
+        except ValueError:
+            return 400, {"error": "valid_untilは'month_end'またはYYYY-MM-DDで指定してください"}
+        if expires_at <= datetime.now().isoformat(timespec="seconds"):
+            return 400, {"error": "valid_untilは今日以降の日付を指定してください"}
     purchase, created = db.add_quota_purchase(con, tenant_id, qty, unit_price_yen=unit_price_yen,
-                                               external_ref=external_ref)
+                                               external_ref=external_ref, expires_at=expires_at)
     return 200, {"ok": True, "created": created, "purchase": purchase,
                  "quota": db.get_quota_status(con, tenant_id)}
+
+
+_TENANT_EDITABLE_TEXT = ("name", "sender_name", "sender_email", "sender_address", "optout_url", "plan_name")
+_TENANT_EDITABLE_INT = ("monthly_send_quota", "daily_send_quota", "monthly_fee_yen")
+
+
+def h_ops_tenant_detail(con, tenant_id):
+    """hq.htmlのテナント詳細(T88)。api_keyは返さない(発行時に一度きり表示する方針)。"""
+    row = con.execute("""SELECT id, name, kind, sender_name, sender_email, sender_address, optout_url,
+            plan_name, monthly_send_quota, daily_send_quota, monthly_fee_yen, contracted_at, created_at
+        FROM tenants WHERE id=?""", (tenant_id,)).fetchone()
+    if not row:
+        return 404, {"error": "テナントが見つかりません"}
+    ks = con.execute("SELECT reason, updated_at FROM tenant_kill_switch WHERE tenant_id=?",
+                     (tenant_id,)).fetchone()
+    staff = con.execute("""SELECT id, name, email, role, email_verified_at, password_hash IS NOT NULL AS has_password,
+            created_at FROM staff WHERE tenant_id=? ORDER BY created_at DESC""", (tenant_id,)).fetchall()
+    purchases = con.execute("""SELECT id, qty, unit_price_yen, external_ref, purchased_at, expires_at
+        FROM quota_purchases WHERE tenant_id=? ORDER BY purchased_at DESC LIMIT 20""", (tenant_id,)).fetchall()
+    return 200, {"tenant": dict(row), "quota": db.get_quota_status(con, tenant_id),
+                 "kill_switch": {"stopped": ks is not None, "reason": ks["reason"] if ks else None,
+                                 "updated_at": ks["updated_at"] if ks else None},
+                 "staff": [dict(s) for s in staff], "purchases": [dict(p) for p in purchases]}
+
+
+def h_ops_tenant_update(con, tenant_id, data):
+    """テナント情報の編集(T88)。渡された項目だけ更新する。送信通数(monthly/daily_send_quota)は
+    0以上の整数(0=枠なし。デモテナントの値)、nullを渡すと既定値(config)に戻す。
+    kindはown/client/acquirer/demoのみ。"""
+    if not con.execute("SELECT 1 FROM tenants WHERE id=?", (tenant_id,)).fetchone():
+        return 404, {"error": "テナントが見つかりません"}
+    sets, params = [], []
+    for key in _TENANT_EDITABLE_TEXT:
+        if key in data:
+            value = (str(data[key]).strip() if data[key] is not None else "") or None
+            if key in ("name", "sender_email") and not value:
+                return 400, {"error": f"{key}は空にできません"}
+            if key == "sender_email" and not _STAFF_EMAIL_RE.match(value):
+                return 400, {"error": "sender_emailの形式が正しくありません"}
+            sets.append(f"{key}=?")
+            params.append(value)
+    for key in _TENANT_EDITABLE_INT:
+        if key in data:
+            value = data[key]
+            # 0は「枠なし」(デモテナント等)として有効。nullは既定値(config)に戻す
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                return 400, {"error": f"{key}は0以上の整数(既定値に戻すならnull)で指定してください"}
+            sets.append(f"{key}=?")
+            params.append(value)
+    if "kind" in data:
+        kind = (data.get("kind") or "").strip()
+        if kind not in ("own", "client", "acquirer", "demo"):
+            return 400, {"error": "kindはown・client・acquirer・demoのいずれかです"}
+        sets.append("kind=?")
+        params.append(kind)
+    if not sets:
+        return 400, {"error": "更新する項目がありません"}
+    params.append(tenant_id)
+    con.execute(f"UPDATE tenants SET {', '.join(sets)} WHERE id=?", params)
+    con.commit()
+    return h_ops_tenant_detail(con, tenant_id)
 
 
 def h_ops_plan_change_requests_list(con):
@@ -2506,6 +2593,17 @@ class Handler(BaseHTTPRequestHandler):
             con = self._con()
             try:
                 st, res = h_ops_tenant_quota_purchase(con, int(ops_quota_purchase_match.group(1)), data)
+                return self._json(st, res)
+            finally:
+                con.close()
+
+        ops_update_match = _OPS_TENANT_UPDATE_PATH_RE.match(path)
+        if ops_update_match:
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                st, res = h_ops_tenant_update(con, int(ops_update_match.group(1)), data)
                 return self._json(st, res)
             finally:
                 con.close()
@@ -2830,6 +2928,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(st, res)
             except Exception as e:  # noqa: BLE001
                 return self._json(500, {"error": str(e)[:200]})
+            finally:
+                con.close()
+
+        ops_detail_match = _OPS_TENANT_DETAIL_PATH_RE.match(u.path)
+        if ops_detail_match:
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                st, res = h_ops_tenant_detail(con, int(ops_detail_match.group(1)))
+                return self._json(st, res)
             finally:
                 con.close()
 
@@ -4627,6 +4736,64 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/quota", token=key_b)
     t("【テナント分離監査】他テナント(key_b)のquota-purchaseは自分のquotaに影響しない",
       st == 200 and r["quota"]["addon_quota_30d"] == 0)
+
+    print("\n── 送信数の追加(当月のみ有効)・テナント詳細と編集(T88。hq.html用) ──")
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/quota-purchase", {"qty": 300, "valid_until": "こわれた"}, token=ops_key)
+    t("valid_untilが不正な文字列は400", st == 400)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/quota-purchase", {"qty": 300, "valid_until": "2000-01-01"}, token=ops_key)
+    t("valid_untilが過去日は400", st == 400)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/quota-purchase", {"qty": 300, "valid_until": "month_end"}, token=ops_key)
+    from datetime import datetime as _dt_t88, timedelta as _td_t88
+    _first_next = (_dt_t88.now().replace(day=1) + _td_t88(days=32)).replace(day=1).strftime("%Y-%m-%dT00:00:00")
+    t("valid_until='month_end'で追加すると当月末(翌月1日0時)が有効期限になる",
+      st == 200 and r["purchase"]["expires_at"] == _first_next and r["quota"]["addon_quota_30d"] == 800)
+    # 期限切れの追加分は実効クォータに数えない(直接DBで期限を過去にして確認)
+    con.execute("UPDATE quota_purchases SET expires_at='2000-01-01T00:00:00' WHERE id=?", (r["purchase"]["id"],))
+    con.commit()
+    t("期限を過ぎた追加分は実効クォータから外れる(従来の30日型の500だけ残る)",
+      db.get_quota_status(con, tid_a)["addon_quota_30d"] == 500)
+
+    st, r = get_auth(f"/api/ops/tenants/{tid_a}")
+    t("認証ヘッダなしのGET /api/ops/tenants/<id>は401", st == 401)
+    st, r = get_auth("/api/ops/tenants/999999999", token=ops_key)
+    t("存在しないテナントの詳細は404", st == 404)
+    st, r = get_auth(f"/api/ops/tenants/{tid_a}", token=ops_key)
+    t("GET /api/ops/tenants/<id>で基本情報・quota・kill_switch・staff・purchasesが返り、api_keyは含まない",
+      st == 200 and r["tenant"]["id"] == tid_a and "api_key" not in r["tenant"]
+      and "effective_quota_30d" in r["quota"] and "stopped" in r["kill_switch"]
+      and isinstance(r["staff"], list) and len(r["purchases"]) >= 2)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/update", {"name": "改名テスト"})
+    t("認証ヘッダなしのPOST /api/ops/tenants/<id>/updateは401", st == 401)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/update", {}, token=ops_key)
+    t("更新項目なしは400", st == 400)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/update", {"sender_email": "こわれた"}, token=ops_key)
+    t("sender_emailの形式不正は400", st == 400)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/update", {"monthly_send_quota": -5}, token=ops_key)
+    t("monthly_send_quotaが負数は400", st == 400)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/update", {"daily_send_quota": 0}, token=ops_key)
+    t("送信通数0(枠なし。デモテナントの値)は保存できる", st == 200 and r["tenant"]["daily_send_quota"] == 0)
+    con.execute("UPDATE tenants SET daily_send_quota=NULL WHERE id=?", (tid_a,))
+    con.commit()
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/update", {"kind": "unknown"}, token=ops_key)
+    t("kindが不正は400", st == 400)
+    orig_a = con.execute("SELECT name, sender_email, monthly_send_quota, plan_name FROM tenants WHERE id=?", (tid_a,)).fetchone()
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/update",
+                       {"name": "改名テスト株式会社", "monthly_send_quota": 7500, "plan_name": "ベーシック",
+                        "monthly_fee_yen": 85000}, token=ops_key)
+    t("指定した項目だけ更新され、更新後の詳細が返る",
+      st == 200 and r["tenant"]["name"] == "改名テスト株式会社" and r["tenant"]["monthly_send_quota"] == 7500
+      and r["tenant"]["plan_name"] == "ベーシック" and r["tenant"]["monthly_fee_yen"] == 85000
+      and r["tenant"]["sender_email"] == orig_a["sender_email"])
+    t("送信通数の変更が実効クォータ(送信判定側)にも反映される",
+      r["quota"]["base_monthly_send_quota"] == 7500)
+    st, r = post_auth(f"/api/ops/tenants/{tid_a}/update", {"monthly_send_quota": None}, token=ops_key)
+    import config as _C_t88
+    t("monthly_send_quotaにnullを渡すと既定値に戻る",
+      st == 200 and r["tenant"]["monthly_send_quota"] is None
+      and r["quota"]["base_monthly_send_quota"] == _C_t88.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT)
+    con.execute("UPDATE tenants SET name=?, monthly_send_quota=?, plan_name=?, monthly_fee_yen=NULL WHERE id=?",
+                (orig_a["name"], orig_a["monthly_send_quota"], orig_a["plan_name"], tid_a))
+    con.commit()
 
     print("\n── 業種語彙(AI入札連携。T56) ──")
     st, r = get_auth("/api/tenant/trades")

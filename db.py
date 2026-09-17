@@ -395,6 +395,7 @@ def migrate(con):
         ("tenants", "api_key", "TEXT"),  # target_listsのAPI認証キー(SaaS販売用テナントに発行)
         ("tenants", "contracted_at", "TEXT"),   # 本契約の成立日時(T87。キャンペーンの「何社目」はこの順)
         ("tenants", "monthly_fee_yen", "INTEGER"),  # 契約時に決めた月額(T87。キャンペーン価格は契約中据え置き)
+        ("quota_purchases", "expires_at", "TEXT"),  # 追加分の有効期限(T88。NULL=従来通り購入から30日間)
         ("target_lists", "campaign_id", "INTEGER"),  # send_list()で一度送信すると紐づく(二重送信防止)
         # 企業1社×1リストの「現在の送信状態」。履歴(何度目のどの結果か)は
         # form_send_log側が持つので、ここは最新状態のスナップショットに徹する。
@@ -998,10 +999,13 @@ def get_quota_status(con, tenant_id):
     base = (row["monthly_send_quota"] if row and row["monthly_send_quota"] is not None
             else C.FORM_MAX_PER_TENANT_PER_MONTH_DEFAULT)
     plan_name = row["plan_name"] if row else None
+    now = datetime.now().isoformat(timespec="seconds")
     month_ago = (datetime.now() - timedelta(days=30)).isoformat(timespec="seconds")
-    addon = con.execute(
-        "SELECT COALESCE(SUM(qty),0) FROM quota_purchases WHERE tenant_id=? AND purchased_at>=?",
-        (tenant_id, month_ago)).fetchone()[0]
+    # expires_at付き(T88。hq.htmlからの「当月末まで」の追加)は期限内のものだけ、
+    # expires_at無し(T55。AI入札連携)は従来通り購入から30日間有効
+    addon = con.execute("""SELECT COALESCE(SUM(qty),0) FROM quota_purchases WHERE tenant_id=?
+        AND ((expires_at IS NULL AND purchased_at>=?) OR (expires_at IS NOT NULL AND expires_at>?))""",
+        (tenant_id, month_ago, now)).fetchone()[0]
     used = con.execute(
         "SELECT COUNT(*) FROM form_send_log WHERE tenant_id=? AND started_at>=?",
         (tenant_id, month_ago)).fetchone()[0]
@@ -1011,24 +1015,27 @@ def get_quota_status(con, tenant_id):
             "remaining_30d": max(0, effective - used), "plan_name": plan_name}
 
 
-def add_quota_purchase(con, tenant_id, qty, unit_price_yen=None, external_ref=None):
+def add_quota_purchase(con, tenant_id, qty, unit_price_yen=None, external_ref=None, expires_at=None):
     """クォータ追加購入を1件記録する。external_refが既存の購入と重複する場合は
     新規挿入せず、その既存レコードをそのまま返す(Stripeのwebhook再送等による
-    二重計上を防ぐ。決済自体はAI入札側で完結しており、ここは記録するだけ)。"""
+    二重計上を防ぐ。決済自体はAI入札側で完結しており、ここは記録するだけ)。
+    expires_at(ISO日時)を指定するとその時刻まで有効(T88。「当月のみ」の追加用)。
+    未指定なら従来通り購入から30日間有効(get_quota_status()参照)。"""
     if external_ref:
         existing = con.execute(
-            "SELECT id, tenant_id, qty, unit_price_yen, external_ref, purchased_at "
+            "SELECT id, tenant_id, qty, unit_price_yen, external_ref, purchased_at, expires_at "
             "FROM quota_purchases WHERE tenant_id=? AND external_ref=?",
             (tenant_id, external_ref)).fetchone()
         if existing:
             return dict(existing), False
     now = datetime.now().isoformat(timespec="seconds")
-    cur = con.execute("""INSERT INTO quota_purchases (tenant_id, qty, unit_price_yen, external_ref, purchased_at)
-        VALUES (?,?,?,?,?)""", (tenant_id, qty, unit_price_yen, external_ref, now))
+    cur = con.execute("""INSERT INTO quota_purchases (tenant_id, qty, unit_price_yen, external_ref,
+        purchased_at, expires_at) VALUES (?,?,?,?,?,?)""",
+        (tenant_id, qty, unit_price_yen, external_ref, now, expires_at))
     con.commit()
     return {"id": cur.lastrowid, "tenant_id": tenant_id, "qty": qty,
             "unit_price_yen": unit_price_yen, "external_ref": external_ref,
-            "purchased_at": now}, True
+            "purchased_at": now, "expires_at": expires_at}, True
 
 
 # ── 企業1社×1リストの送信状態(target_list_members) ──

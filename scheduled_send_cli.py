@@ -123,6 +123,15 @@ def loop(workers, interval):
         p.start()
         procs[i] = p
 
+    # 起動時: 前回の実行中(RUNNING)に取り残された予約を即PENDINGへ戻す(T96)。
+    # デプロイで再起動されると実行中の大量送信が3時間止まっていたため
+    con = db.connect()
+    db.migrate(con)
+    requeued = db.requeue_all_running(con)
+    if requeued:
+        print(f"[loop] 前回実行中のまま残っていた予約{requeued}件をPENDINGへ戻しました(送信済みは飛ばして再開)")
+    con.close()
+
     for i in range(workers):
         _spawn(i)
     stopping = {"flag": False}

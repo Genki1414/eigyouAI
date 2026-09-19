@@ -927,6 +927,19 @@ def requeue_stale_running(con, older_than_iso):
     return cur.rowcount
 
 
+def requeue_all_running(con):
+    """送信サービス(scheduled_send_cli.py loop)の起動時に、RUNNINGのまま残っている予約を
+    すべてPENDINGへ戻す(T96)。送信サービスはデプロイ(docker compose up --build)のたびに
+    再起動され、そのとき実行中だった予約はRUNNINGのまま取り残される。requeue_stale_running
+    (3時間)を待つと再開まで最長3時間止まるため、起動時は即座に戻す。送信サービスは1コンテナ
+    なので、起動時点で本当に実行中の予約は存在しない。send_list()は送信済みの会社を冪等に
+    飛ばすので二重送信にはならない。"""
+    cur = con.execute("""UPDATE scheduled_sends SET status='PENDING', claimed_at=NULL, worker=NULL
+        WHERE status='RUNNING'""")
+    con.commit()
+    return cur.rowcount
+
+
 def finish_scheduled_send(con, scheduled_id, status, result=None):
     con.execute("""UPDATE scheduled_sends SET status=?, result_json=?, executed_at=?
         WHERE id=?""",

@@ -4041,6 +4041,11 @@ def self_test(port=8899):
     t("RUNNINGのまま長時間経った予約はPENDINGへ戻る(ワーカー障害からの復旧)",
       db.requeue_stale_running(con, stale_cut) == 1
       and con.execute("SELECT status FROM scheduled_sends WHERE id=?", (q_id,)).fetchone()["status"] == "PENDING")
+    # T96: 送信サービス起動時はRUNNINGを全て即PENDINGへ戻す(デプロイ再起動で3時間止まらない)
+    t("claim: 戻った予約はまた取り込める", db.claim_scheduled_send(con, q_id, "worker-3") is True)
+    t("送信サービス起動時のrequeue_all_runningでRUNNINGが即PENDINGへ戻る(T96)",
+      db.requeue_all_running(con) == 1
+      and con.execute("SELECT status, worker FROM scheduled_sends WHERE id=?", (q_id,)).fetchone()["status"] == "PENDING")
     import scheduled_send_cli as SSC_test
     n_run = SSC_test.run_due(con, worker="test-worker", quiet=True)
     row = con.execute("SELECT status, result_json, worker FROM scheduled_sends WHERE id=?", (q_id,)).fetchone()

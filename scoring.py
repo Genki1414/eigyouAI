@@ -69,35 +69,60 @@ def recommend_channel(r, rank):
         return "パーソナライズDM+架電"
     return "一斉メール"
 
+# out/scored.json に残す上位社数。以前は全社(本番46万社×全列)をメモリに積んでから
+# 数GBのJSONを書いていたため、4GBのサーバーで毎晩OOM killされていた(T99)。
+TOP_N = 2000
+BATCH = 5000
+
+
 def main():
+    import heapq
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
-    rows = con.execute("SELECT * FROM companies").fetchall()
-    out = []
-    excluded = 0
-    for r in rows:
-        # is_target_business=0(施工実態なしとAIが判定)はスコアリング対象外。
-        # dedup_ofとは別軸のフラグなので、代表社への集約とは独立に除外する。
-        if r["is_target_business"] == 0:
-            excluded += 1
-            con.execute("UPDATE companies SET score=NULL, rank=NULL, score_detail=NULL WHERE id=?",
-                        (r["id"],))
-            continue
-        total, rank, detail = score_row(r)
-        con.execute("UPDATE companies SET score=?, rank=?, score_detail=? WHERE id=?",
-                    (total, rank, json.dumps(detail), r["id"]))
-        rec = dict(r)
-        rec.update(score=total, rank=rank, detail=detail,
-                   channel=recommend_channel(r, rank))
-        out.append(rec)
-    con.commit()
-    out.sort(key=lambda x: -x["score"])
-    OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1))
+    top = []          # (score, seq, rec) の最小ヒープ。上位TOP_Nだけ保持する
+    seq = 0
     dist = {}
-    for o in out:
-        dist[o["rank"]] = dist.get(o["rank"], 0) + 1
-    print(f"スコアリング完了: {len(out)}社 / 分布 {dist} "
-          f"(施工実態なしで除外 {excluded}社) → {OUT}")
+    scored = excluded = 0
+    last_id = 0
+    # id順に少しずつ読む(SELECT * ... fetchall()は本番規模だと2GB超になる)。
+    # UPDATEは読み終えたバッチごとにまとめて行う
+    while True:
+        rows = con.execute("SELECT * FROM companies WHERE id>? ORDER BY id LIMIT ?",
+                           (last_id, BATCH)).fetchall()
+        if not rows:
+            break
+        last_id = rows[-1]["id"]
+        clear_ids, updates = [], []
+        for r in rows:
+            # is_target_business=0(施工実態なしとAIが判定)はスコアリング対象外。
+            # dedup_ofとは別軸のフラグなので、代表社への集約とは独立に除外する。
+            if r["is_target_business"] == 0:
+                excluded += 1
+                clear_ids.append((r["id"],))
+                continue
+            total, rank, detail = score_row(r)
+            updates.append((total, rank, json.dumps(detail), r["id"]))
+            scored += 1
+            dist[rank] = dist.get(rank, 0) + 1
+            seq += 1
+            rec = dict(r)
+            rec.update(score=total, rank=rank, detail=detail,
+                       channel=recommend_channel(r, rank))
+            item = (total, seq, rec)
+            if len(top) < TOP_N:
+                heapq.heappush(top, item)
+            elif total > top[0][0]:
+                heapq.heapreplace(top, item)
+        if clear_ids:
+            con.executemany("UPDATE companies SET score=NULL, rank=NULL, score_detail=NULL WHERE id=?",
+                            clear_ids)
+        if updates:
+            con.executemany("UPDATE companies SET score=?, rank=?, score_detail=? WHERE id=?", updates)
+        con.commit()
+    out = [rec for _, _, rec in sorted(top, key=lambda x: -x[0])]
+    OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1))
+    print(f"スコアリング完了: {scored}社 / 分布 {dist} "
+          f"(施工実態なしで除外 {excluded}社) → {OUT}(上位{len(out)}社)")
 
 if __name__ == "__main__":
     main()

@@ -1060,12 +1060,12 @@ def h_tenant_send_log_executions_csv(con, tenant_id, qs):
     w = csv.writer(buf)
     w.writerow(["リストID", "実行日時", "リスト名", "担当者", "送信元会社名", "送信元姓", "送信元名",
                 "送信元メール", "件名", "本文", "備考", "送信成功", "失敗", "フォームなし", "総数",
-                "URLクリック数", "最新クリック日時"])
+                "送信消化(社)", "リスト件数", "URLクリック数", "最新クリック日時"])
     for e in execs:
         w.writerow([e["list_id"], e["started_at"] or "", e["list_name"] or "", e["staff_name"] or "",
                     e["company_name"] or "", e["sender_last_name"], e["sender_first_name"], e["sender_email"],
                     e["subject"], e["body"], e["send_note"], e["success"], e["failed"], e["no_form"],
-                    e["total"], e["click_count"], e["last_clicked_at"] or ""])
+                    e["total"], e["sent_companies"], e["list_count"], e["click_count"], e["last_clicked_at"] or ""])
     return 200, {"csv": buf.getvalue(), "count": len(execs)}
 
 
@@ -4527,6 +4527,8 @@ def self_test(port=8899):
       ex["success"] == 1 and ex["no_form"] == 1 and ex["failed"] == 0 and ex["total"] == 2)
     t("URLクリック数が集計される", ex["click_count"] == 3)
     t("最新クリック日時が反映される", ex["last_clicked_at"] == now_t22)
+    t("送信消化(送信を試した会社数/リスト件数)が実行一覧に出る(T106)",
+      ex["sent_companies"] == 1 and ex["list_count"] >= 1, f"ex={ {k: ex[k] for k in ('sent_companies', 'list_count', 'total')} }")
 
     st, r = get_auth(f"/api/tenant/send-log/executions?list_id={t22_list_id}", token=key_b)
     t("他テナントからは見えない(0件)", st == 200 and len(r.get("executions", [])) == 0)

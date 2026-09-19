@@ -1584,11 +1584,12 @@ async function refreshDashboard() {
     const lr = await call("/api/tenant/send-log/executions?limit=5");
     const execs = lr.executions || [];
     if (!execs.length) { logEl.innerHTML = `<div class="empty">まだ営業履歴がありません</div>`; return; }
-    logEl.innerHTML = `<table><tr><th>リスト名</th><th>送信文章</th><th>送信成功/総数</th><th>実行日時</th></tr>` +
+    logEl.innerHTML = `<table><tr><th>リスト名</th><th>送信文章</th><th>送信消化</th><th>送信成功/総数</th><th>実行日時</th></tr>` +
       execs.map(x => `<tr>
         <td><a href="#" class="dashExecLink" data-id="${x.list_id}" data-name="${(x.list_name || "").replace(/"/g, "&quot;")}">${x.list_name || "—"}</a></td>
         <td style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
           title="${(x.subject || "").replace(/"/g, "&quot;")}">${x.subject || "—"}</td>
+        <td title="送信を試した会社数/リストの件数">${(x.sent_companies || 0).toLocaleString()}/${(x.list_count || 0).toLocaleString()}${x.list_count ? ` <span style="font-size:11px;color:var(--steel)">(${Math.round((x.sent_companies || 0) * 100 / x.list_count)}%)</span>` : ""}</td>
         <td>${x.success.toLocaleString()}/${x.total.toLocaleString()}</td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at || "—"}</td></tr>`).join("") +
       `</table>
@@ -1857,7 +1858,7 @@ async function refreshSendLogExecutions() {
 
     if (!execs.length) { el.innerHTML = `<div class="empty">該当する自動送信ログがありません</div>`; return; }
     el.innerHTML = `<table><tr><th>ID</th><th>担当者(ID)</th><th>会社名</th><th>姓</th><th>名</th>
-        <th>メールアドレス</th><th>送信文章</th><th>備考</th><th>送信成功/総数</th>
+        <th>メールアドレス</th><th>送信文章</th><th>備考</th><th>送信消化</th><th>送信成功/総数</th>
         <th>URLクリック数</th><th>最新クリック日時</th><th>実行日時</th></tr>` +
       execs.map(x => { const escSubject = (x.subject || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
         const escBody = (x.body || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -1874,6 +1875,7 @@ async function refreshSendLogExecutions() {
         <td><input type="text" class="execNoteInput" data-id="${x.list_id}"
           value="${(x.send_note || "").replace(/"/g, "&quot;")}" placeholder="例: 中国 解体土木プラント"
           style="font-size:11px;padding:4px 6px;width:120px"></td>
+        <td title="送信を試した会社数/リストの件数">${(x.sent_companies || 0).toLocaleString()}/${(x.list_count || 0).toLocaleString()}${x.list_count ? ` <span style="font-size:11px;color:var(--steel)">(${Math.round((x.sent_companies || 0) * 100 / x.list_count)}%)</span>` : ""}</td>
         <td>${x.success.toLocaleString()}/${x.total.toLocaleString()}</td>
         <td>${x.click_count.toLocaleString()}</td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.last_clicked_at || "—"}</td>

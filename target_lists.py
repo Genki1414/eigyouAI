@@ -954,7 +954,7 @@ def list_send_executions(con, tenant_id, list_id=None, date_from=None, date_to=N
         where += " AND tl.last_send_started_at<=?"
         params.append(date_to + "T23:59:59")
 
-    rows = con.execute(f"""SELECT tl.id, tl.name, tl.campaign_id, tl.send_note,
+    rows = con.execute(f"""SELECT tl.id, tl.name, tl.campaign_id, tl.send_note, tl.company_count,
             tl.last_send_started_at, tl.sent_by_staff_id, tl.sent_sender_template_id,
             tn.name tenant_name, tn.sender_name tenant_sender_name, tn.sender_email tenant_sender_email,
             st.name staff_name,
@@ -971,7 +971,8 @@ def list_send_executions(con, tenant_id, list_id=None, date_from=None, date_to=N
     out = []
     for r in rows:
         counts = con.execute(f"""SELECT COUNT(*) total, {_EXEC_SUCCESS_SQL} success,
-                {_EXEC_FAILED_SQL} failed, {_EXEC_NO_FORM_SQL} no_form
+                {_EXEC_FAILED_SQL} failed, {_EXEC_NO_FORM_SQL} no_form,
+                COUNT(DISTINCT l.company_id) sent_companies
             FROM form_send_log l WHERE l.list_id=?""", (r["id"],)).fetchone()
         clicks = con.execute("""SELECT COALESCE(SUM(email_click_count),0) clicks,
                 MAX(email_clicked_at) last_clicked_at
@@ -997,6 +998,8 @@ def list_send_executions(con, tenant_id, list_id=None, date_from=None, date_to=N
             "body": (sample["body"] if sample else "") or "",
             "success": counts["success"] or 0, "failed": counts["failed"] or 0,
             "no_form": counts["no_form"] or 0, "total": counts["total"] or 0,
+            # 送信消化(T106): 送信を試した会社数/リストの件数(「350/2,795」表示用)
+            "sent_companies": counts["sent_companies"] or 0, "list_count": r["company_count"] or 0,
             "click_count": clicks["clicks"] or 0, "last_clicked_at": clicks["last_clicked_at"],
             "started_at": r["last_send_started_at"],
         })

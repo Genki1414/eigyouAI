@@ -585,6 +585,14 @@ def rewrite_tracked_links(con, touch_id, body, base_url):
 
 
 # ── 一括送信 ────────────────────────────────
+def _is_quota_error(error):
+    """FormSender._check_quota()が返す上限・クォータ到達の理由文かどうか(T101)。
+    これに当たった時点で同じ実行の残りの会社は送っても同じ結果になるので、
+    「失敗」ではなく「上限到達のため未送信」として止める(翌日そのまま続きから送れる)。"""
+    e = error or ""
+    return "上限" in e and "到達" in e or "クォータ" in e
+
+
 def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clicks=False,
                    sender_template_id=None, allow_no_solicit=False, sender_override=None):
     """キャンペーンの対象企業へ実際に送る。
@@ -679,6 +687,10 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
     # 同じキーになるため、既に送信済みの企業を対象にしても冪等キー一致で黙って
     # スキップされ、結局再送信できなかった)。
     run_nonce = uuid.uuid4().hex[:10]
+    # T101: 上限(日次・月間クォータ等)に到達したら、残りの会社は送らずに「未送信」で止める。
+    # 以前は残り数千社が1社ずつ「テナント別・直近24時間の上限に到達」で失敗扱いになり、
+    # 画面上は「失敗2,931」に見えていた(2026-09-19の実インシデント)
+    quota_stop = {"reason": None}
 
     # sender_template_id指定時は、テナントの「有効化」済み送信元の代わりにこのテンプレートを
     # この送信だけに使う。同じ他テナントのIDを渡されても情報が漏れないようtenant_idでも絞る
@@ -752,6 +764,12 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
         冪等性チェックはidempotency.keyのUNIQUE制約でスレッド間でも安全)。"""
         con_t = _con_for_thread()
 
+        if quota_stop["reason"]:
+            con_t.execute("UPDATE touches SET note=? WHERE id=?",
+                          (f"未送信: 上限到達({quota_stop['reason']})", r["tid"]))
+            con_t.commit()
+            return {"kind": "blocked", "reason": "上限到達のため未送信"}
+
         # 送信直前の最終ガード（作成後に配信停止された可能性がある。テナント別の
         # 送信除外設定(tenant_exclusions)もここで一緒に確認する）
         allowed, why = db.can_contact(con_t, r["company_id"], tenant_id=r["tenant_id"])
@@ -811,6 +829,8 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
         if track_clicks and not dry_run:
             body = rewrite_tracked_links(con_t, r["tid"], body, C.TRACK_BASE_URL)
         res = adapter.send(to, sender, subject, body, key)
+        if not res.ok and _is_quota_error(res.error):
+            quota_stop["reason"] = res.error
 
         if res.ok:
             con_t.execute("""UPDATE touches SET sent_at=?, delivered=1, note=?, unit_cost_yen=?
@@ -1370,6 +1390,13 @@ if __name__ == "__main__":
                 con.execute("DELETE FROM offers WHERE tenant_id=?", (row["id"],))
                 con.execute("DELETE FROM tenants WHERE id=?", (row["id"],))
         con.commit()
+        print("\n── 上限到達で残りを未送信として止める(T101) ──")
+        ok_q1 = _is_quota_error("テナント別・直近24時間の上限(300件)に到達")
+        ok_q2 = _is_quota_error("テナント別・直近30日間の月間クォータ(4000件)に到達")
+        ok_q3 = not _is_quota_error("問い合わせページURL未取得") and not _is_quota_error(None)
+        print(f"  {'✓' if ok_q1 and ok_q2 else '✗'} 日次上限・月間クォータの理由文を上限エラーと判定する")
+        print(f"  {'✓' if ok_q3 else '✗'} それ以外の失敗理由は上限エラー扱いにしない")
+
         tid_qa, _ = OF.add_tenant(con, "test-quota-A", "qa@example.co.jp")
         tid_qb, _ = OF.add_tenant(con, "test-quota-B", "qb@example.co.jp")
         con.commit()

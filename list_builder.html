@@ -819,8 +819,9 @@ tr.clickable:hover{background:var(--accent-soft)}
               (このブラウザのAPI接続情報が拡張機能へ渡されます)。</li>
             <li>失敗した企業の行の「自動入力」ボタンを押すと、対象企業のフォームページが
               新しいタブで開きます。</li>
-            <li>そのタブでChromeツールバーの拡張機能アイコンを押すと、入力欄が自動で埋まります
-              (送信ボタンは押しません。内容を確認してご自身で送信してください)。
+            <li>開いたタブの読み込みが終わると、入力欄が自動で埋まります(拡張機能 v1.2.0以降。
+              送信ボタンは押しません。内容を確認してご自身で送信してください)。
+              数秒待っても埋まらない場合は、そのタブでChromeツールバーの拡張機能アイコンを押してください。
               アイコンがツールバーに無い場合は、右上のパズル型アイコン🧩を押して
               「ヒラケル自動入力アシスト」のピン📌を押すと表示されます。
               CAPTCHA(画像認証)がある場合はご自身で解いてから送信してください。</li>
@@ -1599,6 +1600,21 @@ async function refreshDashboard() {
 // 拡張機能のIDはmanifest.jsonの"key"で固定しているため、ここに埋め込んで直接メッセージを送れる。
 const AUTOFILL_EXTENSION_ID = "flfihmmppmplhnedajkbkiieffmmigle";
 
+// 拡張機能へメッセージを送り、応答のversionを返す(未インストール・旧版なら"")
+function tellExtension(message) {
+  return new Promise((resolve) => {
+    if (!(window.chrome && chrome.runtime && chrome.runtime.sendMessage)) { resolve(""); return; }
+    try {
+      const timer = setTimeout(() => resolve(""), 1500);
+      chrome.runtime.sendMessage(AUTOFILL_EXTENSION_ID, message, (response) => {
+        clearTimeout(timer);
+        if (chrome.runtime.lastError || !response || !response.ok) { resolve(""); return; }
+        resolve(response.version || "1.0");
+      });
+    } catch (e) { resolve(""); }
+  });
+}
+
 function connectAutofillExtension() {
   const hint = $("autofillHint");
   if (!API || !KEY) { hint.textContent = "接続すると連携できます。"; return; }
@@ -1617,8 +1633,9 @@ function connectAutofillExtension() {
             + "手動設定してください。";
           return;
         }
-        hint.textContent = "連携済みです。失敗した企業の行で「自動入力」→開いたタブで"
-          + "拡張機能アイコンをクリックしてください。";
+        const v = (response && response.version) || "";
+        hint.textContent = "連携済みです" + (v ? `(拡張機能 v${v})` : "(拡張機能が古いため、zipを再ダウンロードして入れ替えると自動入力になります)")
+          + "。失敗した企業の行で「自動入力」を押すと、開いたタブに自動で入力されます。";
       });
   } catch (e) {
     hint.textContent = "連携に失敗しました: " + e.message;
@@ -2045,11 +2062,22 @@ async function queueAutofill(logId, btn) {
   const tab = window.open("", "_blank");
   try {
     const r = await call(`/api/tenant/send-log/${logId}/autofill-queue`, { method: "POST" });
+    // 拡張機能(v1.2.0以降)に「次はこのURLを開く」と伝えておくと、開いたタブの読み込み完了時に
+    // アイコンを押さなくても自動で入力される。届かなければ従来どおりアイコン押下の案内
+    const extVersion = await tellExtension({ type: "expect", url: r.url });
     if (tab) tab.location = r.url; else window.open(r.url, "_blank");
     const hint = $("autofillHint");
-    if (hint) hint.innerHTML = `準備できました(10分間有効)。開いたタブで<b>Chromeツールバーの拡張機能アイコン</b>を押してください。`
-      + `アイコンが見当たらない場合は、ツールバー右のパズル型アイコン🧩→「ヒラケル自動入力アシスト」の`
-      + `ピン📌を押すと表示されます。`;
+    if (hint) {
+      if (extVersion) {
+        hint.innerHTML = `準備できました(10分間有効)。開いたタブの読み込みが終わると<b>自動で入力されます</b>`
+          + `(拡張機能 v${extVersion})。数秒待っても入力されない場合は、そのタブでツールバーの拡張機能アイコンを押してください。`;
+      } else {
+        hint.innerHTML = `準備できました(10分間有効)。拡張機能と通信できなかったため、開いたタブで`
+          + `<b>Chromeツールバーの拡張機能アイコン</b>を押してください。アイコンが見当たらない場合は、`
+          + `ツールバー右のパズル型アイコン🧩→「ヒラケル自動入力アシスト」のピン📌を押すと表示されます。`
+          + `自動で入力されるようにするには、拡張機能を最新版(zipを再ダウンロード)に入れ替えて「拡張機能と連携する」を押し直してください。`;
+      }
+    }
   } catch (e) {
     if (tab) tab.close();
     alert("自動入力の準備に失敗しました: " + e.message);

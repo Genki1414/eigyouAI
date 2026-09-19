@@ -17,12 +17,44 @@ async function getCreds() {
 // list_builder.html側の「拡張機能と連携する」ボタンから、apiBase/apiKeyを受け取る。
 // manifest.jsonのexternally_connectableで許可されたページからのみ届く。
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== "setup") return;
-  chrome.storage.local.set({ apiBase: message.apiBase, apiKey: message.apiKey }, () => {
-    sendResponse({ ok: true });
-  });
-  return true; // sendResponseを非同期で呼ぶため
+  if (!message) return;
+  if (message.type === "setup") {
+    chrome.storage.local.set({ apiBase: message.apiBase, apiKey: message.apiKey }, () => {
+      sendResponse({ ok: true, version: chrome.runtime.getManifest().version });
+    });
+    return true; // sendResponseを非同期で呼ぶため
+  }
+  if (message.type === "expect") {
+    // 「自動入力」ボタンが押された: 次に開く対象ページのURLを覚えておき、読み込み完了時に
+    // アイコンを押さなくても自動で入力する(v1.2.0)。10分で失効
+    chrome.storage.local.set({ expectUrl: message.url || "", expectAt: Date.now() }, () => {
+      sendResponse({ ok: true, version: chrome.runtime.getManifest().version });
+    });
+    return true;
+  }
+  if (message.type === "ping") {
+    sendResponse({ ok: true, version: chrome.runtime.getManifest().version });
+    return false;
+  }
 });
+
+// 「自動入力」で開いたタブの読み込みが終わったら自動で入力する(v1.2.0)。
+// 以前はツールバーのアイコンを押す必要があり、アイコンがパズル🧩の中に隠れていたり、
+// 押す前に別のタブへ移ってしまったりして「自動入力が効かない」となっていた。
+const autoFilledTabs = new Map(); // tabId -> expectAt(同じ期待に対して1回だけ)
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete" || !tab || !tab.url) return;
+  if (!/^https?:/.test(tab.url)) return;
+  let expect;
+  try { expect = await chrome.storage.local.get(["expectUrl", "expectAt"]); } catch (e) { return; }
+  if (!expect.expectUrl || !expect.expectAt || Date.now() - expect.expectAt > 10 * 60 * 1000) return;
+  if (hostOf(expect.expectUrl) !== hostOf(tab.url)) return;
+  if (autoFilledTabs.get(tabId) === expect.expectAt) return;
+  autoFilledTabs.set(tabId, expect.expectAt);
+  // 遅れて描画されるフォーム(JS生成)に備えて少し待つ
+  setTimeout(() => runAutofill(tab), 800);
+});
+chrome.tabs.onRemoved.addListener((tabId) => autoFilledTabs.delete(tabId));
 
 // 対象ページのDOMへ注入して実行する関数。chrome.scripting.executeScript()でシリアライズされる
 // ため、background.js内の他の変数やクロージャを一切参照できない完全に自己完結な関数にする

@@ -940,6 +940,15 @@ def requeue_all_running(con):
     return cur.rowcount
 
 
+def requeue_running_by_worker(con, worker):
+    """特定ワーカー(hostname-pid-idx)が取り込んだままのRUNNING予約をPENDINGへ戻す(T96)。
+    子プロセスがOOM等で突然死んだとき、監督側(loop)が起動し直す前に呼ぶ。"""
+    cur = con.execute("""UPDATE scheduled_sends SET status='PENDING', claimed_at=NULL, worker=NULL
+        WHERE status='RUNNING' AND worker=?""", (worker,))
+    con.commit()
+    return cur.rowcount
+
+
 def finish_scheduled_send(con, scheduled_id, status, result=None):
     con.execute("""UPDATE scheduled_sends SET status=?, result_json=?, executed_at=?
         WHERE id=?""",

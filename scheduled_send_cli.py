@@ -149,6 +149,16 @@ def loop(workers, interval):
         for i, p in list(procs.items()):
             if not p.is_alive() and not stopping["flag"]:
                 print(f"[loop] ワーカー{i}が終了(code={p.exitcode})。起動し直します")
+                # 死んだ子が実行中だった予約を即PENDINGへ戻す(T96)。OOM等で子だけ落ちると
+                # コンテナは再起動されないため、requeue_all_running(起動時)では拾えない
+                try:
+                    con = db.connect()
+                    n = db.requeue_running_by_worker(con, f"{socket.gethostname()}-{p.pid}-{i}")
+                    con.close()
+                    if n:
+                        print(f"[loop] ワーカー{i}が実行中だった予約{n}件をPENDINGへ戻しました(送信済みは飛ばして再開)")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[loop] 予約の戻しに失敗: {e}")
                 _spawn(i)
     for p in procs.values():
         p.join(timeout=30)

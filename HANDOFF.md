@@ -4686,6 +4686,11 @@ FORM_SEND_CONCURRENCY=3のため、1社20〜40秒として5〜12時間かかる�
 - **対処**: `db.requeue_all_running()`を追加し、`scheduled_send_cli.loop()`の起動時に
   RUNNINGを全てPENDINGへ戻す。senderは1コンテナなので起動時点で本当に実行中の予約は無い。
   `send_list()`は送信済み(touches)の会社を冪等に飛ばすので二重送信にはならない。
+- **子プロセスだけが死んだ場合**(OOM等。コンテナは再起動されない): `loop()`の監督側が
+  起動し直す前に`db.requeue_running_by_worker()`でその子(hostname-pid-idx)の予約を即戻す。
+- **実際に起きたこと**: 2,975社の送信が85社処理した時点で止まった(予約一覧は「送信中」の
+  まま)。原因はサーバーのログ(`docker logs eigyouai-sender`, `dmesg | grep -i kill`)で確認。
+  Chromium×3の同時起動でメモリ不足ならFORM_SEND_CONCURRENCYを2へ下げるか、サーバー増強。
 - **運用**: それでも再起動すれば「戻して再開」なので、大量送信中はpush(=自動デプロイ)や
   サーバー再起動を避けるのが基本。今回のT96は送信完了を待ってからpushした。
 - 進捗の見方: 管理画面「送信する → 予約一覧」が送信中/完了、送信ログ(自動送信ログ一覧・CSV)に

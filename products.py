@@ -251,23 +251,38 @@ def build_list_for_product(con, tenant_id, product_id, count, list_name=None):
     except Exception as e:  # noqa: BLE001
         return {"error": f"AI判断に失敗しました: {str(e)[:200]}"}
 
-    where, params = TL.build_filter_sql(tenant_id, filters)
-    where += """ AND id NOT IN (
+    exclude_sql = """ AND id NOT IN (
         SELECT m.company_id FROM target_list_members m
         JOIN target_lists l ON l.id=m.list_id WHERE l.product_id=?)"""
-    params = params + [product_id]
 
-    ids = [r[0] for r in con.execute(
-        f"""SELECT id FROM companies WHERE {where}
-            ORDER BY COALESCE(score_v2, score, 0) DESC LIMIT ?""",
-        params + [count]).fetchall()]
+    def _pick(f):
+        where, params = TL.build_filter_sql(tenant_id, f)
+        return [r[0] for r in con.execute(
+            f"""SELECT id FROM companies WHERE {where}{exclude_sql}
+                ORDER BY COALESCE(score_v2, score, 0) DESC LIMIT ?""",
+            params + [product_id, count]).fetchall()]
+
+    # AIの条件が狭すぎて指定件数に届かない場合は、条件を緩い順に外して件数を確保する
+    # (2026-09-19: 「リスト作成してもリスト出ない」=AIの絞り込みで0社になっていたため)。
+    # 外した条件はrelaxedとして返し、画面で「条件◯◯を外して広げた」と分かるようにする。
+    # スコア降順で選ぶので、広げても上位から取る点は変わらない。
+    used = dict(filters)
+    ids = _pick(used)
+    relaxed = []
+    for key in ("hiring_now", "has_website", "capital_max", "ranks", "trades"):
+        if len(ids) >= count:
+            break
+        if used.get(key):
+            used.pop(key)
+            relaxed.append(key)
+            ids = _pick(used)
 
     now = datetime.now().isoformat(timespec="seconds")
     name = list_name or f"{product['name']}向けリスト({now[:10]})"
     cur = con.execute("""INSERT INTO target_lists
         (tenant_id,name,source,filter_json,company_count,product_id,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?)""",
-        (tenant_id, name, "ai_product", json.dumps(filters, ensure_ascii=False), len(ids),
+        (tenant_id, name, "ai_product", json.dumps(used, ensure_ascii=False), len(ids),
          product_id, now, now))
     list_id = cur.lastrowid
     con.executemany("""INSERT OR IGNORE INTO target_list_members
@@ -276,4 +291,5 @@ def build_list_for_product(con, tenant_id, product_id, count, list_name=None):
     con.execute("UPDATE tenant_products SET last_filters_json=? WHERE id=?",
                 (json.dumps(filters, ensure_ascii=False), product_id))
     con.commit()
-    return {"list_id": list_id, "count": len(ids), "filters": filters, "reasoning": reasoning}
+    return {"list_id": list_id, "list_name": name, "count": len(ids), "filters": filters,
+            "used_filters": used, "relaxed": relaxed, "reasoning": reasoning}

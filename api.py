@@ -3624,6 +3624,17 @@ def self_test(port=8899):
         st, r = get_auth("/api/tenant/products", token=key_b)
         t("他テナントの商材一覧には出ない",
           st == 200 and all(p["id"] != product_id for p in r.get("products", [])))
+
+        # 条件の自動緩和(2026-09-19): AIの条件だけでは指定件数に届かない場合、狭い条件から順に
+        # 外して件数を確保し、外した条件をrelaxedで返す(tobiだけでは3,000社のデモDBでも
+        # 到底届かない件数を要求して確認する)
+        n_tobi = con.execute("SELECT COUNT(*) FROM companies WHERE trades LIKE '%tobi%'").fetchone()[0]
+        st, r = post_auth(f"/api/tenant/products/{product_id}/build-list", {"count": n_tobi + 500}, token=key_a)
+        t("AIの条件では件数に届かない場合、条件を外して広げ、外した条件(trades)をrelaxedで返す",
+          st == 200 and r.get("count", 0) > n_tobi - len(build1_ids) - len(build2_ids)
+          and "trades" in r.get("relaxed", []) and bool(r.get("list_name")))
+        if r.get("list_id"):
+            product_list_ids.append(r["list_id"])
     finally:
         PR_test.classify_targeting = orig_classify
         # tenant_products/target_lists共にtenants(id)へのFOREIGN KEYを持つため、

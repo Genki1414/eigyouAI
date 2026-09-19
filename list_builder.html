@@ -1192,6 +1192,7 @@ function goPage(pageId) {
   document.getElementById("pageTitle").textContent = PAGE_TITLES[pageId];
   if (pageId === "home") { refreshHomeStats(); refreshDashboard(); }
   if (pageId === "autosend") populateAutosendListSelect();
+  if (pageId === "lists" && connected) refreshLists().catch(() => {});
   if (pageId === "sendlog") { populateSendLogExecListFilter(); refreshSendLogExecutions(); }
   if (pageId === "sendlog-detail") refreshSendLog();
   if (pageId === "searchlog") { $("searchLogDetailWrap").innerHTML = ""; refreshSearchLog(); }
@@ -2723,14 +2724,38 @@ async function refreshProducts() {
             `<div class="hint" style="margin-top:4px">まだ生成していません</div>`}
           <div class="btnrow" style="margin-top:8px">
             <button class="ghost btnGenerateMessage">${p.ai_subject ? "🤖 AIで書き直す" : "🤖 AIに文面を書いてもらう"}</button>
+            ${p.ai_subject ? `<button class="ghost btnSaveAsTemplate">📝 この文面をテンプレートに登録</button>` : ""}
           </div>
           <div class="pMessageResult"></div>
         </div>
       </div>`).join("");
     el.querySelectorAll(".btnBuildList").forEach(btn => btn.addEventListener("click", () => buildProductList(btn)));
     el.querySelectorAll(".btnGenerateMessage").forEach(btn => btn.addEventListener("click", () => generateProductMessage(btn)));
+    el.querySelectorAll(".btnSaveAsTemplate").forEach(btn => btn.addEventListener("click", () => {
+      const p = r.products.find(x => String(x.id) === btn.closest(".card").dataset.id);
+      saveProductMessageAsTemplate(btn, p);
+    }));
   } catch (e) {
     el.innerHTML = `<div class="result err">${e.message}</div>`;
+  }
+}
+
+// AIが書いた商材の文面を、そのまま「送信文章テンプレート」として登録する(2026-09-19、ユーザー要望)。
+// テンプレート一覧から編集・他のリストの送信にも使える
+async function saveProductMessageAsTemplate(btn, p) {
+  const resultEl = btn.closest(".card").querySelector(".pMessageResult");
+  const name = prompt("テンプレート名を入力してください", `${p.name}(AI文面)`);
+  if (name === null) return;
+  if (!name.trim()) { resultEl.innerHTML = `<div class="result err">テンプレート名を入力してください</div>`; return; }
+  btn.disabled = true;
+  try {
+    const r = await call("/api/tenant/templates", { method: "POST",
+      body: JSON.stringify({ name: name.trim(), subject: p.ai_subject, body: p.ai_body }) });
+    resultEl.innerHTML = `<div class="result ok">テンプレート「${name.trim()}」として登録しました(ID: ${r.template_id})。「送信文章テンプレート → テンプレート一覧」から編集できます</div>`;
+  } catch (e) {
+    resultEl.innerHTML = `<div class="result err">${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -2764,9 +2789,28 @@ async function buildProductList(btn) {
   try {
     const r = await call(`/api/tenant/products/${productId}/build-list`,
       { method: "POST", body: JSON.stringify({ count }) });
-    resultEl.innerHTML = `<div class="result ok">リスト作成完了: ${r.count.toLocaleString()}社`
-      + `${r.reasoning ? `<br><span class="hint">AIの判断理由: ${r.reasoning}</span>` : ""}`
-      + `<br><span class="hint">「保存済みリスト」から確認できます</span></div>`;
+    const RELAX_LABELS = { hiring_now: "採用中の企業のみ", has_website: "Webサイトあり", capital_max: "資本金の上限",
+                           ranks: "格付け", trades: "業種" };
+    const relaxedNote = (r.relaxed || []).length
+      ? `<br><span class="hint">AIの条件では${count.toLocaleString()}社に届かなかったため、条件「${r.relaxed.map(k => RELAX_LABELS[k] || k).join("・")}」を外して広げました</span>`
+      : "";
+    if (r.count === 0) {
+      resultEl.innerHTML = `<div class="result err">該当する企業が0社でした(リスト「${r.list_name}」は空のまま作成されています)。`
+        + `この商材向けに過去作ったリストの企業は除外されるため、対象を使い切っている可能性があります。商材の説明文を見直すか、「リスト取得」から条件を指定して作成してください</div>`;
+    } else {
+      resultEl.innerHTML = `<div class="result ok">リスト作成完了: 「${r.list_name}」${r.count.toLocaleString()}社`
+        + `${r.reasoning ? `<br><span class="hint">AIの判断理由: ${r.reasoning}</span>` : ""}` + relaxedNote
+        + `<br><button class="ghost btnGoLists" style="margin-top:6px">保存済みリストで確認する</button>`
+        + ` <button class="ghost btnGoAutosend" data-list="${r.list_id}" style="margin-top:6px">このリストを送信する</button></div>`;
+      resultEl.querySelector(".btnGoLists").addEventListener("click", () => goPage("lists"));
+      resultEl.querySelector(".btnGoAutosend").addEventListener("click", async () => {
+        await refreshLists();
+        goPage("autosend");
+        $("autosendListSelect").value = String(r.list_id);
+        $("autosendListSelect").dispatchEvent(new Event("change"));
+      });
+    }
+    await refreshLists();
     refreshProducts();
     refreshHomeStats();
   } catch (e) {

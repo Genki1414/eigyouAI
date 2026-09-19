@@ -535,6 +535,7 @@ def migrate(con):
         ("scheduled_sends", "sender_override_json", "TEXT"),
         ("scheduled_sends", "claimed_at", "TEXT"),  # 送信ワーカーが取り込んだ日時(T91。複数ワーカーの取り合い防止)
         ("scheduled_sends", "worker", "TEXT"),      # 取り込んだワーカーの名前(T91。障害調査用)
+        ("scheduled_sends", "attempts", "INTEGER DEFAULT 0"),  # 例外で失敗して自動再試行した回数(T98)
         # T29: フォーム送信のペーシングを「全テナント合算の単一プール」から
         # 「テナントごとの公平な取り分」へ再設計。NULL=config.pyの
         # FORM_MAX_PER_TENANT_PER_*_DEFAULTを使う(=契約プラン未設定の
@@ -878,7 +879,7 @@ def resolve_click_token(con, token):
 def list_scheduled_sends(con, tenant_id, list_id=None):
     q = """SELECT s.id, s.list_id, tl.name list_name, s.subject, s.dry_run, s.scheduled_at,
             s.track_clicks, s.sender_template_id, s.status, s.created_at, s.executed_at,
-            s.claimed_at, s.result_json
+            s.claimed_at, s.result_json, s.attempts, s.tenant_id
         FROM scheduled_sends s LEFT JOIN target_lists tl ON tl.id = s.list_id
         WHERE s.tenant_id=?"""
     params = [tenant_id]
@@ -886,7 +887,15 @@ def list_scheduled_sends(con, tenant_id, list_id=None):
         q += " AND s.list_id=?"
         params.append(list_id)
     q += " ORDER BY s.scheduled_at"
-    return [dict(r) for r in con.execute(q, params).fetchall()]
+    rows = [dict(r) for r in con.execute(q, params).fetchall()]
+    for r in rows:
+        # 送信中の予約は「処理済み◯社」を出す(T98)。取り込み後に書かれたform_send_logの行数
+        if r["status"] == "RUNNING":
+            r["processed"] = con.execute("""SELECT COUNT(*) FROM form_send_log
+                WHERE tenant_id=? AND list_id=? AND started_at>=?""",
+                (r["tenant_id"], r["list_id"], r["claimed_at"] or "")).fetchone()[0]
+        r.pop("tenant_id", None)
+    return rows
 
 
 def cancel_scheduled_send(con, tenant_id, scheduled_id):
@@ -900,7 +909,7 @@ def cancel_scheduled_send(con, tenant_id, scheduled_id):
 def due_scheduled_sends(con, now_iso):
     """期限が来たPENDINGを取得する。scheduled_send_cli.pyがcronから呼ぶ。"""
     rows = con.execute("""SELECT id, tenant_id, list_id, subject, body, dry_run, track_clicks,
-            sender_template_id, allow_no_solicit, cancel_recent_days, sender_override_json
+            sender_template_id, allow_no_solicit, cancel_recent_days, sender_override_json, attempts
         FROM scheduled_sends WHERE status='PENDING' AND scheduled_at<=?
         ORDER BY scheduled_at""", (now_iso,)).fetchall()
     return [dict(r) for r in rows]
@@ -947,6 +956,34 @@ def requeue_running_by_worker(con, worker):
         WHERE status='RUNNING' AND worker=?""", (worker,))
     con.commit()
     return cur.rowcount
+
+
+def requeue_for_retry(con, scheduled_id, attempts, error, delay_seconds=60):
+    """例外で落ちた予約を少し待ってから自動でやり直す(T98)。DB接続断・ブラウザ異常などの
+    一過性の障害で数千社の送信が「失敗」で止まらないようにする。送信済みの会社は
+    send_list()が冪等に飛ばす。result_jsonにエラーを残すので画面から経緯が分かる。"""
+    next_at = (datetime.now() + timedelta(seconds=delay_seconds)).isoformat(timespec="seconds")
+    con.execute("""UPDATE scheduled_sends SET status='PENDING', claimed_at=NULL, worker=NULL,
+        attempts=?, scheduled_at=?, result_json=? WHERE id=?""",
+        (attempts, next_at, json.dumps({"error": error, "retrying": True, "attempts": attempts},
+                                       ensure_ascii=False), scheduled_id))
+    con.commit()
+
+
+def running_sends_with_progress(con):
+    """RUNNING中の予約と、取り込み後に処理した会社数(form_send_logの行数)を返す(T98)。
+    送信サービスの監督側が「処理数が一定時間増えない=固まった」を検知するのと、
+    画面の「処理済み◯社」表示に使う。"""
+    rows = con.execute("""SELECT id, tenant_id, list_id, worker, claimed_at FROM scheduled_sends
+        WHERE status='RUNNING'""").fetchall()
+    out = []
+    for r in rows:
+        r = dict(r)
+        r["processed"] = con.execute("""SELECT COUNT(*) FROM form_send_log
+            WHERE tenant_id=? AND list_id=? AND started_at>=?""",
+            (r["tenant_id"], r["list_id"], r["claimed_at"] or "")).fetchone()[0]
+        out.append(r)
+    return out
 
 
 def finish_scheduled_send(con, scheduled_id, status, result=None):

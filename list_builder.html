@@ -1951,7 +1951,7 @@ async function refreshSendLog() {
         const canAssist = AUTOFILL_ELIGIBLE_STATUSES.has(x.status);
         const url = x.contact_url || x.target_url || "";
         return `<tr><td>${x.company_name || "—"}</td>
-        <td>${url ? `<a href="${url}" target="_blank" rel="noopener" style="font-size:11px">${url}</a>` : "—"}</td>
+        <td style="max-width:360px;word-break:break-all">${url ? `<a href="${url}" target="_blank" rel="noopener" style="font-size:11px" title="${url.replace(/"/g, "&quot;")}">${url.length > 90 ? url.slice(0, 90) + "…" : url}</a>` : "—"}</td>
         <td><span class="pill${cls ? " " + cls : ""}">${label}</span></td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.reason_code || "—"}</td>
         <td>${x.has_screenshot_before ? `<button class="ghost shotbtn" data-id="${x.id}" data-kind="before">確認</button>` : "—"}</td>
@@ -3846,7 +3846,7 @@ async function refreshScheduledSends(listId) {
     el.innerHTML = `<table><tr><th>開始予定</th><th>件名</th><th>モード</th><th>状態</th><th></th></tr>` +
       r.scheduled.map(s => `<tr><td style="font-family:var(--mono);font-size:11px">${s.scheduled_at}</td>
         <td>${s.subject}</td><td>${s.dry_run ? "ドライラン" : "本番送信"}${s.track_clicks ? " · URL記録" : ""}</td>
-        <td><span class="pill${s.status === "DONE" ? " ok" : (s.status === "FAILED" ? " err" : "")}">${SCHEDULED_STATUS_LABELS[s.status] || s.status}</span><span style="font-size:11px;color:var(--steel)">${scheduledResultSummary(s)}</span></td>
+        <td><span class="pill${s.status === "DONE" ? " ok" : (s.status === "FAILED" ? " err" : "")}">${SCHEDULED_STATUS_LABELS[s.status] || s.status}</span>${s.status === "RUNNING" ? `<span style="font-size:11px;color:var(--steel)"> 処理済み${(s.processed || 0).toLocaleString()}社</span>` : ""}${s.attempts ? `<span style="font-size:11px;color:var(--steel)"> (自動再試行${s.attempts}回目)</span>` : ""}<span style="font-size:11px;color:var(--steel)">${scheduledResultSummary(s)}</span></td>
         <td>${s.status === "PENDING" ? `<button class="ghost cancelScheduledBtn" data-id="${s.id}">キャンセル</button>` : "—"}</td></tr>`).join("") +
       `</table>`;
     el.querySelectorAll(".cancelScheduledBtn").forEach(btn => {

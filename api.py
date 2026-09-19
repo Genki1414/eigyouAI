@@ -4050,6 +4050,22 @@ def self_test(port=8899):
     t("突然死した子ワーカーの予約だけをPENDINGへ戻す(他ワーカー名では戻らない)(T96)",
       db.requeue_running_by_worker(con, "host-998-0") == 0 and db.requeue_running_by_worker(con, "host-999-0") == 1
       and con.execute("SELECT status FROM scheduled_sends WHERE id=?", (q_id,)).fetchone()["status"] == "PENDING")
+    # T98: 例外で失敗した予約は自動で再試行される(60秒後にPENDINGへ戻り、attemptsが増える)
+    t("claim: 再試行テスト用に取り込める", db.claim_scheduled_send(con, q_id, "host-997-0") is True)
+    prog = [r for r in db.running_sends_with_progress(con) if r["id"] == q_id]
+    t("RUNNING中の予約と処理済み件数が取れる(固まり検知・画面の処理済み表示用)",
+      len(prog) == 1 and prog[0]["processed"] == 0 and prog[0]["worker"] == "host-997-0")
+    db.requeue_for_retry(con, q_id, 1, "テスト用の例外")
+    row = con.execute("SELECT status, attempts, scheduled_at, result_json FROM scheduled_sends WHERE id=?", (q_id,)).fetchone()
+    t("例外で失敗した予約はPENDINGへ戻り、attempts=1・少し先の開始予定・エラー内容が残る",
+      row["status"] == "PENDING" and row["attempts"] == 1
+      and row["scheduled_at"] > datetime.now().isoformat(timespec="seconds")
+      and "テスト用の例外" in (row["result_json"] or ""))
+    st, r = get_auth(f"/api/tenant/scheduled-sends?list_id={list_a_id}", token=key_a)
+    t("予約一覧にattemptsが出る", st == 200 and next(x for x in r["scheduled"] if x["id"] == q_id)["attempts"] == 1)
+    con.execute("UPDATE scheduled_sends SET scheduled_at=? WHERE id=?",
+                (datetime.now().isoformat(timespec="seconds"), q_id))
+    con.commit()
     import scheduled_send_cli as SSC_test
     n_run = SSC_test.run_due(con, worker="test-worker", quiet=True)
     row = con.execute("SELECT status, result_json, worker FROM scheduled_sends WHERE id=?", (q_id,)).fetchone()

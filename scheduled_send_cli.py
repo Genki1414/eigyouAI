@@ -33,6 +33,10 @@ import db
 import target_lists as TL
 
 STALE_RUNNING_HOURS = 3
+# T98: 例外で落ちた予約の自動再試行回数と、処理数が増えないまま何分経ったら「固まった」と
+# みなして子ワーカーを起動し直すか(.envで変更可)
+MAX_ATTEMPTS = int(os.environ.get("SENDER_MAX_ATTEMPTS", "3"))
+STALL_MINUTES = int(os.environ.get("SENDER_STALL_MINUTES", "20"))
 
 
 def _execute(con, s, worker):
@@ -49,8 +53,7 @@ def _execute(con, s, worker):
                                      {"error": "リストが見つかりません(削除された可能性)"})
             print(f"  [{worker}] 予約{s['id']}: 失敗(リストが見つかりません)")
         elif "error" in res:
-            db.finish_scheduled_send(con, s["id"], "FAILED", res)
-            print(f"  [{worker}] 予約{s['id']}: 失敗({res['error']})")
+            _fail_or_retry(con, s, worker, res["error"])
         else:
             db.finish_scheduled_send(con, s["id"], "DONE", res)
             stats = res.get("stats") or {}
@@ -58,8 +61,19 @@ def _execute(con, s, worker):
                   f"失敗{stats.get('failed', 0)} 対象{res.get('target_count', 0)})")
     except Exception as e:  # noqa: BLE001
         # 1件の例外で他の予約の実行まで止めない
-        db.finish_scheduled_send(con, s["id"], "FAILED", {"error": str(e)[:200]})
-        print(f"  [{worker}] 予約{s['id']}: 例外で失敗({e})")
+        _fail_or_retry(con, s, worker, str(e)[:200])
+
+
+def _fail_or_retry(con, s, worker, error):
+    """例外・エラーで終わった予約を、MAX_ATTEMPTS回までは少し待って自動でやり直す(T98)。
+    送信済みの会社はsend_list()が飛ばすので、途中から再開する形になる。"""
+    attempts = int(s.get("attempts") or 0)
+    if attempts < MAX_ATTEMPTS and "リストが見つかりません" not in (error or ""):
+        db.requeue_for_retry(con, s["id"], attempts + 1, error)
+        print(f"  [{worker}] 予約{s['id']}: 失敗({error}) → {attempts + 1}回目の再試行を60秒後に予約")
+    else:
+        db.finish_scheduled_send(con, s["id"], "FAILED", {"error": error, "attempts": attempts})
+        print(f"  [{worker}] 予約{s['id']}: 失敗({error})")
 
 
 def run_due(con, worker="cron", quiet=False):
@@ -144,8 +158,50 @@ def loop(workers, interval):
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
 
+    # 固まり検知(T98): RUNNINGの予約ごとに「処理した会社数」を覚えておき、STALL_MINUTES分
+    # 増えなければその子ワーカーを止めて起動し直す(止まった子の予約は下の再起動処理で
+    # PENDINGへ戻る)。ページ読み込みが戻らない等で子がハングすると、コンテナ再起動でも
+    # 子の死亡でもないため他の仕組みでは拾えない
+    progress = {}
+    last_watch = time.time()
+
+    def _watch_stalls():
+        con = db.connect()
+        try:
+            running = db.running_sends_with_progress(con)
+            alive_ids = set()
+            for r in running:
+                alive_ids.add(r["id"])
+                prev = progress.get(r["id"])
+                if prev is None or prev[0] != r["processed"]:
+                    progress[r["id"]] = (r["processed"], time.time())
+                    continue
+                if time.time() - prev[1] < STALL_MINUTES * 60:
+                    continue
+                for i, p in list(procs.items()):
+                    if r["worker"] == f"{socket.gethostname()}-{p.pid}-{i}" and p.is_alive():
+                        print(f"[loop] 予約{r['id']}の処理数が{STALL_MINUTES}分増えていない"
+                              f"(処理済み{r['processed']}社)。ワーカー{i}を止めて起動し直します")
+                        p.terminate()
+                        p.join(15)
+                        if p.is_alive():
+                            p.kill()
+                            p.join(5)
+                        progress.pop(r["id"], None)
+            for k in list(progress):
+                if k not in alive_ids:
+                    progress.pop(k, None)
+        finally:
+            con.close()
+
     while not stopping["flag"]:
         time.sleep(5)
+        if time.time() - last_watch >= 60 and not stopping["flag"]:
+            last_watch = time.time()
+            try:
+                _watch_stalls()
+            except Exception as e:  # noqa: BLE001
+                print(f"[loop] 固まり検知でエラー: {e}")
         for i, p in list(procs.items()):
             if not p.is_alive() and not stopping["flag"]:
                 print(f"[loop] ワーカー{i}が終了(code={p.exitcode})。起動し直します")

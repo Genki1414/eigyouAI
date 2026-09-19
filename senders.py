@@ -722,6 +722,31 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
         return con_t
 
     def _process_one(r):
+        """1件を送る。想定外の例外(DB接続断・ブラウザ異常など)は「失敗」として数え、
+        実行全体(残りの数千社)を巻き込んで落とさない(T98)。以前はfut.result()で
+        例外が再送出され、1社の例外で予約全体がFAILEDになって止まっていた。
+        例外を出したスレッドのDB接続は捨てて次の会社では作り直す。"""
+        try:
+            return _process_one_inner(r)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [send] 会社ID {r.get('company_id')} で想定外の例外: {str(e)[:200]}")
+            try:
+                con_bad = getattr(_local, "con", None)
+                _local.con = None
+                if con_bad is not None:
+                    con_bad.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                con_t = _con_for_thread()
+                con_t.execute("UPDATE touches SET delivered=0, note=? WHERE id=?",
+                              (f"送信失敗: 例外 {str(e)[:150]}", r["tid"]))
+                con_t.commit()
+            except Exception:  # noqa: BLE001
+                pass
+            return {"kind": "failed", "suppressed": False}
+
+    def _process_one_inner(r):
         """1件を送る。並列実行されるため、呼び出し元と共有のconは使わず自分の
         スレッド専用の接続を使う(別スレッド=別コネクション。BaseSender.send()の
         冪等性チェックはidempotency.keyのUNIQUE制約でスレッド間でも安全)。"""

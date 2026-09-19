@@ -667,7 +667,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
     # したい、という指摘を受けて追加。以前はblockedの合計数しか分からず、
     # 配信停止によるものかテナント除外設定によるものか画面から区別できなかった。
     stats = {"sent": 0, "failed": 0, "blocked": 0, "suppressed": 0, "stopped": 0,
-              "blocked_by_reason": {}}
+              "blocked_by_reason": {}, "failed_by_reason": {}}
     if not rows:
         print("送信対象がありません（文面未生成）")
         return stats
@@ -744,7 +744,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
                 con_t.commit()
             except Exception:  # noqa: BLE001
                 pass
-            return {"kind": "failed", "suppressed": False}
+            return {"kind": "failed", "suppressed": False, "reason": f"例外: {str(e)[:70]}"}
 
     def _process_one_inner(r):
         """1件を送る。並列実行されるため、呼び出し元と共有のconは使わず自分の
@@ -828,7 +828,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
                 db.suppress(con_t, r["company_id"], "bounce_hard", source=adapter.channel,
                             note=res.error)
             con_t.commit()
-            return {"kind": "failed", "suppressed": suppressed}
+            return {"kind": "failed", "suppressed": suppressed, "reason": (res.error or "")[:80]}
 
     with ThreadPoolExecutor(max_workers=min(C.FORM_SEND_CONCURRENCY, len(rows))) as ex:
         futures = [ex.submit(_process_one, r) for r in rows]
@@ -840,8 +840,12 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
             elif outcome["kind"] == "blocked":
                 reason = outcome.get("reason") or "不明"
                 stats["blocked_by_reason"][reason] = stats["blocked_by_reason"].get(reason, 0) + 1
-            elif outcome.get("suppressed"):
-                stats["suppressed"] += 1
+            elif outcome["kind"] == "failed":
+                # 上限到達(クォータ)などで一斉に失敗したときに理由が画面で分かるように集計する
+                reason = outcome.get("reason") or "不明"
+                stats["failed_by_reason"][reason] = stats["failed_by_reason"].get(reason, 0) + 1
+                if outcome.get("suppressed"):
+                    stats["suppressed"] += 1
 
     con.execute("UPDATE campaigns SET cost_yen = COALESCE(cost_yen,0) + ? WHERE id=?",
                 (cost, campaign_id))

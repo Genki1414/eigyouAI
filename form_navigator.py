@@ -435,6 +435,80 @@ _SELECT_PLACEHOLDER_RE = re.compile(
 _SELECT_INQUIRY_OPTION_RE = re.compile(r"お問い合わせ|その他|general|other", re.I)
 
 
+def _invalid_visible_fields(page):
+    """ブラウザのHTML5検証(required/pattern/type=email等)で「無効」になっている可視の入力欄の
+    ラベルを返す。1つでもあればブラウザは送信をブロックし、ページは変わらず
+    「Please fill out this field」の吹き出しが出るだけになる(2026-09-19の実インシデント:
+    ふりがなの必須欄が未入力のままなのに、ページ内の文言一致でSUCCESSと記録されていた)。"""
+    try:
+        return page.evaluate("""() => {
+          const out = [];
+          for (const el of document.querySelectorAll('input, textarea, select')) {
+            if (!el.willValidate || el.disabled) continue;
+            const t = (el.type || '').toLowerCase();
+            if (['hidden', 'submit', 'button', 'image', 'file', 'reset'].includes(t)) continue;
+            if (!el.getClientRects().length) continue;
+            if (el.checkValidity()) continue;
+            let label = '';
+            try {
+              if (el.id) { const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) label = l.textContent; }
+              if (!label && el.closest('label')) label = el.closest('label').textContent;
+            } catch (e) {}
+            const name = (label || el.getAttribute('aria-label') || el.placeholder || el.name || el.id || t) + '';
+            const clean = name.replace(/\s+/g, ' ').trim().slice(0, 40);
+            if (!out.includes(clean)) out.push(clean);
+          }
+          return out;
+        }""") or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _form_keeps_our_values(page, values):
+    """送信後もフォームに自分たちが入れた値(メールアドレス・本文)が残っているか。
+    AJAXで送信成功後にフォームをリセットするサイトでは必須欄が空=無効に見えるため、
+    「無効な欄がある」だけで失敗と決めず、値が残っている(=送られていない)ときだけ失敗にする。"""
+    markers = [v for v in (values.get("email"), (values.get("message") or "")[:30]) if v]
+    if not markers:
+        return False
+    try:
+        return bool(page.evaluate("""(markers) => {
+          for (const el of document.querySelectorAll('input, textarea')) {
+            const v = (el.value || '');
+            if (v && markers.some(m => v.includes(m))) return true;
+          }
+          return false;
+        }""", markers))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _check_required_radios(page):
+    """必須のラジオボタン群(お問い合わせ種別など)で1つも選ばれていないものは先頭の可視の
+    選択肢を選ぶ(プルダウンと同じ方針。未選択のままだと送信がブロックされる)。"""
+    try:
+        return int(page.evaluate("""() => {
+          let n = 0;
+          const groups = {};
+          for (const el of document.querySelectorAll('input[type=radio][required]')) {
+            (groups[el.name || el.id] = groups[el.name || el.id] || []).push(el);
+          }
+          for (const name of Object.keys(groups)) {
+            const els = groups[name];
+            if (els.some(e => e.checked)) continue;
+            const first = els.find(e => !e.disabled && e.getClientRects().length);
+            if (!first) continue;
+            first.checked = true;
+            first.dispatchEvent(new Event('input', { bubbles: true }));
+            first.dispatchEvent(new Event('change', { bubbles: true }));
+            n++;
+          }
+          return n;
+        }""") or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _fill_selects(page):
     """<select>要素(問い合わせ種類・都道府県等のプルダウン)を埋める。
     必須のプルダウンが未選択のままだと送信がブロックされるサイトが多いため対応する。
@@ -668,6 +742,26 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 except Exception:  # noqa: BLE001
                     pass
 
+                # 必須のラジオ群が未選択なら先頭を選ぶ(2026-09-19)
+                n_radios = _check_required_radios(page)
+                if n_radios:
+                    filled.append(f"radio×{n_radios}")
+                    result.filled_fields = filled
+
+                # 送信前検証(2026-09-19): 埋められなかった必須欄(ふりがな等)や形式不一致が
+                # 残っていればブラウザが送信をブロックするので、押しても送られない。
+                # その状態を「成功」と誤記録しないため、ここで失敗として記録し、
+                # どの欄が埋まらなかったかを残す(「自動入力」での手動フォローに使える)
+                missing = _invalid_visible_fields(page)
+                if missing:
+                    result.status = "FAILED_UNSUPPORTED"
+                    result.reason_code = "required_field_unfilled"
+                    result.error_message = "自動で埋められない必須欄があるため送信していません: " + "・".join(missing)
+                    result.page_text_snippet = _page_text(page)[:400]
+                    result.screenshot_after_path = _save_screenshot(
+                        page, screenshot_dir, result.run_id, "after")
+                    return result
+
                 submit_btn = _find_button(page, _SUBMIT_TEXT_RE)
                 if not submit_btn:
                     result.status = "FAILED_UNSUPPORTED"
@@ -710,6 +804,15 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 # フォーム消失)より優先する。「日本国内からのみ送信可能です」という
                 # 地域制限エラーで、フォームがエラーメッセージへ差し替わった
                 # (=form_gone成立)ためSUCCESSと誤記録された実インシデントへの対策。
+                # 送信後もブラウザ検証で無効な欄が残り、入力した値もそのまま残っている
+                # =ブラウザが送信をブロックした(JSで後から必須になった欄など)。
+                # 文言一致・URL変化・フォーム消失の判定より優先する(2026-09-19)
+                still_invalid = _invalid_visible_fields(page)
+                if still_invalid and _has_fillable_form(page) and _form_keeps_our_values(page, values):
+                    result.status = "FAILED_UNSUPPORTED"
+                    result.reason_code = "required_field_empty"
+                    result.error_message = "必須欄が未入力のまま送信がブロックされました: " + "・".join(still_invalid)
+                    return result
                 error_hit = _detect_submission_error(final_text)
                 if error_hit:
                     result.status = "FAILED_UNSUPPORTED"
@@ -855,6 +958,31 @@ if __name__ == "__main__":
             e2 = _detect_submission_error(
                 "お問い合わせいただきありがとうございます。担当者より追ってご連絡いたします。")
             print(f"  {'✓' if e2 is None else '✗'} 通常の完了ページはエラー扱いにしない")
+
+            print("\n── 必須欄の未入力を成功と誤判定しない(2026-09-19、実インシデントで発見) ──")
+            page.set_content("""
+                <form>
+                  <label for="k">ふりがな</label><input id="k" name="kana" required>
+                  <label for="e">メールアドレス</label><input id="e" type="email" required value="a@example.co.jp">
+                  <label for="m">内容</label><textarea id="m" required>こんにちは。本文です。</textarea>
+                  <input type="radio" name="kind" value="1" required id="r1"><label for="r1">お問い合わせ</label>
+                  <input type="radio" name="kind" value="2" id="r2"><label for="r2">その他</label>
+                  <button type="submit">送信する</button>
+                </form>
+                <p>お問い合わせいただきありがとうございます(テンプレート文言)</p>""")
+            n_r = _check_required_radios(page)
+            inv = _invalid_visible_fields(page)
+            print(f"  {'✓' if n_r == 1 else '✗'} 必須ラジオ群が未選択なら先頭を選ぶ: {n_r}")
+            print(f"  {'✓' if inv == ['ふりがな'] else '✗'} 未入力の必須欄(ふりがな)を検出し、埋めた欄は含めない: {inv}")
+            keeps = _form_keeps_our_values(page, {"email": "a@example.co.jp", "message": "こんにちは。本文です。"})
+            print(f"  {'✓' if keeps else '✗'} 入力した値がフォームに残っていることを検知できる")
+            page.fill("#k", "ふりがな")
+            inv2 = _invalid_visible_fields(page)
+            print(f"  {'✓' if inv2 == [] else '✗'} 埋めれば無効な欄は無くなる: {inv2}")
+            page.fill("#e", "")
+            page.fill("#m", "")
+            keeps2 = _form_keeps_our_values(page, {"email": "a@example.co.jp", "message": "こんにちは。本文です。"})
+            print(f"  {'✓' if not keeps2 else '✗'} 送信成功後にリセットされたフォーム(値が消えた)は失敗にしない")
 
             print("\n── プロキシ経由の実アクセス(T42。ローカルの疑似ターゲット+"
                   "疑似プロキシで、実際にChromiumがプロキシを通ることを確認) ──")

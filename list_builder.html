@@ -3832,7 +3832,10 @@ function scheduledResultSummary(s) {
     const r = JSON.parse(s.result_json);
     if (r.error) return ` ${r.error}`;
     const st = r.stats || {};
-    return ` 対象${(r.target_count || 0).toLocaleString()}社 / 送信${st.sent || 0} 失敗${st.failed || 0} 中止${(st.blocked || 0) + (st.suppressed || 0) + (st.stopped || 0)}`;
+    let why = "";
+    const fr = Object.entries(st.failed_by_reason || {}).sort((a, b) => b[1] - a[1]);
+    if (fr.length && fr[0][1] >= 3) why = ` 主な失敗理由: ${fr[0][0]}(${fr[0][1]}社)`;
+    return ` 対象${(r.target_count || 0).toLocaleString()}社 / 送信${st.sent || 0} 失敗${st.failed || 0} 中止${(st.blocked || 0) + (st.suppressed || 0) + (st.stopped || 0)}${why}`;
   } catch (e) { return ""; }
 }
 

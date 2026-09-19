@@ -4675,6 +4675,15 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T104. 管理画面: リロードしても直前のページに戻る(2026-09-19)
+
+ユーザー「リロードすると毎回ダッシュボードに戻るのをやめて」。`goPage()`で開いたページを
+`localStorage.eigyouai_last_page`(page/listId/listName)とURLの`#<page>`に記録し、
+スクリプト末尾の`restoreLastPage()`で復元する(let変数の初期化後に呼ぶためスクリプト末尾)。
+自動再接続(`doConnect`)完了時に`goPage(currentPageId)`を呼び直してデータを読み込む。
+「自動送信ログ|詳細」はlistId/listNameから`goSendLogDetail()`で復元。home/tutorialは復元しない。
+`hashchange`にも追従。Playwright(`scratchpad/verify_restore.py`)で確認。
+
 ### T103. フォーム側の入力検証エラーを「成功」にしていた3件(2026-09-19)
 
 T100の後の再送信でも「成功判定になってる」が3件(送信後スクショ): (1)RSデザイン

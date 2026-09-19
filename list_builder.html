@@ -1196,7 +1196,16 @@ const PAGE_TITLES = {
   news: "お知らせ一覧", otherlog: "その他ログ", manual: "マニュアルDL",
   conn: "接続設定",
 };
+let currentPageId = "home";
 function goPage(pageId) {
+  currentPageId = pageId;
+  // リロードしても同じページに戻れるよう、開いているページを覚えておく(2026-09-19)。
+  // URLの#にも入れておく(ブックマーク・共有用。履歴は増やさない)
+  try {
+    localStorage.setItem("eigyouai_last_page", JSON.stringify({
+      page: pageId, listId: currentSendLogListId, listName: currentSendLogListName }));
+    history.replaceState(null, "", "#" + pageId);
+  } catch (e) { /* localStorage不可・file://等では無視 */ }
   const navPageId = pageId === "sendlog-detail" ? "sendlog" : pageId;
   const item = [...document.querySelectorAll(".navitem")].find(n => n.dataset.page === navPageId);
   document.querySelectorAll(".navitem").forEach(n => n.classList.toggle("active", n === item));
@@ -1402,6 +1411,8 @@ async function doConnect() {
     refreshTrades();
     $("autofillHint").textContent = "拡張機能をインストール済みなら「拡張機能と連携する」を押してください。";
     $("btnDownloadExtension").href = `${API}/chrome_extension.zip`;
+    // リロード復元で先にページだけ開いていた場合、接続できた今、そのページのデータを読み込む
+    if (currentPageId && currentPageId !== "home") goPage(currentPageId);
   } catch (e) {
     connected = false;
     setConnStatus("接続失敗: " + e.message, "off");
@@ -3898,6 +3909,34 @@ async function refreshScheduledSends(listId) {
   }
 }
 
+
+// リロードしても直前に開いていたページへ戻る(2026-09-19、ユーザー要望。以前は毎回
+// ダッシュボードに戻っていた)。URLの#があればそれを、無ければlocalStorageの記録を使う。
+// スクリプト末尾で実行する(上のlet変数がすべて初期化された後に呼ぶため)
+(function restoreLastPage() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem("eigyouai_last_page") || "null"); } catch (e) {}
+  const fromHash = (location.hash || "").replace(/^#/, "");
+  const page = fromHash || (saved && saved.page) || "";
+  if (!page || page === "home" || page === "tutorial") return;
+  if (!document.querySelector(`.page[data-page="${page}"]`)) return;
+  try {
+    if (page === "sendlog-detail") {
+      if (saved && saved.listId) goSendLogDetail(saved.listId, saved.listName || "");
+      else goPage("sendlog");
+      return;
+    }
+    goPage(page);
+  } catch (e) {
+    console.warn("前回ページの復元に失敗:", e);
+  }
+})();
+// 同じタブでURLの#だけ変えた(リンクを貼った等)ときも追従する
+window.addEventListener("hashchange", () => {
+  const page = (location.hash || "").replace(/^#/, "");
+  if (page && page !== currentPageId && page !== "sendlog-detail"
+      && document.querySelector(`.page[data-page="${page}"]`)) goPage(page);
+});
 </script>
 </body>
 </html>

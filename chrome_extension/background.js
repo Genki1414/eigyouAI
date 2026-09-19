@@ -62,7 +62,7 @@ chrome.tabs.onRemoved.addListener((tabId) => autoFilledTabs.delete(tabId));
 function fillFieldsInPage(values) {
   var HINTS = {
     email: ["メールアドレス", "メール", "eメール", "e-mail", "email", "mail"],
-    phone: ["電話番号", "電話番号(必須)", "tel", "phone"],
+    phone: ["電話番号", "電話番号(必須)", "tel", "phone", "ご連絡先", "連絡先"],
     postal_code: ["郵便番号", "〒", "zip", "postal"],
     prefecture: ["都道府県", "都道府県名", "prefecture", "pref"],
     city: ["市区町村", "市町村", "city"],

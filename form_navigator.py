@@ -86,7 +86,7 @@ def _launch_browser(p, headless):
 _FIELD_HINTS = {
     "email": ["メールアドレス", "メール", "eメール", "e-mail", "email", "mail"],
     "email_confirm": ["メール確認", "メールアドレス（確認", "確認用メール", "email confirm", "re-enter"],
-    "phone": ["電話番号", "電話", "tel", "phone", "fax番号"],
+    "phone": ["電話番号", "電話", "tel", "phone", "fax番号", "ご連絡先", "連絡先電話", "連絡先"],
     "postal_code": ["郵便番号", "〒", "zip", "postal"],
     "prefecture": ["都道府県", "都道府県名", "prefecture", "pref"],
     "city": ["市区町村", "市町村", "city"],
@@ -152,6 +152,16 @@ _ERROR_HINTS = (
     "国外からのアクセス", "海外からの送信", "送信に失敗しました", "送信できませんでした",
     "送信できません", "エラーが発生しました", "現在ご利用いただけません",
     "アクセスが制限されています", "不正なリクエスト",
+    # 2026-09-19: フォーム側の入力検証エラー(確認画面やその場のエラー表示)。
+    # 「入力内容に問題があります」「【お問い合わせ種別】が未選択です」「ご連絡先が未入力です」
+    # が出ているのに、URL変化・文言一致でSUCCESSと記録された実インシデントへの対策。
+    # 「選択してください」「入力してください」はプレースホルダーや注記として成功ページにも
+    # 出うるため入れない(誤って失敗にする方向の副作用を避ける)
+    "入力内容に問題", "入力にエラー", "入力エラー", "エラーがあります", "不備があります",
+    "問題があります", "未選択です", "未入力です", "が未選択", "が未入力", "入力されていません",
+    "選択されていません", "チェックされていません", "正しく入力してください", "正しくありません",
+    "再度お試しください", "もう一度お試しください", "確認して再度", "必須項目が入力", "必須項目を入力",
+    "is required", "required field", "please fill", "please enter a valid",
 )
 
 # Cloudflare等のボット検証チャレンジ画面。CAPTCHAと同じく自動突破の対象にはしない
@@ -484,23 +494,36 @@ def _form_keeps_our_values(page, values):
 
 
 def _check_required_radios(page):
-    """必須のラジオボタン群(お問い合わせ種別など)で1つも選ばれていないものは先頭の可視の
-    選択肢を選ぶ(プルダウンと同じ方針。未選択のままだと送信がブロックされる)。"""
+    """ラジオボタン群(お問い合わせ種別など)で1つも選ばれていないものは、
+    「お問い合わせ/その他」寄りの選択肢があればそれを、無ければ先頭の可視の選択肢を選ぶ
+    (プルダウンと同じ方針)。required属性が無くてもサーバー側で「未選択です」と弾かれる
+    サイトが多い(2026-09-19の実インシデント)ため、必須に限らず全ての未選択の群に適用する。"""
     try:
         return int(page.evaluate("""() => {
           let n = 0;
           const groups = {};
-          for (const el of document.querySelectorAll('input[type=radio][required]')) {
-            (groups[el.name || el.id] = groups[el.name || el.id] || []).push(el);
+          for (const el of document.querySelectorAll('input[type=radio]')) {
+            const key = el.name || el.id;
+            if (!key) continue;
+            (groups[key] = groups[key] || []).push(el);
           }
+          const labelOf = (el) => {
+            let t = '';
+            try {
+              if (el.id) { const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) t = l.textContent; }
+              if (!t && el.closest('label')) t = el.closest('label').textContent;
+              if (!t && el.parentElement) t = el.parentElement.textContent;
+            } catch (e) {}
+            return (t || el.value || '').trim();
+          };
+          const prefer = /お問い合わせ|お問合せ|その他|ご相談|general|other/i;
           for (const name of Object.keys(groups)) {
-            const els = groups[name];
-            if (els.some(e => e.checked)) continue;
-            const first = els.find(e => !e.disabled && e.getClientRects().length);
-            if (!first) continue;
-            first.checked = true;
-            first.dispatchEvent(new Event('input', { bubbles: true }));
-            first.dispatchEvent(new Event('change', { bubbles: true }));
+            const els = groups[name].filter(e => !e.disabled && e.getClientRects().length);
+            if (!els.length || groups[name].some(e => e.checked)) continue;
+            const pick = els.find(e => prefer.test(labelOf(e))) || els[0];
+            pick.checked = true;
+            pick.dispatchEvent(new Event('input', { bubbles: true }));
+            pick.dispatchEvent(new Event('change', { bubbles: true }));
             n++;
           }
           return n;
@@ -958,6 +981,28 @@ if __name__ == "__main__":
             e2 = _detect_submission_error(
                 "お問い合わせいただきありがとうございます。担当者より追ってご連絡いたします。")
             print(f"  {'✓' if e2 is None else '✗'} 通常の完了ページはエラー扱いにしない")
+
+            print("\n── フォーム側の入力検証エラーを成功と誤判定しない(2026-09-19、実インシデント3件) ──")
+            for txt in ("入力内容に問題があります。確認して再度お試しください。",
+                        "入力にエラーがあります。下記をご確認の上「戻る」ボタンにて修正をお願い致します。【お問い合わせ種別】が未選択です。",
+                        "ご連絡先が未入力です。お問い合わせ項目がチェックされていません。"):
+                hit = _detect_submission_error(txt)
+                print(f"  {'✓' if hit else '✗'} エラー文言を検知: {txt[:22]}… → {hit!r}")
+            ok_np = _detect_submission_error("お問い合わせ種別\n選択してください\nお問い合わせいただきありがとうございます。") is None
+            print(f"  {'✓' if ok_np else '✗'} プレースホルダー「選択してください」だけの完了ページはエラー扱いにしない")
+            page.set_content("""
+                <form>
+                  <label for="tel">ご連絡先</label><input id="tel" name="contact" placeholder="例：012-345-6789">
+                  <p>お問い合わせ項目</p>
+                  <label><input type="radio" name="item" value="kaitai">解体工事</label>
+                  <label><input type="radio" name="item" value="ashiba">足場工事</label>
+                  <label><input type="radio" name="item" value="other">その他</label>
+                </form>""")
+            tel_kind = _classify_field(page, page.query_selector("#tel"))
+            print(f"  {'✓' if tel_kind == 'phone' else '✗'} 「ご連絡先」欄を電話番号と認識する: {tel_kind}")
+            n_r2 = _check_required_radios(page)
+            picked = page.evaluate("() => (document.querySelector('input[type=radio]:checked') || {}).value")
+            print(f"  {'✓' if n_r2 == 1 and picked == 'other' else '✗'} 必須指定の無い未選択ラジオ群も「その他」を選ぶ: {picked}")
 
             print("\n── 必須欄の未入力を成功と誤判定しない(2026-09-19、実インシデントで発見) ──")
             page.set_content("""

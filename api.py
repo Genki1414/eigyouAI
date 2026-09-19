@@ -1137,7 +1137,14 @@ def h_tenant_send_log(con, tenant_id, qs):
         LEFT JOIN companies c ON c.id = l.company_id WHERE {base_where}
         GROUP BY l.status""", base_params).fetchall()
     counts = {r["status"]: r["n"] for r in count_rows}
-    return 200, {"log": [dict(r) for r in rows], "counts": counts}
+    # 理由(reason_code)別の内訳(T107)。成功率が低いときに「なぜ送れていないか」を
+    # 画面で把握するため。statusでの絞り込みは反映しない(countsと同じ方針)
+    reason_rows = con.execute(f"""SELECT l.status, l.reason_code, COUNT(*) n FROM form_send_log l
+        LEFT JOIN companies c ON c.id = l.company_id WHERE {base_where}
+        GROUP BY l.status, l.reason_code ORDER BY n DESC""", base_params).fetchall()
+    reasons = [{"status": r["status"], "reason_code": r["reason_code"] or "", "n": r["n"]}
+               for r in reason_rows]
+    return 200, {"log": [dict(r) for r in rows], "counts": counts, "reasons": reasons}
 
 
 def h_tenant_send_log_screenshot_path(con, tenant_id, log_id, kind):
@@ -4546,6 +4553,10 @@ def self_test(port=8899):
     t("GET /api/tenant/send-log?list_id=で会社別の明細(詳細ページ用)に絞り込める",
       st == 200 and len(r.get("log", [])) == 2)
     # T105: 会社別明細にURLクリック数・最終クリック日時が出る/クリックした会社だけに絞れる
+    t("理由(reason_code)別の内訳が返る(成功率が低い原因の把握用。T107)",
+      st == 200 and {(x["status"], x["reason_code"]): x["n"] for x in r["reasons"]}
+      == {("SUCCESS", "success_text_matched"): 1, ("FAILED_UNSUPPORTED", "form_not_found"): 1},
+      f"reasons={r.get('reasons')}")
     t("会社別明細にURLクリック数と最終クリック日時が出る",
       st == 200 and all(x["click_count"] == 3 and x["last_clicked_at"] == now_t22 for x in r["log"]))
     con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url, started_at,

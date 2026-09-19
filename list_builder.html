@@ -432,6 +432,7 @@ tr.clickable:hover{background:var(--accent-soft)}
             </div>
           </div>
           <div id="sendLogCounts" class="countpills"></div>
+          <div id="sendLogReasons" class="hint" style="margin-top:8px"></div>
         </div>
         <div id="sendLogWrap" style="margin-top:12px"><div class="empty">接続すると表示されます</div></div>
       </section>
@@ -1966,6 +1967,20 @@ async function refreshSendLog() {
       const off = sendLogExcluded.has(status) ? " off" : "";
       return `<span class="countpill${cls ? " " + cls : ""}${off}" data-status="${status}">${label}: ${n}件</span>`;
     }).join("");
+    // 理由別の内訳(T107)。成功以外を多い順に並べ、「なぜ送れていないか」を一目で分かるようにする
+    const reasons = (r.reasons || []);
+    const failReasons = reasons.filter(x => x.status !== "SUCCESS");
+    const okReasons = reasons.filter(x => x.status === "SUCCESS");
+    const totalTried = reasons.reduce((a, x) => a + x.n, 0);
+    const okTotal = okReasons.reduce((a, x) => a + x.n, 0);
+    $("sendLogReasons").innerHTML = !totalTried ? "" :
+      `送信できた ${okTotal.toLocaleString()} / ${totalTried.toLocaleString()}件`
+      + `(${Math.round(okTotal * 100 / totalTried)}%)`
+      + (failReasons.length
+        ? `<br>送れなかった理由: ` + failReasons.slice(0, 8).map(x =>
+            `${REASON_LABELS[x.reason_code] || x.reason_code || "不明"} <b>${x.n.toLocaleString()}</b>件`).join(" / ")
+        : "");
+
     $("sendLogCounts").querySelectorAll(".countpill").forEach(pill => {
       pill.addEventListener("click", () => {
         const s = pill.dataset.status;
@@ -3186,6 +3201,19 @@ const LOG_STATUS_LABELS = {
   SKIP_NO_SOLICIT: "営業拒否", SKIP_CAPTCHA: "対象外(CAPTCHA)",
   SKIP_RECRUIT_ONLY: "対象外(採用専用)", SKIP_SUPPORT_ONLY: "対象外(会員専用)",
   SKIP_BOT_CHALLENGE: "対象外(bot判定)",
+};
+// 送れなかった理由(form_navigator.pyのreason_code)を日本語にする。T107で内訳表示に使う
+const REASON_LABELS = {
+  success_text_matched: "完了メッセージを確認", url_changed_after_submit: "送信後にページが変わった",
+  form_disappeared_after_submit: "送信後にフォームが消えた",
+  success_not_confirmed: "送信したが完了を確認できない", form_not_found: "問い合わせフォームが見つからない",
+  no_fields_filled: "入力できる欄が見つからない", submit_button_not_found: "送信ボタンが見つからない",
+  submit_click_failed: "送信ボタンを押せない", error_message_detected: "送信後にエラー表示が出た",
+  required_field_unfilled: "自動で埋められない必須欄がある", required_field_empty: "必須欄が空のままだった",
+  invalid_certificate: "相手サイトの証明書不備", goto_failed: "ページを開けない(閉鎖・通信エラー)",
+  unexpected_error: "想定外のエラー", captcha_detected: "画像認証(CAPTCHA)がある",
+  bot_challenge_detected: "bot判定でブロック", no_solicitation_notice: "営業お断りの記載がある",
+  recruit_only_form: "採用専用フォーム", support_only_form: "会員・契約者専用フォーム",
 };
 const LOG_STATUS_CLASS = {
   SUCCESS: "ok", FAILED_RETRYABLE: "warn", FAILED_UNSUPPORTED: "err",

@@ -22,14 +22,66 @@ senders.FormSenderから呼ばれる。ここは「ブラウザ操作」だけ�
 import os
 import random
 import re
+import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import unquote, urlsplit
 
 MAX_CRAWL_PAGES = 5          # 問い合わせページ探索で開くページ数の上限
-NAV_TIMEOUT_MS = 45000
-ACTION_TIMEOUT_MS = 10000
+# T107: 1社あたりの所要時間を削るため、待ち時間はすべて.envで調整できるようにした。
+# 既定値の根拠: 実運用のフォームはほぼ2秒以内に落ち着く。一方で広告・計測タグが常時通信して
+# いるサイトでは"networkidle"が永久に来ず、旧実装(15秒×2回)はその上限を丸ごと待っていた。
+NAV_TIMEOUT_MS = int(os.environ.get("FORM_NAV_TIMEOUT_MS", "30000"))
+ACTION_TIMEOUT_MS = int(os.environ.get("FORM_ACTION_TIMEOUT_MS", "10000"))
+SETTLE_TIMEOUT_MS = int(os.environ.get("FORM_SETTLE_TIMEOUT_MS", "6000"))
+POST_SUBMIT_WAIT_MS = int(os.environ.get("FORM_POST_SUBMIT_WAIT_MS", "1200"))
+# ブラウザ再利用(T107)。旧実装は1社ごとにPlaywrightドライバ起動+Chromium起動+終了を
+# していて、これだけで1社あたり数秒かかっていた。スレッドごとに1つ起動して使い回し、
+# 会社ごとにはコンテキスト(Cookie等は毎回まっさら)だけ作り直す。
+# MAX_USESごとに起動し直すのは、長時間稼働でのメモリ肥大と、プロキシプール(T42)使用時に
+# 送信元IPが固定され続けるのを避けるため。
+BROWSER_REUSE = os.environ.get("FORM_BROWSER_REUSE", "1").lower() not in ("0", "false", "no")
+BROWSER_MAX_USES = int(os.environ.get("FORM_BROWSER_MAX_USES", "20"))
+_BROWSER_TLS = threading.local()
+
+
+def _close_browser_state(state):
+    if not state:
+        return
+    for key, closer in (("browser", "close"), ("pw", "stop")):
+        try:
+            getattr(state[key], closer)()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def close_thread_browser():
+    """このスレッドが使い回しているブラウザを閉じる。送信ワーカーは1件の送信ごとではなく
+    担当分を送り終えたときにこれを呼ぶこと(呼ばないとChromiumが残る)。
+    Playwrightのsync APIはスレッドをまたいで触れないため、必ず使ったスレッド自身が呼ぶ。"""
+    state = getattr(_BROWSER_TLS, "state", None)
+    _BROWSER_TLS.state = None
+    _close_browser_state(state)
+
+
+def _acquire_browser(headless):
+    """(state, owned) を返す。owned=Trueなら呼び出し側がその場で閉じる(再利用しない設定)。"""
+    from playwright.sync_api import sync_playwright
+
+    if not BROWSER_REUSE:
+        pw = sync_playwright().start()
+        return {"pw": pw, "browser": _launch_browser(pw, headless), "uses": 1}, True
+    state = getattr(_BROWSER_TLS, "state", None)
+    if state is not None and state["uses"] >= BROWSER_MAX_USES:
+        close_thread_browser()
+        state = None
+    if state is None:
+        pw = sync_playwright().start()
+        state = {"pw": pw, "browser": _launch_browser(pw, headless), "uses": 0}
+        _BROWSER_TLS.state = state
+    state["uses"] += 1
+    return state, False
 
 
 def _parse_proxy(proxy_url):
@@ -646,233 +698,247 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
     from playwright.sync_api import sync_playwright
 
     result = NavigationResult(status="FAILED_UNSUPPORTED")
+    state = None
+    owned = False
     try:
-        with sync_playwright() as p:
-            browser = _launch_browser(p, headless)
+        state, owned = _acquire_browser(headless)
+        context = state["browser"].new_context()
+        try:
+            page = context.new_page()
+        except Exception:  # noqa: BLE001
+            context.close()
+            raise
+        try:
             try:
-                page = browser.new_page()
-                try:
-                    page.goto(start_url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
-                except Exception as e:  # noqa: BLE001
-                    msg = str(e)
-                    if "ERR_CERT_" in msg or "ERR_SSL_" in msg:
-                        # 相手サイト側のTLS証明書不備。再試行しても同じ結果になるだけなので
-                        # リトライ対象にしない(FAILED_RETRYABLEにしない)
-                        result.status = "FAILED_UNSUPPORTED"
-                        result.reason_code = "invalid_certificate"
-                    else:
-                        result.status = "FAILED_RETRYABLE"
-                        result.reason_code = "goto_failed"
-                    result.error_message = f"{type(e).__name__}: {e}"
-                    return result
-
-                contact_url, discover_err = _resolve_contact_page(page, start_url)
-                result.contact_url_used = contact_url
-                result.final_url = page.url
-                try:
-                    result.page_title = page.title()
-                except Exception:  # noqa: BLE001
-                    pass
-                result.screenshot_before_path = _save_screenshot(
-                    page, screenshot_dir, result.run_id, "before")
-
-                page_text = _page_text(page)
-
-                if _detect_bot_challenge(page):
-                    result.status = "SKIP_BOT_CHALLENGE"
-                    result.reason_code = "bot_challenge_detected"
-                    return result
-                if _detect_captcha(page):
-                    result.status = "SKIP_CAPTCHA"
-                    result.reason_code = "captcha_detected"
-                    return result
-                if _detect_no_solicit(page_text) and not allow_no_solicit:
-                    result.status = "SKIP_NO_SOLICIT"
-                    result.reason_code = "no_solicitation_notice"
-                    return result
-                if _detect_recruit_only(page_text):
-                    result.status = "SKIP_RECRUIT_ONLY"
-                    result.reason_code = "recruit_only_form"
-                    return result
-                if _detect_support_only(page_text):
-                    result.status = "SKIP_SUPPORT_ONLY"
-                    result.reason_code = "support_only_form"
-                    return result
-
-                if not _has_fillable_form(page):
+                page.goto(start_url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+            except Exception as e:  # noqa: BLE001
+                msg = str(e)
+                if "ERR_CERT_" in msg or "ERR_SSL_" in msg:
+                    # 相手サイト側のTLS証明書不備。再試行しても同じ結果になるだけなので
+                    # リトライ対象にしない(FAILED_RETRYABLEにしない)
                     result.status = "FAILED_UNSUPPORTED"
-                    result.reason_code = discover_err or "form_not_found"
-                    result.page_text_snippet = page_text[:400]
-                    return result
+                    result.reason_code = "invalid_certificate"
+                else:
+                    result.status = "FAILED_RETRYABLE"
+                    result.reason_code = "goto_failed"
+                result.error_message = f"{type(e).__name__}: {e}"
+                return result
 
-                fields = page.query_selector_all(
-                    "input[type=text], input[type=email], input[type=tel], "
-                    "input:not([type]), textarea")
-                detected, filled = {}, []
-                for el in fields:
+            contact_url, discover_err = _resolve_contact_page(page, start_url)
+            result.contact_url_used = contact_url
+            result.final_url = page.url
+            try:
+                result.page_title = page.title()
+            except Exception:  # noqa: BLE001
+                pass
+            result.screenshot_before_path = _save_screenshot(
+                page, screenshot_dir, result.run_id, "before")
+
+            page_text = _page_text(page)
+
+            if _detect_bot_challenge(page):
+                result.status = "SKIP_BOT_CHALLENGE"
+                result.reason_code = "bot_challenge_detected"
+                return result
+            if _detect_captcha(page):
+                result.status = "SKIP_CAPTCHA"
+                result.reason_code = "captcha_detected"
+                return result
+            if _detect_no_solicit(page_text) and not allow_no_solicit:
+                result.status = "SKIP_NO_SOLICIT"
+                result.reason_code = "no_solicitation_notice"
+                return result
+            if _detect_recruit_only(page_text):
+                result.status = "SKIP_RECRUIT_ONLY"
+                result.reason_code = "recruit_only_form"
+                return result
+            if _detect_support_only(page_text):
+                result.status = "SKIP_SUPPORT_ONLY"
+                result.reason_code = "support_only_form"
+                return result
+
+            if not _has_fillable_form(page):
+                result.status = "FAILED_UNSUPPORTED"
+                result.reason_code = discover_err or "form_not_found"
+                result.page_text_snippet = page_text[:400]
+                return result
+
+            fields = page.query_selector_all(
+                "input[type=text], input[type=email], input[type=tel], "
+                "input:not([type]), textarea")
+            detected, filled = {}, []
+            for el in fields:
+                try:
+                    if not el.is_visible():
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+                kind = _classify_field(page, el)
+                if not kind:
+                    continue
+                detected[kind] = detected.get(kind, 0) + 1
+                # 呼び出し側(senders.py)が姓・名それぞれの妥当な既定値を
+                # 決めて渡す(未設定の名を会社名で埋める、といった代替は
+                # ここでは行わない。呼び出し側の送信者情報の解釈の話のため)
+                fill_value = values.get(kind)
+                if fill_value:
                     try:
-                        if not el.is_visible():
-                            continue
-                    except Exception:  # noqa: BLE001
-                        continue
-                    kind = _classify_field(page, el)
-                    if not kind:
-                        continue
-                    detected[kind] = detected.get(kind, 0) + 1
-                    # 呼び出し側(senders.py)が姓・名それぞれの妥当な既定値を
-                    # 決めて渡す(未設定の名を会社名で埋める、といった代替は
-                    # ここでは行わない。呼び出し側の送信者情報の解釈の話のため)
-                    fill_value = values.get(kind)
-                    if fill_value:
+                        el.fill(fill_value, timeout=ACTION_TIMEOUT_MS)
+                        # .fill()はinput/changeイベントを発火するはずだが、Vue/React等の
+                        # 独自バインディングがそれを拾わず「未入力」表示のまま残るサイトが
+                        # あったため、念のため明示的にも発火させておく
                         try:
-                            el.fill(fill_value, timeout=ACTION_TIMEOUT_MS)
-                            # .fill()はinput/changeイベントを発火するはずだが、Vue/React等の
-                            # 独自バインディングがそれを拾わず「未入力」表示のまま残るサイトが
-                            # あったため、念のため明示的にも発火させておく
-                            try:
-                                el.dispatch_event("input")
-                                el.dispatch_event("change")
-                            except Exception:  # noqa: BLE001
-                                pass
-                            filled.append(kind)
+                            el.dispatch_event("input")
+                            el.dispatch_event("change")
                         except Exception:  # noqa: BLE001
                             pass
-
-                if not filled:
-                    result.detected_fields = detected
-                    result.filled_fields = filled
-                    result.status = "FAILED_UNSUPPORTED"
-                    result.reason_code = "no_fields_filled"
-                    return result
-
-                # プルダウン(お問い合わせ種類・都道府県等)。必須なのに未選択のままだと
-                # 送信がブロックされるサイトが多いため埋める
-                n_selects = _fill_selects(page)
-                if n_selects:
-                    detected["select"] = n_selects
-                    filled.append(f"select×{n_selects}")
-
-                result.detected_fields = detected
-                result.filled_fields = filled
-
-                # 同意チェックボックス
-                try:
-                    for cb in page.query_selector_all("input[type=checkbox]"):
-                        if not cb.is_visible() or cb.is_checked():
-                            continue
-                        if any(h in (_label_for(page, cb) or "") for h in _CONSENT_HINTS):
-                            cb.check(timeout=ACTION_TIMEOUT_MS)
-                except Exception:  # noqa: BLE001
-                    pass
-
-                # 必須のラジオ群が未選択なら先頭を選ぶ(2026-09-19)
-                n_radios = _check_required_radios(page)
-                if n_radios:
-                    filled.append(f"radio×{n_radios}")
-                    result.filled_fields = filled
-
-                # 送信前検証(2026-09-19): 埋められなかった必須欄(ふりがな等)や形式不一致が
-                # 残っていればブラウザが送信をブロックするので、押しても送られない。
-                # その状態を「成功」と誤記録しないため、ここで失敗として記録し、
-                # どの欄が埋まらなかったかを残す(「自動入力」での手動フォローに使える)
-                missing = _invalid_visible_fields(page)
-                if missing:
-                    result.status = "FAILED_UNSUPPORTED"
-                    result.reason_code = "required_field_unfilled"
-                    result.error_message = "自動で埋められない必須欄があるため送信していません: " + "・".join(missing)
-                    result.page_text_snippet = _page_text(page)[:400]
-                    result.screenshot_after_path = _save_screenshot(
-                        page, screenshot_dir, result.run_id, "after")
-                    return result
-
-                submit_btn = _find_button(page, _SUBMIT_TEXT_RE)
-                if not submit_btn:
-                    result.status = "FAILED_UNSUPPORTED"
-                    result.reason_code = "submit_button_not_found"
-                    result.page_text_snippet = _page_text(page)[:400]
-                    return result
-
-                result.submit_attempted = True
-                if not _click(submit_btn):
-                    result.status = "FAILED_RETRYABLE"
-                    result.reason_code = "submit_click_failed"
-                    return result
-                try:
-                    page.wait_for_load_state("networkidle", timeout=15000)
-                except Exception:  # noqa: BLE001
-                    pass
-
-                # 入力→確認→送信の2段階フォーム対応。確認画面が残っていればもう一度押す
-                confirm_btn = _find_button(page, _CONFIRM_TEXT_RE) or _find_button(page, _SUBMIT_TEXT_RE)
-                if confirm_btn:
-                    _click(confirm_btn)
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=15000)
+                        filled.append(kind)
                     except Exception:  # noqa: BLE001
                         pass
 
-                # AJAX送信の完了メッセージが非同期で少し遅れて描画されるサイトがあるため、
-                # networkidleの後にもう少しだけ待つ
+            if not filled:
+                result.detected_fields = detected
+                result.filled_fields = filled
+                result.status = "FAILED_UNSUPPORTED"
+                result.reason_code = "no_fields_filled"
+                return result
+
+            # プルダウン(お問い合わせ種類・都道府県等)。必須なのに未選択のままだと
+            # 送信がブロックされるサイトが多いため埋める
+            n_selects = _fill_selects(page)
+            if n_selects:
+                detected["select"] = n_selects
+                filled.append(f"select×{n_selects}")
+
+            result.detected_fields = detected
+            result.filled_fields = filled
+
+            # 同意チェックボックス
+            try:
+                for cb in page.query_selector_all("input[type=checkbox]"):
+                    if not cb.is_visible() or cb.is_checked():
+                        continue
+                    if any(h in (_label_for(page, cb) or "") for h in _CONSENT_HINTS):
+                        cb.check(timeout=ACTION_TIMEOUT_MS)
+            except Exception:  # noqa: BLE001
+                pass
+
+            # 必須のラジオ群が未選択なら先頭を選ぶ(2026-09-19)
+            n_radios = _check_required_radios(page)
+            if n_radios:
+                filled.append(f"radio×{n_radios}")
+                result.filled_fields = filled
+
+            # 送信前検証(2026-09-19): 埋められなかった必須欄(ふりがな等)や形式不一致が
+            # 残っていればブラウザが送信をブロックするので、押しても送られない。
+            # その状態を「成功」と誤記録しないため、ここで失敗として記録し、
+            # どの欄が埋まらなかったかを残す(「自動入力」での手動フォローに使える)
+            missing = _invalid_visible_fields(page)
+            if missing:
+                result.status = "FAILED_UNSUPPORTED"
+                result.reason_code = "required_field_unfilled"
+                result.error_message = "自動で埋められない必須欄があるため送信していません: " + "・".join(missing)
+                result.page_text_snippet = _page_text(page)[:400]
+                result.screenshot_after_path = _save_screenshot(
+                    page, screenshot_dir, result.run_id, "after")
+                return result
+
+            submit_btn = _find_button(page, _SUBMIT_TEXT_RE)
+            if not submit_btn:
+                result.status = "FAILED_UNSUPPORTED"
+                result.reason_code = "submit_button_not_found"
+                result.page_text_snippet = _page_text(page)[:400]
+                return result
+
+            result.submit_attempted = True
+            if not _click(submit_btn):
+                result.status = "FAILED_RETRYABLE"
+                result.reason_code = "submit_click_failed"
+                return result
+            try:
+                page.wait_for_load_state("networkidle", timeout=SETTLE_TIMEOUT_MS)
+            except Exception:  # noqa: BLE001
+                pass
+
+            # 入力→確認→送信の2段階フォーム対応。確認画面が残っていればもう一度押す
+            confirm_btn = _find_button(page, _CONFIRM_TEXT_RE) or _find_button(page, _SUBMIT_TEXT_RE)
+            if confirm_btn:
+                _click(confirm_btn)
                 try:
-                    page.wait_for_timeout(1500)
+                    page.wait_for_load_state("networkidle", timeout=SETTLE_TIMEOUT_MS)
                 except Exception:  # noqa: BLE001
                     pass
 
-                result.screenshot_after_path = _save_screenshot(
-                    page, screenshot_dir, result.run_id, "after")
-                result.final_url = page.url
-                final_text = _page_text(page)
-                result.page_text_snippet = final_text[:400]
-                # 明確な拒否・エラー文言が出ていれば、以下のSUCCESS判定(文言一致/URL変化/
-                # フォーム消失)より優先する。「日本国内からのみ送信可能です」という
-                # 地域制限エラーで、フォームがエラーメッセージへ差し替わった
-                # (=form_gone成立)ためSUCCESSと誤記録された実インシデントへの対策。
-                # 送信後もブラウザ検証で無効な欄が残り、入力した値もそのまま残っている
-                # =ブラウザが送信をブロックした(JSで後から必須になった欄など)。
-                # 文言一致・URL変化・フォーム消失の判定より優先する(2026-09-19)
-                still_invalid = _invalid_visible_fields(page)
-                if still_invalid and _has_fillable_form(page) and _form_keeps_our_values(page, values):
-                    result.status = "FAILED_UNSUPPORTED"
-                    result.reason_code = "required_field_empty"
-                    result.error_message = "必須欄が未入力のまま送信がブロックされました: " + "・".join(still_invalid)
-                    return result
-                error_hit = _detect_submission_error(final_text)
-                if error_hit:
-                    result.status = "FAILED_UNSUPPORTED"
-                    result.reason_code = "error_message_detected"
-                    result.error_message = f"送信後ページにエラー文言を検知: {error_hit}"
-                    return result
-                url_changed = page.url != contact_url
-                # フォームがDOM上から消えている(=AJAXで完了画面に差し替わった)ことも
-                # 成功の傍証として見る。文言・URLどちらも一致しないAJAX系フォーム向けの保険
-                form_gone = not _has_fillable_form(page)
-                hit = next((k for k in _SUCCESS_HINTS if k in final_text), None)
-                if hit:
-                    result.status = "SUCCESS"
-                    result.reason_code = "success_text_matched"
-                    result.success_evidence = hit
-                    return result
-                if url_changed:
-                    result.status = "SUCCESS"
-                    result.reason_code = "url_changed_after_submit"
-                    result.success_evidence = page.url
-                    return result
-                if form_gone:
-                    result.status = "SUCCESS"
-                    result.reason_code = "form_disappeared_after_submit"
-                    result.success_evidence = "form_not_present"
-                    return result
+            # AJAX送信の完了メッセージが非同期で少し遅れて描画されるサイトがあるため、
+            # networkidleの後にもう少しだけ待つ
+            try:
+                page.wait_for_timeout(POST_SUBMIT_WAIT_MS)
+            except Exception:  # noqa: BLE001
+                pass
 
+            result.screenshot_after_path = _save_screenshot(
+                page, screenshot_dir, result.run_id, "after")
+            result.final_url = page.url
+            final_text = _page_text(page)
+            result.page_text_snippet = final_text[:400]
+            # 明確な拒否・エラー文言が出ていれば、以下のSUCCESS判定(文言一致/URL変化/
+            # フォーム消失)より優先する。「日本国内からのみ送信可能です」という
+            # 地域制限エラーで、フォームがエラーメッセージへ差し替わった
+            # (=form_gone成立)ためSUCCESSと誤記録された実インシデントへの対策。
+            # 送信後もブラウザ検証で無効な欄が残り、入力した値もそのまま残っている
+            # =ブラウザが送信をブロックした(JSで後から必須になった欄など)。
+            # 文言一致・URL変化・フォーム消失の判定より優先する(2026-09-19)
+            still_invalid = _invalid_visible_fields(page)
+            if still_invalid and _has_fillable_form(page) and _form_keeps_our_values(page, values):
                 result.status = "FAILED_UNSUPPORTED"
-                result.reason_code = "success_not_confirmed"
+                result.reason_code = "required_field_empty"
+                result.error_message = "必須欄が未入力のまま送信がブロックされました: " + "・".join(still_invalid)
                 return result
-            finally:
-                browser.close()
+            error_hit = _detect_submission_error(final_text)
+            if error_hit:
+                result.status = "FAILED_UNSUPPORTED"
+                result.reason_code = "error_message_detected"
+                result.error_message = f"送信後ページにエラー文言を検知: {error_hit}"
+                return result
+            url_changed = page.url != contact_url
+            # フォームがDOM上から消えている(=AJAXで完了画面に差し替わった)ことも
+            # 成功の傍証として見る。文言・URLどちらも一致しないAJAX系フォーム向けの保険
+            form_gone = not _has_fillable_form(page)
+            hit = next((k for k in _SUCCESS_HINTS if k in final_text), None)
+            if hit:
+                result.status = "SUCCESS"
+                result.reason_code = "success_text_matched"
+                result.success_evidence = hit
+                return result
+            if url_changed:
+                result.status = "SUCCESS"
+                result.reason_code = "url_changed_after_submit"
+                result.success_evidence = page.url
+                return result
+            if form_gone:
+                result.status = "SUCCESS"
+                result.reason_code = "form_disappeared_after_submit"
+                result.success_evidence = "form_not_present"
+                return result
+
+            result.status = "FAILED_UNSUPPORTED"
+            result.reason_code = "success_not_confirmed"
+            return result
+        finally:
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                pass
     except Exception as e:  # noqa: BLE001
+        # 使い回しているブラウザ自体が壊れている可能性があるので捨てる(次の会社で起動し直す)
+        close_thread_browser()
         result.status = "FAILED_RETRYABLE"
         result.reason_code = "unexpected_error"
         result.error_message = f"{type(e).__name__}: {e}"
         return result
+    finally:
+        if owned:
+            _close_browser_state(state)
 
 
 if __name__ == "__main__":
@@ -981,6 +1047,36 @@ if __name__ == "__main__":
             e2 = _detect_submission_error(
                 "お問い合わせいただきありがとうございます。担当者より追ってご連絡いたします。")
             print(f"  {'✓' if e2 is None else '✗'} 通常の完了ページはエラー扱いにしない")
+
+            print("\n── ブラウザ使い回し(T107。1社ごとの起動をやめて所要時間を削る) ──")
+            # このテストは既にsync_playwrightを1つ起動済みなので、同じドライバから
+            # 別ブラウザを1つ作り、stop()だけ何もしないダミーを挟んで使い回しの挙動を見る
+            # (close_thread_browser()でテスト本体のドライバまで止めてしまわないため)
+            class _NoStop:
+                def stop(self):
+                    pass
+            reuse_browser = _launch_browser(pw_ctx, True)
+            _BROWSER_TLS.state = {"pw": _NoStop(), "browser": reuse_browser, "uses": 0}
+            st1, owned1 = _acquire_browser(True)
+            st2, owned2 = _acquire_browser(True)
+            same = st1 is st2 and st1["browser"] is reuse_browser and not owned1 and not owned2
+            print(f"  {'✓' if same and st2['uses'] == 2 else '✗'} 2社目は同じブラウザを使い回す(起動し直さない。uses={st2['uses']})")
+            ctx_ok = False
+            try:
+                c = reuse_browser.new_context()
+                c.new_page().set_content("<p>ok</p>")
+                c.close()
+                ctx_ok = True
+            except Exception as ctx_e:  # noqa: BLE001
+                print(f"    context error: {ctx_e}")
+            print(f"  {'✓' if ctx_ok else '✗'} 使い回したブラウザから会社ごとのコンテキストを作れる(Cookieは毎回まっさら)")
+            close_thread_browser()
+            cleared = getattr(_BROWSER_TLS, "state", None) is None
+            closed = not reuse_browser.is_connected()
+            print(f"  {'✓' if cleared else '✗'} 閉じた後はスレッドに残らない")
+            print(f"  {'✓' if closed else '✗'} close_thread_browser()でChromiumが実際に終了する(送信後に残さない)")
+            print(f"  {'✓' if SETTLE_TIMEOUT_MS <= 8000 and POST_SUBMIT_WAIT_MS <= 2000 else '✗'} "
+                  f"送信後の待ちが短縮されている(settle={SETTLE_TIMEOUT_MS}ms, 追加待ち={POST_SUBMIT_WAIT_MS}ms)")
 
             print("\n── フォーム側の入力検証エラーを成功と誤判定しない(2026-09-19、実インシデント3件) ──")
             for txt in ("入力内容に問題があります。確認して再度お試しください。",

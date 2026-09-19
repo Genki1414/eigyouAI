@@ -21,6 +21,7 @@ senders.py — 送信アダプタ層
 """
 import json
 import re
+import queue
 import threading
 import time as _time
 import uuid
@@ -850,10 +851,42 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
             con_t.commit()
             return {"kind": "failed", "suppressed": suppressed, "reason": (res.error or "")[:80]}
 
-    with ThreadPoolExecutor(max_workers=min(C.FORM_SEND_CONCURRENCY, len(rows))) as ex:
-        futures = [ex.submit(_process_one, r) for r in rows]
-        for fut in as_completed(futures):
-            outcome = fut.result()
+    # T107: 1社=1タスクではなく「1スレッドが担当分を続けて処理する」形にする。
+    # form_navigatorがスレッドごとにブラウザを1つ使い回すため、担当分を終えた
+    # そのスレッド自身がclose_thread_browser()を呼んでChromiumを確実に終了させる
+    # (Playwrightのsync APIはスレッドをまたいで触れないので、他スレッドからは閉じられない)。
+    work = queue.Queue()
+    for r in rows:
+        work.put(r)
+
+    def _worker_loop():
+        done = []
+        try:
+            while True:
+                try:
+                    r = work.get_nowait()
+                except queue.Empty:
+                    break
+                done.append(_process_one(r))
+        finally:
+            try:
+                import form_navigator as FN_cleanup
+                FN_cleanup.close_thread_browser()
+            except Exception:  # noqa: BLE001
+                pass
+            con_t = getattr(_local, "con", None)
+            _local.con = None
+            if con_t is not None:
+                try:
+                    con_t.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        return done
+
+    n_workers = max(1, min(C.FORM_SEND_CONCURRENCY, len(rows)))
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+        futures = [ex.submit(_worker_loop) for _ in range(n_workers)]
+        for outcome in (o for fut in as_completed(futures) for o in fut.result()):
             stats[outcome["kind"]] += 1
             if outcome["kind"] == "sent":
                 cost += outcome["cost"]

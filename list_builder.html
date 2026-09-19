@@ -1136,6 +1136,11 @@ tr.clickable:hover{background:var(--accent-soft)}
     <div id="planChangeContactWrap" style="margin-top:10px;display:none">
       <label>ご担当者名</label>
       <input type="text" id="planChangeContactName" placeholder="山田 太郎">
+      <label style="margin-top:10px">お支払い</label>
+      <select id="planChangePayment">
+        <option value="月払い">月払い</option>
+        <option value="年払い(2ヶ月分お得)">年払い(2ヶ月分お得。10ヶ月分の料金で12ヶ月)</option>
+      </select>
     </div>
     <div style="margin-top:10px">
       <label>補足(任意)</label>
@@ -1723,7 +1728,7 @@ $("planChangeModalSubmit").addEventListener("click", async () => {
         method: "POST",
         body: JSON.stringify({
           kind: "contract",
-          requested_plan: $("planChangeSelect").value,
+          requested_plan: $("planChangeSelect").value + " / " + $("planChangePayment").value,
           contact_name: $("planChangeContactName").value.trim(),
           message: $("planChangeMessage").value.trim(),
         }),

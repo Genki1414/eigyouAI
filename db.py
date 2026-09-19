@@ -879,7 +879,7 @@ def resolve_click_token(con, token):
 def list_scheduled_sends(con, tenant_id, list_id=None):
     q = """SELECT s.id, s.list_id, tl.name list_name, s.subject, s.dry_run, s.scheduled_at,
             s.track_clicks, s.sender_template_id, s.status, s.created_at, s.executed_at,
-            s.claimed_at, s.result_json, s.attempts, s.tenant_id
+            s.claimed_at, s.result_json, s.attempts, s.tenant_id, tl.company_count AS list_count
         FROM scheduled_sends s LEFT JOIN target_lists tl ON tl.id = s.list_id
         WHERE s.tenant_id=?"""
     params = [tenant_id]

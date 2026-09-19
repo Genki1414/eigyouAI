@@ -518,9 +518,15 @@ def list_lists(con, tenant_id, include_deleted=False):
     where = "l.tenant_id=?" if include_deleted else "l.tenant_id=? AND l.deleted_at IS NULL"
     rows = con.execute(f"""SELECT l.id, l.name, l.source, l.company_count, l.created_at,
             l.updated_at, l.deleted_at, l.product_id, p.name AS product_name,
-            p.ai_subject AS product_ai_subject, p.ai_body AS product_ai_body
+            p.ai_subject AS product_ai_subject, p.ai_body AS product_ai_body,
+            (SELECT COUNT(DISTINCT f.company_id) FROM form_send_log f
+               WHERE f.list_id=l.id AND f.tenant_id=l.tenant_id) AS sent_count,
+            (SELECT COUNT(DISTINCT f.company_id) FROM form_send_log f
+               WHERE f.list_id=l.id AND f.tenant_id=l.tenant_id AND f.status='SUCCESS') AS success_count
         FROM target_lists l LEFT JOIN tenant_products p ON p.id=l.product_id
         WHERE {where} ORDER BY l.id DESC""", (tenant_id,)).fetchall()
+    # sent_count/success_count: 送信消化(T105)。「350/2,795」のように何社まで処理したかを
+    # 画面に出すため。同じ会社へ複数回送っても1社と数える(DISTINCT)
     return [dict(r) for r in rows]
 
 

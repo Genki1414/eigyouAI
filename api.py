@@ -1076,6 +1076,13 @@ def h_tenant_send_log_execution_note(con, tenant_id, list_id, data):
     return 200, {"ok": True}
 
 
+# 会社別明細のURLクリック(T105): touches.email_click_count/email_clicked_at を
+# リスト(target_lists.campaign_id)と会社で引く。同じ会社へ複数回送っても行が増えないよう
+# 相関サブクエリで1値にまとめる
+CLICKED_WHERE_SQL = """ AND EXISTS (SELECT 1 FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
+            WHERE tl.id=l.list_id AND t.company_id=l.company_id AND COALESCE(t.email_click_count,0)>0)"""
+
+
 def h_tenant_send_log(con, tenant_id, qs):
     """テナント自身のフォーム自動送信履歴(form_send_log)。他テナント分は
     tenant_id=?で絞り込んでいるため見えない。?company_id=で1社分の履歴
@@ -1103,10 +1110,17 @@ def h_tenant_send_log(con, tenant_id, qs):
     if name_q:
         base_where += " AND c.name LIKE ?"
         base_params.append(f"%{name_q}%")
+    # ?clicked=1: 本文のURLをクリックした会社だけ(T105。追客の優先順位付け用)
+    if (qs.get("clicked", [""])[0] or "") in ("1", "true"):
+        base_where += CLICKED_WHERE_SQL
 
     q = f"""SELECT l.id, l.company_id, c.name company_name, l.status, l.reason_code,
             l.contact_url, l.target_url, l.started_at, l.finished_at, l.retry_count,
             l.execution_seconds, l.note, l.manual_sent_at,
+            (SELECT MAX(t.email_click_count) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
+               WHERE tl.id=l.list_id AND t.company_id=l.company_id) click_count,
+            (SELECT MAX(t.email_clicked_at) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
+               WHERE tl.id=l.list_id AND t.company_id=l.company_id) last_clicked_at,
             (l.screenshot_before_path IS NOT NULL) has_screenshot_before,
             (l.screenshot_after_path IS NOT NULL) has_screenshot_after
         FROM form_send_log l LEFT JOIN companies c ON c.id = l.company_id
@@ -1273,8 +1287,15 @@ def h_tenant_send_log_csv(con, tenant_id, qs):
     if statuses:
         where += f" AND l.status IN ({','.join('?' * len(statuses))})"
         params += statuses
+    if (qs.get("clicked", [""])[0] or "") in ("1", "true"):
+        where += CLICKED_WHERE_SQL
     rows = con.execute(f"""SELECT l.id, c.name company_name, l.contact_url, l.status,
-            l.reason_code, l.note, l.manual_sent_at, l.started_at, l.finished_at
+            l.reason_code, l.note, l.manual_sent_at, l.started_at, l.finished_at,
+            (SELECT MAX(t.email_click_count) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
+               WHERE tl.id=l.list_id AND t.company_id=l.company_id) click_count,
+            (SELECT MAX(t.email_clicked_at) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
+               WHERE tl.id=l.list_id AND t.company_id=l.company_id) last_clicked_at,
+            l.id AS _id
         FROM form_send_log l LEFT JOIN companies c ON c.id = l.company_id
         WHERE {where} ORDER BY l.id DESC""", params).fetchall()
 
@@ -1282,12 +1303,12 @@ def h_tenant_send_log_csv(con, tenant_id, qs):
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["ID", "会社名", "お問い合わせURL", "結果", "詳細", "備考",
-                "手動送信済み", "登録日時", "実行日時"])
+                "手動送信済み", "登録日時", "実行日時", "URLクリック数", "最終クリック日時"])
     for r in rows:
         w.writerow([r["id"], r["company_name"] or "", r["contact_url"] or "", r["status"],
                     r["reason_code"] or "", r["note"] or "",
                     "済" if r["manual_sent_at"] else "", r["started_at"] or "",
-                    r["finished_at"] or ""])
+                    r["finished_at"] or "", r["click_count"] or 0, r["last_clicked_at"] or ""])
     return 200, {"csv": buf.getvalue()}
 
 
@@ -4522,6 +4543,27 @@ def self_test(port=8899):
     st, r = get_auth(f"/api/tenant/send-log?list_id={t22_list_id}", token=key_a)
     t("GET /api/tenant/send-log?list_id=で会社別の明細(詳細ページ用)に絞り込める",
       st == 200 and len(r.get("log", [])) == 2)
+    # T105: 会社別明細にURLクリック数・最終クリック日時が出る/クリックした会社だけに絞れる
+    t("会社別明細にURLクリック数と最終クリック日時が出る",
+      st == 200 and all(x["click_count"] == 3 and x["last_clicked_at"] == now_t22 for x in r["log"]))
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url, started_at,
+        status, reason_code) VALUES (999999997,?,?,'https://example.co.jp',?,'SUCCESS','success_text_matched')""",
+        (tid_a, t22_list_id, now_t22))
+    con.commit()
+    st, r = get_auth(f"/api/tenant/send-log?list_id={t22_list_id}&clicked=1", token=key_a)
+    t("?clicked=1でクリックした会社の行だけになる(クリックの無い会社は出ない)",
+      st == 200 and len(r["log"]) == 2 and all(x["company_id"] == t22_company for x in r["log"])
+      and sum(r["counts"].values()) == 2)
+    st, r = get_auth(f"/api/tenant/send-log/csv?list_id={t22_list_id}&clicked=1", token=key_a)
+    t("CSVにもURLクリック数・最終クリック日時の列が入り、?clicked=1が効く",
+      st == 200 and "URLクリック数" in r["csv"] and r["csv"].count("\n") == 3 and ",3," in r["csv"])
+    st, r = get_auth("/api/tenant/lists", token=key_a)
+    t22_row = next((l for l in r["lists"] if l["id"] == t22_list_id), None)
+    t("保存済みリストに送信消化(送信済み社数/成功社数)が出る(同じ会社の複数回送信は1社と数える)",
+      st == 200 and t22_row is not None and t22_row["sent_count"] == 2 and t22_row["success_count"] == 2,
+      f"row={t22_row}")
+    con.execute("DELETE FROM form_send_log WHERE company_id=999999997")
+    con.commit()
 
     con.execute("DELETE FROM form_send_log WHERE list_id=?", (t22_list_id,))
     con.execute("DELETE FROM touches WHERE campaign_id=?", (t22_campaign_id,))

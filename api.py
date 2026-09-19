@@ -3635,6 +3635,22 @@ def self_test(port=8899):
           and "trades" in r.get("relaxed", []) and bool(r.get("list_name")))
         if r.get("list_id"):
             product_list_ids.append(r["list_id"])
+
+        # 資本金の単位(2026-09-19): 画面は円、DBは千円。500万円以下 → capital<=5000(千円)の会社
+        # だけが入り、資本金不明(NULL)は入らない。以前は単位違いで全社が該当していた
+        n_cap = con.execute("SELECT COUNT(*) FROM companies WHERE capital IS NOT NULL AND capital <= 5000").fetchone()[0]
+        n_all = con.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
+        # 接触可否などの基本条件でも減るので件数の一致ではなく「無条件より少なく、上限超・不明が0件」で見る
+        st0, r0 = post_auth("/api/tenant/lists", {"name": "資本金指定なし", "filters": {}}, token=key_a)
+        st, r = post_auth("/api/tenant/lists", {"name": "資本金500万円以下", "filters": {"capital_max": 5000000}}, token=key_a)
+        cap_bad = con.execute("""SELECT COUNT(*) FROM target_list_members m JOIN companies c ON c.id=m.company_id
+                                 WHERE m.list_id=? AND (c.capital IS NULL OR c.capital > 5000)""",
+                              (r.get("list_id"),)).fetchone()[0]
+        t("資本金の上限は円→千円に換算して絞り込む(500万円以下で資本金5,000千円超・不明が入らない)",
+          st0 == 200 and st == 200 and 0 < r.get("count", 0) < r0.get("count", 0)
+          and r.get("count", 0) <= n_cap < n_all and cap_bad == 0,
+          f"st={st} count={r.get('count')} all={r0.get('count')} n_cap={n_cap} n_all={n_all} bad={cap_bad}")
+        product_list_ids.extend(x["list_id"] for x in (r0, r) if x.get("list_id"))
     finally:
         PR_test.classify_targeting = orig_classify
         # tenant_products/target_lists共にtenants(id)へのFOREIGN KEYを持つため、

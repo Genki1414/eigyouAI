@@ -4675,6 +4675,24 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T95. 資本金の絞り込みが効いていなかった件と、求人出稿中/HPありの「準備中」化(2026-09-19)
+
+ユーザーから「(求人出稿中のみ・HPありのみ)ここは準備中にして」「資本金絞り込みが機能してない」。
+
+- **資本金の原因は単位の不一致**。`companies.capital`は千円単位(parsers/common.parse_capital,
+  ingest_mikomeru.parse_capital_sen)なのに、画面のチップ(300万〜1億)とAI(products.py)は
+  円で`capital_max`を渡し、`build_filter_sql()`がそのまま`capital <= 3000000`(千円=30億円)と
+  比較していたため全社が該当していた。→ `build_filter_sql()`で円→千円(÷1000)に換算。
+  あわせて資本金不明(NULL)は「◯円以下」に含めない(以前は`OR capital IS NULL`で含めていた)。
+  画面に「資本金が不明の会社は、上限を指定すると対象から外れます」の注記。
+- **求人出稿中のみ・HPありのみ**は共有マスタ側のデータが未整備(hiring_nowはenrich.pyでしか
+  埋まらない)なので、チップをdisabled+「(準備中)」表示にし、`currentFilters()`から外した。
+  AIの絞り込み判定(products.classify_targeting)からも`hiring_now`/`has_website`を外した。
+  「問い合わせフォームURL確定済みのみ」はそのまま使える。
+- 復活させるとき: list_builder.htmlの2チップの`disabled`/`.soon`を外し、`currentFilters()`の
+  2行と、products.pyのプロンプト2行+filters代入を戻す。
+- `api.py test`に「500万円以下で資本金5,000千円超・不明が入らない」テストを追加。
+
 ### T92. リスト上限の撤廃・自動送信ログ一覧のCSV(2026-09-17)
 
 ユーザー: 「466,593件見つかりました(上限20,000件のため実際に保存されるのは

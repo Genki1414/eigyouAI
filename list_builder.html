@@ -74,6 +74,8 @@ input[type=text],input[type=number],input[type=password],select,textarea{
   border-radius:99px;padding:4px 10px;cursor:pointer;user-select:none;background:var(--concrete)}
 .chip input{width:auto}
 .chip.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.chip.soon{opacity:.45;cursor:not-allowed}
+.chip.soon small{font-size:10px}
 /* 業種チップのグループ単位開閉(mikomeruの「業種で絞り込む」と同じ見た目。2026-08-29) */
 .tradegroup{border:1px solid var(--line);border-radius:8px;margin-top:8px;overflow:hidden}
 .tradegroup-head{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer;user-select:none;background:var(--concrete)}
@@ -865,6 +867,7 @@ tr.clickable:hover{background:var(--accent-soft)}
             <label class="chip"><input type="radio" name="fCapital" value="100000000">1億円以下</label>
             <label class="chip on"><input type="radio" name="fCapital" value="" checked>指定しない</label>
           </div>
+          <div class="hint">資本金が不明の会社は、上限を指定すると対象から外れます。</div>
           <label>業種</label>
           <div class="chips" id="fTrades">
             <label class="chip"><input type="checkbox" value="tobi">とび・土工</label>
@@ -883,8 +886,11 @@ tr.clickable:hover{background:var(--accent-soft)}
             <label class="chip"><input type="checkbox" value="C">C</label>
           </div>
           <div class="chips" id="fToggles" style="margin-top:10px">
-            <label class="chip"><input type="checkbox" id="fHiring">求人出稿中のみ</label>
-            <label class="chip"><input type="checkbox" id="fWebsite">HPありのみ</label>
+            <!-- 2026-09-19: 求人出稿中・HPありは共有マスタ側のデータが未整備のため「準備中」
+                 (ユーザー指示)。使えるようになったら disabled と .soon を外し、
+                 currentFilters() と products.py の AI 判定も戻す -->
+            <label class="chip soon" title="準備中です"><input type="checkbox" id="fHiring" disabled>求人出稿中のみ <small>(準備中)</small></label>
+            <label class="chip soon" title="準備中です"><input type="checkbox" id="fWebsite" disabled>HPありのみ <small>(準備中)</small></label>
             <label class="chip"><input type="checkbox" id="fContact">問い合わせフォームURL確定済みのみ</label>
           </div>
           </div>
@@ -2567,8 +2573,7 @@ function currentFilters() {
   if (ranks.length) f.ranks = ranks;
   const capVal = document.querySelector('input[name="fCapital"]:checked').value;
   if (capVal) f.capital_max = Number(capVal);
-  if ($("fHiring").checked) f.hiring_now = true;
-  if ($("fWebsite").checked) f.has_website = true;
+  // 求人出稿中・HPありは準備中(disabled)のため送らない(2026-09-19)
   if ($("fContact").checked) f.contact_ready = true;
   return f;
 }

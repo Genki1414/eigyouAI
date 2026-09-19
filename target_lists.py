@@ -145,7 +145,12 @@ def build_filter_sql(tenant_id, filters):
 
     capital_max = filters.get("capital_max")
     if isinstance(capital_max, (int, float)) and capital_max > 0:
-        clauses.append("(capital <= ? OR capital IS NULL)"); params.append(int(capital_max))
+        # 画面とAIは「円」で渡してくるが、companies.capital は「千円」単位
+        # (parsers/common.parse_capital, ingest_mikomeru.parse_capital_sen 参照)。
+        # 以前は単位を合わせずに比較していたため「300万円以下」が 3,000,000千円(=30億円)以下
+        # となり全社が該当し、資本金の絞り込みが効いていなかった(2026-09-19)。
+        # 資本金が不明(NULL)の会社は「◯円以下」とは言えないので含めない。
+        clauses.append("(capital IS NOT NULL AND capital <= ?)"); params.append(int(capital_max) // 1000)
 
     if filters.get("hiring_now"):
         clauses.append("hiring_now=1")

@@ -79,8 +79,6 @@ CLASSIFY_PROMPT = """あなたはBtoB営業のターゲティング担当です�
   "trades": ["下の業種名一覧から、この商材が刺さる業種名を選ぶ(日本語の業種名そのまま)"],
   "ranks": ["S","A","B","C"のうち、刺さる会社の格付けを0件以上選ぶ(S/Aほど規模・実績が大きい)"],
   "capital_max": 資本金の上限(円の整数)。小規模事業者向けの商材なら設定、大企業向けならnull,
-  "hiring_now": true/false。人手不足に効く商材(採用支援・省人化等)ならtrue、それ以外はfalse,
-  "has_website": true/false。Webサイトを持つ企業でないと使えない商材(HP掲載型サービス等)ならtrue,
   "reasoning": "この判断をした理由を80字以内の日本語で"
 }}
 
@@ -125,10 +123,8 @@ def classify_targeting(name, description):
     }
     if d.get("capital_max"):
         filters["capital_max"] = d["capital_max"]
-    if d.get("hiring_now"):
-        filters["hiring_now"] = True
-    if d.get("has_website"):
-        filters["has_website"] = True
+    # hiring_now / has_website は画面側で「準備中」(データ未整備)のため、AIにも使わせない
+    # (2026-09-19)。使えるようになったらプロンプトとここを戻す。
     return filters, (d.get("reasoning") or "")
 
 

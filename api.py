@@ -4577,6 +4577,18 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/autofill/pending", token=key_b)
     t("他テナントには自分宛の自動入力しか見えない(テナント分離)", st == 404)
 
+    # 2026-09-19: CAPTCHAで自動送信できなかった企業も「自動入力」の対象(人がCAPTCHAを解いて送る)
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url,
+        started_at, status, reason_code)
+        VALUES (?, ?, ?, 'https://example.co.jp/captcha-test', ?, 'SKIP_CAPTCHA', 'captcha_detected')""",
+        (af_company["id"], tid_a, list_a_id, datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    cap_log_id = con.execute("""SELECT id FROM form_send_log WHERE tenant_id=? AND status='SKIP_CAPTCHA'
+        ORDER BY id DESC LIMIT 1""", (tid_a,)).fetchone()[0]
+    st, r = post_auth(f"/api/tenant/send-log/{cap_log_id}/autofill-queue", {}, token=key_a)
+    t("CAPTCHAで対象外になった企業も自動入力を準備できる",
+      st == 200 and r.get("url") == "https://example.co.jp/captcha-test", f"r={r}")
+
     # list_id無し(元の文章を逆引きできない)ケース
     con.execute("""INSERT INTO form_send_log (company_id, tenant_id, target_url, started_at,
         status, reason_code) VALUES (999999998, ?, 'https://example.co.jp', ?,

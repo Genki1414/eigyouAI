@@ -401,7 +401,7 @@ tr.clickable:hover{background:var(--accent-soft)}
         <h2>自動送信ログ | 詳細 <span id="sendLogDetailListName"></span></h2>
         <div class="btnrow"><button class="ghost" id="btnSendLogDetailBack">← 一覧へ戻る</button></div>
         <div class="card" style="margin-top:12px">
-          <p class="hint">自動送信に失敗した企業(「一時的な失敗」「失敗(未対応)」)は、
+          <p class="hint">自動送信できなかった企業(「一時的な失敗」「失敗(未対応)」「対象外(CAPTCHA)」「対象外(bot判定)」)は、
             Chrome拡張機能「<b>ヒラケル自動入力アシスト</b>」を使うと、各行の「自動入力」ボタン→
             対象企業のフォームが新しいタブで開く→そのタブで拡張機能のアイコンをクリック、で
             入力欄が自動で埋まります(送信ボタンは人が確認して押してください。取り消せない操作を
@@ -806,7 +806,7 @@ tr.clickable:hover{background:var(--accent-soft)}
 
         <div class="card step">
           <h3>4.5. 自動送信に失敗した企業を手動でフォローする</h3>
-          <p>「自動送信ログ」ページで「一時的な失敗」「失敗(未対応)」になった企業は、
+          <p>「自動送信ログ」ページで「一時的な失敗」「失敗(未対応)」「対象外(CAPTCHA)」「対象外(bot判定)」になった企業は、
             <b>Chrome拡張機能「ヒラケル自動入力アシスト」</b>で手動フォローできます
             (フォームは見つかったが自動判定できなかった場合の補助機能で、
             対象企業ごとに1件・10分間だけ有効です)。</p>
@@ -820,7 +820,12 @@ tr.clickable:hover{background:var(--accent-soft)}
             <li>失敗した企業の行の「自動入力」ボタンを押すと、対象企業のフォームページが
               新しいタブで開きます。</li>
             <li>そのタブでChromeツールバーの拡張機能アイコンを押すと、入力欄が自動で埋まります
-              (送信ボタンは押しません。内容を確認してご自身で送信してください)。</li>
+              (送信ボタンは押しません。内容を確認してご自身で送信してください)。
+              アイコンがツールバーに無い場合は、右上のパズル型アイコン🧩を押して
+              「ヒラケル自動入力アシスト」のピン📌を押すと表示されます。
+              CAPTCHA(画像認証)がある場合はご自身で解いてから送信してください。</li>
+            <li>拡張機能を更新したとき(zipを再ダウンロードしたとき)は、<code>chrome://extensions</code>で
+              古いものを削除してから読み込み直し、「拡張機能と連携する」をもう一度押してください。</li>
           </ol>
         </div>
 
@@ -2026,15 +2031,27 @@ async function downloadSendLogCsv() {
 // 「営業拒否」「対象外(CAPTCHA等)」はそもそも送信自体をしていない意図的な
 // スキップなので自動入力アシストの対象外(MIKOMERUの「営業拒否」「フォームなし」除外と同じ考え方)。
 // 送信を試みたが確認できなかった/一時的に失敗した場合だけ対象にする。
-const AUTOFILL_ELIGIBLE_STATUSES = new Set(["FAILED_UNSUPPORTED", "FAILED_RETRYABLE"]);
+// 2026-09-19: CAPTCHA・bot判定で自動送信できなかった企業も対象に加えた(人がCAPTCHAを
+// 解けば送れるので、手動フォローの価値が最も大きい)。営業拒否・採用専用・会員専用は対象外のまま。
+const AUTOFILL_ELIGIBLE_STATUSES = new Set(["FAILED_UNSUPPORTED", "FAILED_RETRYABLE",
+                                            "SKIP_CAPTCHA", "SKIP_BOT_CHALLENGE"]);
 
 async function queueAutofill(logId, btn) {
   btn.disabled = true;
   btn.textContent = "準備中...";
+  // 新しいタブはクリック直後(ユーザー操作の中)に開いておく。API応答を待ってから
+  // window.open()するとポップアップブロックで開かないことがあり、「自動入力を押しても
+  // 何も起きない」に見える(2026-09-19)
+  const tab = window.open("", "_blank");
   try {
     const r = await call(`/api/tenant/send-log/${logId}/autofill-queue`, { method: "POST" });
-    window.open(r.url, "_blank");
+    if (tab) tab.location = r.url; else window.open(r.url, "_blank");
+    const hint = $("autofillHint");
+    if (hint) hint.innerHTML = `準備できました(10分間有効)。開いたタブで<b>Chromeツールバーの拡張機能アイコン</b>を押してください。`
+      + `アイコンが見当たらない場合は、ツールバー右のパズル型アイコン🧩→「ヒラケル自動入力アシスト」の`
+      + `ピン📌を押すと表示されます。`;
   } catch (e) {
+    if (tab) tab.close();
     alert("自動入力の準備に失敗しました: " + e.message);
   } finally {
     btn.disabled = false;

@@ -66,19 +66,41 @@ function fillFieldsInPage(values) {
     }
     return null;
   }
+  function visible(el) {
+    // offsetParentはposition:fixedの要素でもnullになるので、描画矩形の有無で判定する
+    try { return el.getClientRects().length > 0; } catch (e) { return true; }
+  }
   var filled = 0;
   var els = document.querySelectorAll("input, textarea");
   for (var i = 0; i < els.length; i++) {
     var el = els[i];
     var type = (el.getAttribute("type") || "text").toLowerCase();
     if (["hidden", "checkbox", "radio", "submit", "button", "file", "image"].indexOf(type) >= 0) continue;
-    if (el.offsetParent === null) continue;
+    if (!visible(el)) continue;
     var kind = classify(el);
     if (!kind || !values[kind]) continue;
     el.value = values[kind];
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
     filled++;
+  }
+  // 都道府県などのプルダウン: 選択肢の表示文字が値と一致するものを選ぶ
+  var sels = document.querySelectorAll("select");
+  for (var k = 0; k < sels.length; k++) {
+    var sel = sels[k];
+    if (!visible(sel)) continue;
+    var skind = classify(sel);
+    if (!skind || !values[skind]) continue;
+    var want = String(values[skind]).trim();
+    for (var o = 0; o < sel.options.length; o++) {
+      var txt = (sel.options[o].textContent || "").trim();
+      if (txt && (txt === want || want.indexOf(txt) === 0 || txt.indexOf(want) === 0)) {
+        sel.value = sel.options[o].value;
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+        filled++;
+        break;
+      }
+    }
   }
   return filled;
 }
@@ -87,15 +109,29 @@ function showPageAlert(message) {
   alert(message);
 }
 
-async function runAutofill(tabId) {
+// 対象ページへメッセージを出す。chrome://等の注入できないページでは通知にフォールバックする
+async function tell(tabId, message) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, func: showPageAlert, args: [message] });
+  } catch (e) {
+    try {
+      chrome.notifications.create({ type: "basic", iconUrl: "icons/icon128.png",
+        title: "ヒラケル自動入力アシスト", message });
+    } catch (e2) { /* 通知も出せない環境では諦める */ }
+  }
+  try { await chrome.storage.local.set({ lastResult: new Date().toISOString() + " " + message }); } catch (e) {}
+}
+
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch (e) { return ""; }
+}
+
+async function runAutofill(tab) {
+  const tabId = tab.id;
   const { apiBase, apiKey } = await getCreds();
   if (!apiBase || !apiKey) {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: showPageAlert,
-      args: ["ヒラケルとの連携が未設定です。list_builder.htmlの「自動送信ログ」画面で"
-           + "「拡張機能と連携する」を押してください。"],
-    });
+    await tell(tabId, "ヒラケルとの連携が未設定です。ヒラケル管理画面の「自動送信ログ」で"
+      + "「拡張機能と連携する」を押してください。");
     return;
   }
   let data;
@@ -103,31 +139,46 @@ async function runAutofill(tabId) {
     const res = await fetch(apiBase.replace(/\/$/, "") + "/api/tenant/autofill/pending", {
       headers: { Authorization: "Bearer " + apiKey },
     });
-    if (!res.ok) throw new Error("no-pending");
+    if (!res.ok) {
+      let msg = "";
+      try { msg = (await res.json()).error || ""; } catch (e) {}
+      if (res.status === 401) msg = "ヒラケルの接続情報が古いようです。管理画面で「拡張機能と連携する」を押し直してください。";
+      throw new Error(msg || ("HTTP " + res.status));
+    }
     data = await res.json();
   } catch (e) {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: showPageAlert,
-      args: ["自動入力の準備が見つかりません。自動送信ログ画面の「自動入力」ボタンを先に押してから、"
-           + "10分以内にこの拡張機能アイコンをクリックしてください。"],
-    });
+    await tell(tabId, "自動入力の準備が見つかりません(" + (e && e.message ? e.message : e) + ")。"
+      + "自動送信ログ画面の「自動入力」ボタンを先に押してから、10分以内にこのタブで拡張機能アイコンを押してください。");
     return;
   }
-  const [{ result: filled }] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: fillFieldsInPage,
-    args: [data.values || {}],
-  });
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: showPageAlert,
-    args: [filled > 0
-      ? "入力しました(" + filled + "項目)。内容を確認のうえ、送信ボタンはご自身で押してください。"
-      : "入力できそうな項目が見つかりませんでした。お手数ですが手動で入力してください。"],
-  });
+  // 「自動入力」で開いたタブ以外(ヒラケル管理画面など)で押された場合は入力せずに案内する
+  const targetHost = hostOf(data.url || "");
+  const thisHost = hostOf(tab.url || "");
+  if (targetHost && thisHost && targetHost !== thisHost) {
+    await tell(tabId, "このタブは対象企業のページではありません。「自動入力」ボタンで開いたタブ("
+      + data.url + ")で拡張機能アイコンを押してください。");
+    return;
+  }
+  let filled = 0;
+  try {
+    // フォームがiframe内(フォームサービス埋め込み等)にあることも多いので全フレームへ注入する
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: fillFieldsInPage,
+      args: [data.values || {}],
+    });
+    for (const r of results || []) filled += Number(r && r.result) || 0;
+  } catch (e) {
+    await tell(tabId, "このページには入力できませんでした(" + (e && e.message ? e.message : e) + ")。"
+      + "ページを一度再読み込みしてから、もう一度拡張機能アイコンを押してください。");
+    return;
+  }
+  await tell(tabId, filled > 0
+    ? "入力しました(" + filled + "項目)。内容を確認のうえ、送信ボタンはご自身で押してください。"
+      + "CAPTCHA(画像認証)がある場合はご自身で解いてください。"
+    : "入力できそうな項目が見つかりませんでした(入力欄の名前を判定できないフォーム)。お手数ですが手動で入力してください。");
 }
 
 chrome.action.onClicked.addListener((tab) => {
-  if (tab && tab.id != null) runAutofill(tab.id);
+  if (tab && tab.id != null) runAutofill(tab);
 });

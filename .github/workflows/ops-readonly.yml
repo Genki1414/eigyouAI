@@ -1,0 +1,68 @@
+name: Ops read-only (server status)
+
+# 本番サーバーの「状態を見るだけ」の手動ワークフロー(T116)。
+# 外出先でサーバーへログインできないときに、コンテナの稼働状況・ログ・送信キューを
+# 確認するためのもの。CI & Deployと同じSSH用シークレットを使う。
+#
+# 設計方針:
+#  - 参照のみ。再起動・設定変更・ファイル書き換えは一切行わない。
+#  - 任意のコマンドは受け付けない。actionの選択肢ごとに決め打ちの参照コマンドだけを流す。
+#  - .envの値は表示しない(名前すら出さない)。設定値の確認は本部画面の
+#    「システム診断」(GET /api/ops/diagnostics)を使うこと。
+#  - 実行にはリポジトリへの書き込み権限が必要で、全実行がActionsの履歴に残る。
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "確認したい内容"
+        required: true
+        type: choice
+        options:
+          - status         # コンテナの稼働状況・メモリ・ディスク・メモリ不足の記録
+          - logs-sender    # 送信ワーカーのログ(直近150行)
+          - logs-api       # APIのログ(直近150行)
+          - queue          # 送信キュー(順番待ち・送信中)の一覧
+
+jobs:
+  look:
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      ACTION: ${{ inputs.action }}
+    steps:
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Show server status
+        run: |
+          set -e
+          case "$ACTION" in
+            status)
+              REMOTE="cd '$DEPLOY_PATH'
+                echo '=== コンテナ ==='; docker compose -f deploy/docker-compose.yml ps
+                echo; echo '=== メモリ(MB) ==='; free -m
+                echo; echo '=== ディスク ==='; df -h /
+                echo; echo '=== 稼働時間 ==='; uptime
+                echo; echo '=== 直近のメモリ不足(OOM) ==='
+                dmesg 2>/dev/null | grep -i 'killed process' | tail -5 || echo 'なし'" ;;
+            logs-sender)
+              REMOTE="docker logs --tail 150 eigyouai-sender 2>&1 | tail -150" ;;
+            logs-api)
+              REMOTE="docker logs --tail 150 eigyouai-api 2>&1 | tail -150" ;;
+            queue)
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T sender \
+                  python3 scheduled_send_cli.py list" ;;
+            *)
+              echo "::error::未知のaction: $ACTION"; exit 1 ;;
+          esac
+          ssh -i ~/.ssh/id_ed25519 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$REMOTE"

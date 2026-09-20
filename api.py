@@ -4553,6 +4553,12 @@ def self_test(port=8899):
     t("GET /api/tenant/send-log?list_id=で会社別の明細(詳細ページ用)に絞り込める",
       st == 200 and len(r.get("log", [])) == 2)
     # T105: 会社別明細にURLクリック数・最終クリック日時が出る/クリックした会社だけに絞れる
+    # T108: 完了通知メールに載せる「送れなかった理由」の集計
+    t108 = TL.failure_reason_counts(con, tid_a, t22_list_id)
+    t("完了通知用の理由集計は成功を除き、日本語ラベルで多い順に返る(T108)",
+      t108 == [("問い合わせフォームが見つからない", 1)], f"t108={t108}")
+    t("sinceより前の行は数えない(同じリストへの再送信で過去分が混ざらない)",
+      TL.failure_reason_counts(con, tid_a, t22_list_id, since="2099-01-01T00:00:00") == [])
     t("理由(reason_code)別の内訳が返る(成功率が低い原因の把握用。T107)",
       st == 200 and {(x["status"], x["reason_code"]): x["n"] for x in r["reasons"]}
       == {("SUCCESS", "success_text_matched"): 1, ("FAILED_UNSUPPORTED", "form_not_found"): 1},

@@ -875,12 +875,52 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
                                    allow_no_solicit=allow_no_solicit, sender_override=sender_override)
     if not dry_run:
         db.sync_target_list_member_status(con, list_id, campaign_id, step=1)
-        _notify_completion(con, tenant_id, lst["name"], len(members), stats)
+        _notify_completion(con, tenant_id, lst["name"], len(members), stats,
+                           list_id=list_id, since=now2)
     return {"campaign_id": campaign_id, "target_count": len(members),
             "dry_run": dry_run, "stats": stats, "cancelled_recent": cancelled_recent}
 
 
-def _notify_completion(con, tenant_id, list_name, target_count, stats):
+# 送れなかった理由(form_navigator.pyのreason_code)の日本語訳。完了通知メール用
+# (画面側はlist_builder.htmlのREASON_LABELSに同じ対応表がある。増やすときは両方直すこと)
+REASON_LABELS_JA = {
+    "success_not_confirmed": "送信したが完了を確認できない",
+    "form_not_found": "問い合わせフォームが見つからない",
+    "no_fields_filled": "入力できる欄が見つからない",
+    "submit_button_not_found": "送信ボタンが見つからない",
+    "submit_click_failed": "送信ボタンを押せない",
+    "error_message_detected": "送信後にエラー表示が出た",
+    "required_field_unfilled": "自動で埋められない必須欄がある",
+    "required_field_empty": "必須欄が空のままだった",
+    "invalid_certificate": "相手サイトの証明書不備",
+    "goto_failed": "ページを開けない(閉鎖・通信エラー)",
+    "unexpected_error": "想定外のエラー",
+    "captcha_detected": "画像認証(CAPTCHA)がある",
+    "bot_challenge_detected": "bot判定でブロック",
+    "no_solicitation_notice": "営業お断りの記載がある",
+    "recruit_only_form": "採用専用フォーム",
+    "support_only_form": "会員・契約者専用フォーム",
+}
+
+
+def failure_reason_counts(con, tenant_id, list_id, since=None, limit=8):
+    """この送信で「送れなかった理由」を多い順に返す(T108)。完了通知メールに載せて、
+    管理画面を開けない場所でも成功率が低い原因が分かるようにするため。
+    戻り値: [(日本語の理由, 件数), ...]。sinceを渡すとその時刻以降の行だけ数える
+    (同じリストへ再送信したときに過去分を混ぜない)。"""
+    q = """SELECT reason_code, COUNT(*) n FROM form_send_log
+        WHERE list_id=? AND tenant_id=? AND status!='SUCCESS'"""
+    params = [list_id, tenant_id]
+    if since:
+        q += " AND started_at>=?"
+        params.append(since)
+    q += " GROUP BY reason_code ORDER BY n DESC LIMIT ?"
+    params.append(limit)
+    return [(REASON_LABELS_JA.get(r["reason_code"], r["reason_code"] or "不明"), r["n"])
+            for r in con.execute(q, params).fetchall()]
+
+
+def _notify_completion(con, tenant_id, list_name, target_count, stats, list_id=None, since=None):
     """送信完了を担当者へメール通知する(MIKOMERU同等の完了通知)。
     senders.MailSenderがResend経由で実送信する(HANDOFF.md T32/T80)。
     RESEND_API_KEY未設定の環境ではNotImplementedErrorを投げるだけになるが、
@@ -900,15 +940,29 @@ def _notify_completion(con, tenant_id, list_name, target_count, stats):
 
     blocked_lines = "".join(f"  内訳 - {reason}: {n}\n"
                              for reason, n in (stats.get("blocked_by_reason") or {}).items())
+    reason_lines = ""
+    if list_id:
+        try:
+            reasons = failure_reason_counts(con, tenant_id, list_id, since=since)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [完了通知] 理由の集計に失敗しました(通知は続行): {e}")
+            reasons = []
+        if reasons:
+            reason_lines = ("\n送れなかった理由(多い順):\n"
+                            + "".join(f"  {label}: {n}\n" for label, n in reasons)
+                            + "\n管理画面の「自動送信ログ」→ 明細で会社ごとに確認できます。\n")
+    sent = stats.get("sent", 0)
+    rate = f"({round(sent * 100 / target_count)}%)" if target_count else ""
     subject = f"【ヒラケル】送信完了: {list_name}"
     body = (f"リスト「{list_name}」への送信が完了しました。\n\n"
             f"対象企業数: {target_count}\n"
-            f"送信成功: {stats.get('sent', 0)}\n"
+            f"送信成功: {sent} {rate}\n"
             f"失敗: {stats.get('failed', 0)}\n"
             f"ガードで中止: {stats.get('blocked', 0)}\n"
             f"{blocked_lines}"
             f"配信停止: {stats.get('suppressed', 0)}\n"
-            f"Kill Switchで中止: {stats.get('stopped', 0)}\n")
+            f"Kill Switchで中止: {stats.get('stopped', 0)}\n"
+            f"{reason_lines}")
     default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
                                      address="", optout_url=C.OPTOUT_URL)
     mailer = senders.MailSender(con, dry_run=False)

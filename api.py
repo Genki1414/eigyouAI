@@ -2132,6 +2132,128 @@ def h_tenant_scheduled_send_cancel(con, tenant_id, data):
     return 200, {"ok": True}
 
 
+def h_ops_diagnostics(con):
+    """本部画面の「システム診断」(T113)。これまでSSHで確認していたことを、
+    スマホのブラウザだけで確認できるようにまとめる。
+    2026-09-20に「計測リンクの宛先ドメインが違っていて778社へリンク切れの文章を送った」
+    事故が起きたため、特に『送信文章に入るリンクが本当に踏めるか』を実測する。"""
+    import shutil
+    import urllib.error
+    import urllib.request
+    import config as C
+
+    out = {"at": datetime.now().isoformat(timespec="seconds")}
+
+    # 1. 公開URLの整合性(ドメインが食い違うとリンクが死ぬ)
+    def _host(u):
+        return urllib.parse.urlsplit(u).netloc
+    out["urls"] = {
+        "api_public_url": C.API_PUBLIC_URL,
+        "track_base_url": C.TRACK_BASE_URL,
+        "optout_url": C.OPTOUT_URL,
+        "track_matches_api": _host(C.TRACK_BASE_URL) == _host(C.API_PUBLIC_URL),
+        "optout_matches_api": _host(C.OPTOUT_URL) == _host(C.API_PUBLIC_URL),
+    }
+
+    # 2. 計測リンクが実際に踏めるか(存在しないトークンで叩き、ヒラケル自身が答えるかを見る)
+    probe = f"{C.TRACK_BASE_URL.rstrip('/')}/track/click/__diagnostics__"
+    # reachable: 何らかのHTTP応答が返ったか。ok: その応答がヒラケル自身のものか。
+    # 「別のサイトが応答した」(=ドメイン取り違え。2026-09-19の事故)と
+    # 「そもそも繋がらない」(サーバーから外へ出られない等)を区別して表示する
+    link = {"url": probe, "ok": False, "reachable": False, "detail": ""}
+    try:
+        req = urllib.request.Request(probe, headers={"User-Agent": "hirakeru-diagnostics"})
+        with urllib.request.urlopen(req, timeout=5) as res:
+            body = res.read(400).decode("utf-8", "replace")
+            link["detail"] = f"HTTP {res.status} ({res.url})"
+            link["reachable"] = True
+            link["ok"] = "このリンクは無効です" in body
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read(400).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            pass
+        # 存在しないトークンなので404が正常。本文がヒラケルの応答なら疎通OK
+        link["reachable"] = True
+        link["ok"] = "このリンクは無効です" in body
+        link["detail"] = f"HTTP {e.code} ({getattr(e, 'url', probe)})"
+    except Exception as e:  # noqa: BLE001
+        link["detail"] = f"接続できません({type(e).__name__}: {str(e)[:120]})"
+    if link["ok"]:
+        link["message"] = "送信文章のリンクは正しくヒラケルに繋がります"
+    elif link["reachable"]:
+        link["message"] = ("別のサイトが応答しています。宛先ドメインの取り違えで、"
+                            "このまま送るとリンク切れの文章になります")
+    else:
+        link["message"] = ("確認できませんでした(サーバーから自分の公開URLへ出られない場合もあります)。"
+                            "念のためスマホでリンクを1つ開いて確かめてください")
+    out["track_link"] = link
+
+    # 3. AI(商材の絞り込み・文面生成)のキー設定
+    ai_key = os.environ.get("ANTHROPIC_API_KEY") or ""
+    out["ai"] = {"configured": bool(ai_key.strip()),
+                 "hint": (f"設定済み(末尾 {ai_key.strip()[-4:]})" if ai_key.strip()
+                          else "未設定。AIリスト作成とAI文面が使えません")}
+
+    # 4. 送信キューと送信ワーカーの生存
+    q = con.execute("""SELECT status, COUNT(*) n, MIN(scheduled_at) oldest
+        FROM scheduled_sends WHERE status IN ('PENDING','RUNNING') GROUP BY status""").fetchall()
+    queue = {r["status"]: {"count": r["n"], "oldest": r["oldest"]} for r in q}
+    last_try = con.execute("SELECT MAX(started_at) FROM form_send_log").fetchone()[0]
+    out["queue"] = {"pending": queue.get("PENDING", {}).get("count", 0),
+                    "running": queue.get("RUNNING", {}).get("count", 0),
+                    "oldest_pending": queue.get("PENDING", {}).get("oldest"),
+                    "last_send_attempt_at": last_try}
+
+    # 5. 直近24時間の送信実績
+    day_ago = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
+    rows = con.execute("""SELECT status, COUNT(*) n FROM form_send_log
+        WHERE started_at>=? GROUP BY status""", (day_ago,)).fetchall()
+    by_status = {r["status"]: r["n"] for r in rows}
+    tried = sum(by_status.values())
+    out["last_24h"] = {"tried": tried, "success": by_status.get("SUCCESS", 0),
+                       "by_status": by_status}
+
+    # 6. Kill Switch
+    ks = con.execute("SELECT stopped, reason FROM kill_switch WHERE id=1").fetchone()
+    out["kill_switch"] = {"stopped": bool(ks["stopped"]) if ks else False,
+                          "reason": (ks["reason"] if ks else None)}
+
+    # 7. サーバーの空き容量・メモリ(OOMで送信が止まる事故があったため)
+    disk = shutil.disk_usage("/")
+    mem_available = None
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    mem_available = int(line.split()[1]) // 1024
+                    break
+    except Exception:  # noqa: BLE001
+        pass
+    out["server"] = {"disk_free_gb": round(disk.free / 1024 ** 3, 1),
+                     "disk_used_pct": round(disk.used * 100 / disk.total),
+                     "memory_available_mb": mem_available}
+
+    # 8. 全体の判定(画面の先頭に出す)
+    problems = []
+    if not out["urls"]["track_matches_api"]:
+        problems.append("計測リンクの宛先ドメインが公開URLと違います")
+    if not link["ok"]:
+        problems.append(("送信文章のリンク: " + link["message"]))
+    if not out["ai"]["configured"]:
+        problems.append("AIのキーが未設定です")
+    if out["kill_switch"]["stopped"]:
+        problems.append("全体のKill Switchが停止中です(送信されません)")
+    if out["server"]["memory_available_mb"] is not None and out["server"]["memory_available_mb"] < 400:
+        problems.append("サーバーの空きメモリが少なくなっています")
+    if out["server"]["disk_used_pct"] >= 90:
+        problems.append("サーバーの空き容量が少なくなっています")
+    out["problems"] = problems
+    out["ok"] = not problems
+    return 200, out
+
+
 def verify_ops_bearer(auth_header: str) -> bool:
     """/api/ops/* 用。Authorization: Bearer <SALES_ENGINE_API_KEY> を検証する。
     SALES_ENGINE_API_KEYが未設定なら常にFalse(=常に401)にして、
@@ -3021,13 +3143,16 @@ class Handler(BaseHTTPRequestHandler):
                 con.close()
 
         if u.path in ("/api/ops/status", "/api/ops/metrics", "/api/ops/kill-switch", "/api/ops/tenants",
-                       "/api/ops/plan-change-requests", "/api/ops/inquiries"):
+                       "/api/ops/plan-change-requests", "/api/ops/inquiries", "/api/ops/diagnostics"):
             if not verify_ops_bearer(self.headers.get("Authorization")):
                 return self._json(401, {"error": "unauthorized"})
             con = self._con()
             try:
                 if u.path == "/api/ops/status":
                     return self._json(200, R.status_dict(con))
+                if u.path == "/api/ops/diagnostics":
+                    st, res = h_ops_diagnostics(con)
+                    return self._json(st, res)
                 if u.path == "/api/ops/kill-switch":
                     st, res = h_ops_kill_switch_get(con)
                     return self._json(st, res)
@@ -3400,6 +3525,21 @@ def self_test(port=8899):
     t("誤ったキーは401", st == 401)
     st, r = get_auth("/api/ops/status", token=ops_key)
     t("正しいキーでGET /api/ops/status", st == 200 and "companies_total" in r)
+    # T113: 本部画面の「システム診断」。SSHせずにスマホだけで状態を確認できるようにする
+    st, r = get_auth("/api/ops/diagnostics")
+    t("認証ヘッダなしのGET /api/ops/diagnosticsは401", st == 401)
+    st, r = get_auth("/api/ops/diagnostics", token=ops_key)
+    t("システム診断が返る(URL整合性・キュー・直近24時間・サーバー空き)",
+      st == 200 and set(r) >= {"urls", "track_link", "ai", "queue", "last_24h", "kill_switch",
+                               "server", "problems", "ok"}, f"keys={sorted(r) if st == 200 else r}")
+    t("計測リンクと配信停止URLのドメイン一致を診断に出す",
+      r["urls"]["track_matches_api"] is True and r["urls"]["optout_matches_api"] is True)
+    t("問題があればproblemsに文章で出る(okはproblemsが空のときだけTrue)",
+      r["ok"] == (not r["problems"]) and isinstance(r["problems"], list))
+    t("送信キューの件数と最後に送信を試みた時刻が取れる",
+      isinstance(r["queue"]["pending"], int) and isinstance(r["queue"]["running"], int)
+      and "last_send_attempt_at" in r["queue"])
+
     st, r = get_auth("/api/ops/metrics", token=ops_key)
     t("GET /api/ops/metrics", st == 200 and "overall" in r)
     st, r = post_auth("/api/ops/run-step", {"step": "dedup"})

@@ -89,6 +89,7 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
       <div class="navitem" data-page="planRequests">プラン変更申請</div>
       <div class="navitem" data-page="inquiries">お問い合わせ・契約申込</div>
       <div class="navitem" data-page="convert">デモ→本契約</div>
+      <div class="navitem" data-page="diagnostics">システム診断</div>
     </div>
   </nav>
   <div class="foot">list_builder.html等の顧客向け画面とは<br>完全に切り離しています</div>
@@ -304,6 +305,17 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
     </div>
   </div>
 
+  <div class="page" data-page="diagnostics">
+    <div class="card">
+      <div class="hint">サーバーにログインしなくても、ここだけで状態を確認できます。
+        とくに「送信文章に入るリンクが本当に踏めるか」を毎回ここで確かめてから大量送信してください
+        (2026-09-19にリンク切れの文章を778社へ送ってしまった再発防止)。</div>
+      <button id="btnRefreshDiag">再読込</button>
+      <div id="diagSummary" style="margin-top:12px"></div>
+      <div id="diagBody" style="margin-top:12px"></div>
+    </div>
+  </div>
+
   <div class="page" data-page="convert">
     <div class="card">
       <div class="hint">デモ利用者との契約が決まったら、ここで本契約に切り替えます。1回の操作で「種別をclientに変更・プランと
@@ -348,6 +360,7 @@ $("apiKey").value = localStorage.getItem("ashibase_hq_api_key") || "";
 // ── ナビゲーション(単一ページ内の切替。list_builder.htmlと同じ仕組み) ──
 const PAGE_TITLES = {
   conn: "接続",
+  diagnostics: "システム診断",
   tenantCreate: "テナント作成",
   staffCreate: "スタッフアカウントの代行作成",
   tenantList: "テナント一覧",
@@ -360,6 +373,7 @@ function goPage(pageId) {
   document.querySelectorAll(".navitem").forEach(n => n.classList.toggle("active", n.dataset.page === pageId));
   document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.dataset.page === pageId));
   $("pageTitle").textContent = PAGE_TITLES[pageId];
+  if (pageId === "diagnostics") refreshDiagnostics();
 }
 document.querySelectorAll(".navitem").forEach(item => {
   item.addEventListener("click", () => goPage(item.dataset.page));
@@ -374,6 +388,49 @@ async function call(path, opts) {
   if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
   return body;
 }
+
+// システム診断(T113)。SSHでの確認をスマホだけで済ませるための画面
+function diagRow(label, ok, text) {
+  const mark = ok === null ? "・" : (ok ? "✅" : "⚠️");
+  const color = ok === false ? "color:#B3261E;font-weight:700" : "";
+  return `<tr><td style="white-space:nowrap">${mark} ${label}</td><td style="${color}">${text}</td></tr>`;
+}
+
+async function refreshDiagnostics() {
+  const sum = $("diagSummary"), body = $("diagBody");
+  sum.innerHTML = `<div class="hint">確認中...</div>`;
+  body.innerHTML = "";
+  try {
+    const d = await call("/api/ops/diagnostics");
+    sum.innerHTML = d.ok
+      ? `<div class="result ok" style="display:block">問題は見つかりませんでした(${d.at})</div>`
+      : `<div class="result err" style="display:block">要対応 ${d.problems.length}件<br>`
+        + d.problems.map(x => "・" + x).join("<br>") + `</div>`;
+    const q = d.queue, s = d.server, l = d.last_24h;
+    const rate = l.tried ? Math.round(l.success * 100 / l.tried) : 0;
+    body.innerHTML = `<table>
+      <tr><th style="width:38%">項目</th><th>状態</th></tr>
+      ${diagRow("送信文章のリンク", d.track_link.ok, `${d.track_link.message}<br>
+        <span style="font-size:11px;color:var(--steel)">${d.track_link.url}<br>${d.track_link.detail}</span>`)}
+      ${diagRow("リンクの宛先ドメイン", d.urls.track_matches_api,
+        `計測 ${d.urls.track_base_url} / 公開 ${d.urls.api_public_url}`)}
+      ${diagRow("配信停止URL", d.urls.optout_matches_api, d.urls.optout_url)}
+      ${diagRow("AIのキー", d.ai.configured, d.ai.hint)}
+      ${diagRow("全体の送信停止", !d.kill_switch.stopped,
+        d.kill_switch.stopped ? `停止中(${d.kill_switch.reason || "理由未設定"})` : "稼働中")}
+      ${diagRow("送信キュー", null,
+        `順番待ち ${q.pending} / 送信中 ${q.running}<br>
+         <span style="font-size:11px;color:var(--steel)">最後に送信を試みた時刻: ${q.last_send_attempt_at || "記録なし"}</span>`)}
+      ${diagRow("直近24時間", null, `${l.tried.toLocaleString()}件を試行 / 成功 ${l.success.toLocaleString()}件(${rate}%)`)}
+      ${diagRow("サーバーの空き", s.memory_available_mb === null || s.memory_available_mb >= 400,
+        `メモリ空き ${s.memory_available_mb === null ? "不明" : s.memory_available_mb + "MB"} /
+         ディスク空き ${s.disk_free_gb}GB(使用 ${s.disk_used_pct}%)`)}
+    </table>`;
+  } catch (e) {
+    sum.innerHTML = `<div class="result err" style="display:block">取得できませんでした: ${e.message}</div>`;
+  }
+}
+$("btnRefreshDiag").addEventListener("click", refreshDiagnostics);
 
 function showResult(el, ok, text) {
   el.style.display = "block";

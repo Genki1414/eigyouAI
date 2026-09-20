@@ -10,14 +10,18 @@ BASE = Path(__file__).parent
 DB_PATH = BASE / "out" / "companies.db"
 OUT_DIR = BASE / "out"
 
-# クリック計測(MIKOMERUの「URLアクセスの記録」相当)のリダイレクトリンクに使う
-# 公開URL。本番では実際の公開ドメインを環境変数で上書きすること
-# (api.py LP_URLと同じ考え方)。
-TRACK_BASE_URL = os.environ.get("TRACK_BASE_URL", "https://ashibase.jp")
-
 # api.py側のverify/staff・reset-passwordリンクと同じ環境変数(値はEIGYOUAI_DOMAIN
 # <Caddyfileの実際の公開ドメイン>と揃える。本番は app.ashibase.jp)。
 API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://app.ashibase.jp")
+
+# クリック計測(MIKOMERUの「URLアクセスの記録」相当)のリダイレクトリンクに使う公開URL。
+# 2026-09-20発覚: 既定が"https://ashibase.jp"(公開ドメインapp.ashibase.jpの取り違え)
+# だったため、送信文章に埋め込まれた計測リンクがどこにも繋がらず、778社へ届いた後も
+# クリックが1件も記録されなかった(=受け取った相手がURLを踏んでも案内ページへ行けない)。
+# 下のOPTOUT_URLがまったく同じ取り違えで修正済みだったのに、こちらが残っていた。
+# API_PUBLIC_URLから導出し、2つのドメインが食い違わないようにする。
+# ("or"なのは.envにTRACK_BASE_URL=(空)があってもデフォルトへ倒すため。OPTOUT_URL参照)
+TRACK_BASE_URL = os.environ.get("TRACK_BASE_URL") or API_PUBLIC_URL
 
 # 特定電子メール法上必須の配信停止URL。2026-09-09発覚: 専用のOPTOUT_URL環境変数を
 # 想定していたコード(.env.example)はあったが、どのPythonコードからも参照されて

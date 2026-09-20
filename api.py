@@ -4477,6 +4477,16 @@ def self_test(port=8899):
     t("?q=で会社名の部分一致検索ができる",
       len(r["log"]) == 1 and r["log"][0]["company_id"] == 1)
 
+    # T111: 計測リンクの宛先が公開ドメインと食い違っていないか(食い違うとクリックが
+    # どこにも届かず、受け取った相手も案内ページへ行けない。2026-09-20の実障害)
+    import urllib.parse as _up
+    import config as C_urls
+    t("クリック計測リンクの宛先が公開URLと同じドメインになっている",
+      _up.urlsplit(C_urls.TRACK_BASE_URL).netloc == _up.urlsplit(C_urls.API_PUBLIC_URL).netloc,
+      f"track={C_urls.TRACK_BASE_URL} api={C_urls.API_PUBLIC_URL}")
+    t("配信停止URLも同じ公開ドメインを指している",
+      _up.urlsplit(C_urls.OPTOUT_URL).netloc == _up.urlsplit(C_urls.API_PUBLIC_URL).netloc)
+
     print("\n── 自動送信ログ一覧(実行単位の集計。T22, MIKOMERUの「自動送信ログ」一覧相当) ──")
     t22_staff_id, t22_staff_key = OF.add_staff(con, tid_a, "T22担当者", email=None)
     t22_company = con.execute(

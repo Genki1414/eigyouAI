@@ -4675,6 +4675,26 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T111. クリック計測リンクが繋がっていなかった(778社に届いたのにクリック0件)(2026-09-20)
+
+ユーザー「778社に届いて、まだどこもURL開封無し?」→ CSV 6,727行すべて`URLクリック数=0`。
+原因は`config.TRACK_BASE_URL`の既定が`https://ashibase.jp`(公開ドメイン
+`app.ashibase.jp`の取り違え)だったこと。**同じ取り違えが2026-09-09にOPTOUT_URLで
+発覚して修正済みだったのに、TRACK_BASE_URLだけ残っていた**(そのコメントのすぐ上の行)。
+送信文章に埋め込まれた`https://ashibase.jp/track/click/<token>`はAPIに届かないため、
+クリックが記録されないだけでなく、**受け取った相手がURLを踏んでも案内ページへ行けない**
+(=これまでの送信は実質リンク切れの文章を送っていた)。
+
+- `TRACK_BASE_URL = os.environ.get("TRACK_BASE_URL") or API_PUBLIC_URL`に変更し、
+  2つのドメインが食い違わないようにした。`.env.example`にも項目を追加(空=API_PUBLIC_URLと同じ)。
+- `api.py test`に「計測リンク/配信停止URLのドメインが公開URLと一致する」テストを追加
+  (同じ取り違えの再発防止)。
+- **本番で要確認**: `.env`に`TRACK_BASE_URL=https://ashibase.jp`が明示的に残っていると
+  コード側の既定は使われない(OPTOUT_URLのときと同じ罠)。`grep TRACK_BASE_URL /opt/eigyouai/.env`で確認し、
+  あれば空にするか`https://app.ashibase.jp`にしてsenderを再起動する。
+- 送信済みの778社に届いたリンクは`ashibase.jp`のままなので救済できない。
+  `ashibase.jp`から`app.ashibase.jp`へのリダイレクトを用意すれば復活しうる(未着手)。
+
 ### T109/T110. 送信ログCSVの分析 → CAPTCHA誤検出の是正と、自動再開による重複送信の修正(2026-09-20)
 
 ユーザーが四国送信の会社別CSV(6,727行)を共有。集計した結果:

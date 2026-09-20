@@ -4675,6 +4675,30 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T114. Claude側から本番を確認できるようにする準備(参照専用キー)(2026-09-20)
+
+ユーザー「(Claudeから本番が見られないのを)改善して。あなたがやれるようにして」。
+
+**現状の制約(Claude側では解除できない)**: この作業環境の外向き通信は組織のegressポリシーで
+拒否されている。`curl https://app.ashibase.jp/health` → `CONNECT tunnel failed, response 403`。
+`curl $HTTPS_PROXY/__agentproxy/status`の`recentRelayFailures`に
+`gateway answered 403 to CONNECT (policy denial)`が記録され、**google.comも同様に403**
+(=特定ドメインの問題ではなく「外部接続なし」の環境設定)。sshクライアントも未インストールで、
+仮に入れてもproxyはHTTPS CONNECTしか通さない。**迂回は禁止**(/root/.ccr/README.md:
+"Do not retry or route around it — report the blocked host")。Vercel経由でプロキシを
+立てるような回避も同じ理由でやらない。
+
+**解除はユーザーの操作**: claude.ai/code の環境設定でネットワークアクセスを許可する
+(最低限 app.ashibase.jp)。手順は https://code.claude.com/docs/en/claude-code-on-the-web 。
+
+**許可された後にすぐ使えるよう、参照専用キーを用意した(T114)**:
+- `OPS_READONLY_KEY`(.env)。このキーでは`GET /api/ops/diagnostics` `/status` `/metrics`
+  だけが通る(`OPS_READONLY_PATHS`)。テナント作成・送信・Kill Switch等の操作系と、
+  テナントのAPIキーを含む`/api/ops/tenants`は**拒否**する。
+- `SALES_ENGINE_API_KEY`を渡さずに状態確認だけ任せられる。テスト5件で権限境界を固定。
+- 注意: `python3 api.py test`では自モジュールが`__main__`なので、テストで定数を差し替える
+  ときは`sys.modules[__name__]`を書き換えること(`import api`だと別オブジェクトになる)。
+
 ### T113. 本部画面に「システム診断」(スマホだけで状態を確認できるように)(2026-09-20)
 
 ユーザー「パソコンから離れてるから確認出来ない。クロードで全て確認出来るようにして」。

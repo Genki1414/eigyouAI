@@ -369,6 +369,13 @@ ATTRIBUTION_WINDOW_DAYS = 45
 # 実送信(send/followup)まで叩ける強い権限のため既定値を持たせない
 # (未設定なら誰にも一致しない=常に401、というフェイルセーフにする)。
 SALES_ENGINE_API_KEY = os.environ.get("SALES_ENGINE_API_KEY")
+# 参照専用キー(T114)。設定するとGETの診断系だけを許可する。運用を手伝う相手
+# (開発者・サポート)へ渡しても、テナント作成・送信・Kill Switch操作はできないし、
+# テナントのAPIキーも見えない。SALES_ENGINE_API_KEYをそのまま渡さずに済ませるためのもの。
+OPS_READONLY_KEY = os.environ.get("OPS_READONLY_KEY")
+# 参照専用キーで開けるパス(いずれもGETのみ。/api/ops/tenantsはテナントのAPIキーを
+# 含むため入れない)
+OPS_READONLY_PATHS = ("/api/ops/diagnostics", "/api/ops/status", "/api/ops/metrics")
 
 _SEND_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/send$")
 _OUTCOME_PATH_RE = re.compile(r"^/api/tenant/lists/(\d+)/outcome$")
@@ -2254,6 +2261,16 @@ def h_ops_diagnostics(con):
     return 200, out
 
 
+def verify_ops_readonly_bearer(auth_header: str) -> bool:
+    """参照専用キー(OPS_READONLY_KEY)の検証(T114)。未設定なら常にFalse。
+    これが通っても許可されるのはOPS_READONLY_PATHSのGETだけ。"""
+    if not OPS_READONLY_KEY:
+        return False
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return False
+    return hmac.compare_digest(auth_header[len("Bearer "):], OPS_READONLY_KEY)
+
+
 def verify_ops_bearer(auth_header: str) -> bool:
     """/api/ops/* 用。Authorization: Bearer <SALES_ENGINE_API_KEY> を検証する。
     SALES_ENGINE_API_KEYが未設定なら常にFalse(=常に401)にして、
@@ -3144,7 +3161,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if u.path in ("/api/ops/status", "/api/ops/metrics", "/api/ops/kill-switch", "/api/ops/tenants",
                        "/api/ops/plan-change-requests", "/api/ops/inquiries", "/api/ops/diagnostics"):
-            if not verify_ops_bearer(self.headers.get("Authorization")):
+            auth = self.headers.get("Authorization")
+            # 参照専用キーは診断系のGETだけ通す(T114)
+            if not (verify_ops_bearer(auth)
+                    or (u.path in OPS_READONLY_PATHS and verify_ops_readonly_bearer(auth))):
                 return self._json(401, {"error": "unauthorized"})
             con = self._con()
             try:
@@ -3525,6 +3545,29 @@ def self_test(port=8899):
     t("誤ったキーは401", st == 401)
     st, r = get_auth("/api/ops/status", token=ops_key)
     t("正しいキーでGET /api/ops/status", st == 200 and "companies_total" in r)
+    # T114: 参照専用キー。診断系のGETだけ通し、テナント一覧や操作系は拒否する
+    # `python3 api.py test`ではこのモジュールが__main__なので、import apiでは
+    # 別のモジュールオブジェクトになってしまう。動いているモジュール自身を書き換える
+    _api_self = sys.modules[__name__]
+    orig_ro = _api_self.OPS_READONLY_KEY
+    try:
+        _api_self.OPS_READONLY_KEY = "readonly-test-key"
+        st, r = get_auth("/api/ops/diagnostics", token="readonly-test-key")
+        t("参照専用キーでシステム診断は見られる", st == 200 and "problems" in r)
+        st, r = get_auth("/api/ops/status", token="readonly-test-key")
+        t("参照専用キーで稼働状況も見られる", st == 200)
+        st, r = get_auth("/api/ops/tenants", token="readonly-test-key")
+        t("参照専用キーではテナント一覧(APIキーを含む)は見られない", st == 401)
+        st, r = post_auth("/api/ops/tenants", {"name": "x", "sender_email": "x@example.co.jp"},
+                          token="readonly-test-key")
+        t("参照専用キーでは作成・操作系は拒否される", st == 401)
+        st, r = get_auth("/api/ops/diagnostics", token="readonly-test-key-wrong")
+        t("違う値のキーは拒否される", st == 401)
+    finally:
+        _api_self.OPS_READONLY_KEY = orig_ro
+    st, r = get_auth("/api/ops/diagnostics", token="readonly-test-key")
+    t("OPS_READONLY_KEY未設定なら参照専用キーは効かない", st == 401)
+
     # T113: 本部画面の「システム診断」。SSHせずにスマホだけで状態を確認できるようにする
     st, r = get_auth("/api/ops/diagnostics")
     t("認証ヘッダなしのGET /api/ops/diagnosticsは401", st == 401)

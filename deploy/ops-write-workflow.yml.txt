@@ -1,0 +1,176 @@
+# ─────────────────────────────────────────────────────────────
+# これは「まだ動いていない」ワークフローの下書きです(2026-09-20)。
+#
+# 有効にする手順(スマホのGitHubアプリ/ブラウザでできます):
+#   1. GitHubでこのファイルを開く
+#   2. 「Rename(名前の変更)」で、パスを次に変える
+#        .github/workflows/ops-write.yml
+#   3. コミットする(ブランチは claude/project-handoff-0ubqc1)
+#   これだけで Actions に「Ops write (server changes)」が現れます。
+#
+# なぜ下書きで置いてあるか:
+#   本番サーバーでコマンドを実行する経路を新設する操作は、Claude Code側の安全確認で
+#   止められます(会話で承認しても解除されません)。有効化を人が行う形にすることで、
+#   「誰がこの経路を作ったか」がはっきりします。
+#
+# ★ exec(任意コマンド)を使う場合は、先にGitHubで承認ゲートを作ってください:
+#     リポジトリ → Settings → Environments → New environment → 名前は server-exec
+#     → Required reviewers に自分を追加 → Save
+#   設定していない場合、execは実行前に失敗します(無防備な遠隔実行を作らないため)。
+# ─────────────────────────────────────────────────────────────
+name: Ops write (server changes)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "実行する操作"
+        required: true
+        type: choice
+        options:
+          - restart-sender   # 送信ワーカーの再起動
+          - restart-all      # 全サービスの再起動
+          - show-env         # 設定の表示(鍵・パスワードの値は伏せる)
+          - set-env          # 許可した設定値の変更(変更後に再起動)
+          - exec             # 任意コマンド(server-exec環境の承認が必要)
+      key:
+        description: "set-envのときの設定名(例: FORM_SEND_CONCURRENCY)"
+        required: false
+        type: string
+      value:
+        description: "set-envのときの値(空にすると既定値へ戻す)"
+        required: false
+        type: string
+      command:
+        description: "execのときに実行するコマンド。承認するまで実行されません"
+        required: false
+        type: string
+      reason:
+        description: "execのときの理由(履歴に残ります)"
+        required: false
+        type: string
+
+jobs:
+  # ── 決め打ちの操作(承認なしで実行。任意コマンドは含まない) ──
+  change:
+    if: inputs.action != 'exec'
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      ACTION: ${{ inputs.action }}
+      ENV_KEY: ${{ inputs.key }}
+      ENV_VALUE: ${{ inputs.value }}
+    steps:
+      - name: Validate inputs
+        run: |
+          set -e
+          # .envで変更してよい運用設定だけを列挙する。APIキー・DB接続情報は含めない
+          # (workflow_dispatchの入力値は実行履歴に残るため、秘密情報をここへ通さない)
+          ALLOWED="TRACK_BASE_URL API_PUBLIC_URL FORM_SEND_CONCURRENCY SENDER_WORKERS \
+            SENDER_POLL_INTERVAL SENDER_MAX_ATTEMPTS SENDER_STALL_MINUTES FORM_SETTLE_TIMEOUT_MS \
+            FORM_NAV_TIMEOUT_MS FORM_ACTION_TIMEOUT_MS FORM_POST_SUBMIT_WAIT_MS FORM_BROWSER_REUSE \
+            FORM_BROWSER_MAX_USES FORM_MAX_PER_RUN FORM_MAX_PER_HOUR FORM_MAX_PER_DAY \
+            FORM_MAX_PER_TENANT_PER_HOUR MAX_LIST_SIZE MAX_CSV_ROWS OPS_ALERT_EMAIL"
+          [ "$ACTION" = "set-env" ] || exit 0
+          [ -n "$ENV_KEY" ] || { echo "::error::set-envにはkeyが必要です"; exit 1; }
+          case " $ALLOWED " in
+            *" $ENV_KEY "*) ;;
+            *) echo "::error::$ENV_KEY は変更を許可していません"; exit 1 ;;
+          esac
+          if [ "$(printf '%s' "$ENV_VALUE" | wc -l)" -ne 0 ]; then
+            echo "::error::値に改行は使えません"; exit 1
+          fi
+          if printf '%s' "$ENV_VALUE" | LC_ALL=C grep -q '[^A-Za-z0-9_.:/@+-]'; then
+            echo "::error::値に使えない文字があります(英数字と _ . : / @ + - のみ)"; exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Apply change over SSH
+        run: |
+          set -e
+          C="docker compose -f deploy/docker-compose.yml"
+          case "$ACTION" in
+            restart-sender)
+              REMOTE="cd '$DEPLOY_PATH'; $C up -d sender; sleep 3; $C ps" ;;
+            restart-all)
+              REMOTE="cd '$DEPLOY_PATH'; $C up -d; sleep 3; $C ps" ;;
+            show-env)
+              REMOTE="cd '$DEPLOY_PATH'
+                awk -F= '/^[A-Z_]+=/ {
+                  if (\$1 ~ /KEY|TOKEN|SECRET|PASSWORD|DATABASE_URL/) print \$1 \"=(伏せています)\"
+                  else print \$0
+                }' .env" ;;
+            set-env)
+              REMOTE="cd '$DEPLOY_PATH'
+                cp .env .env.bak.\$(date +%Y%m%d%H%M%S)
+                if grep -q '^$ENV_KEY=' .env; then
+                  sed -i 's|^$ENV_KEY=.*|$ENV_KEY=$ENV_VALUE|' .env
+                else
+                  printf '%s\n' '$ENV_KEY=$ENV_VALUE' >> .env
+                fi
+                echo '変更後:'; grep '^$ENV_KEY=' .env
+                $C up -d; sleep 3; $C ps" ;;
+            *) echo "::error::未知のaction: $ACTION"; exit 1 ;;
+          esac
+          ssh -i ~/.ssh/id_ed25519 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$REMOTE"
+
+  # ── 任意コマンド(あなたが承認したときだけ実行される) ──
+  exec:
+    if: inputs.action == 'exec'
+    runs-on: ubuntu-latest
+    environment: server-exec        # ← ここで承認待ちになる
+    permissions:
+      contents: read
+      administration: read
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
+      COMMAND: ${{ inputs.command }}
+      REASON: ${{ inputs.reason }}
+    steps:
+      - name: Verify approval gate is configured
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          # server-exec環境に必須レビュアーが設定されていなければ、ここで止める。
+          # 設定漏れのまま「承認なしで何でも実行できる経路」になるのを防ぐため
+          RULES=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/environments/server-exec" \
+            | python3 -c "import sys,json; print(','.join(r.get('type','') for r in json.load(sys.stdin).get('protection_rules',[])))") \
+            || { echo "::error::server-exec 環境を確認できませんでした"; exit 1; }
+          case "$RULES" in
+            *required_reviewers*) echo "承認ゲートを確認しました: $RULES" ;;
+            *) echo "::error::server-exec に必須レビュアーがありません。設定するまで実行しません"; exit 1 ;;
+          esac
+
+      - name: Show what will run
+        run: |
+          echo "理由: $REASON"
+          echo "コマンド: $COMMAND"
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run approved command over SSH
+        run: |
+          [ -n "$COMMAND" ] || { echo "::error::commandが空です"; exit 1; }
+          ssh -i ~/.ssh/id_ed25519 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$COMMAND"

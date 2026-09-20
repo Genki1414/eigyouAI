@@ -4689,12 +4689,19 @@ invalid")。値は入っていたので9/17の`test -n`確認では検出でき�
   **この経路はネットワーク制限の影響を受けない**(GitHub APIだけで完結する)。
 - 実行にはリポジトリへの書き込み権限が必要で、全実行がActionsの履歴に残る。
 
-**書き込み側(再起動・設定変更・任意コマンド)は未導入**。同じ仕組みで作ろうとしたが、
+**書き込み側(再起動・設定変更・任意コマンド)は下書きのまま**。同じ仕組みで作ろうとしたが、
 Claude Code側の安全チェックが「本番でコマンドを実行する経路の新設」として拒否した
-(ユーザーが会話で承認しても、チェックは操作そのものを見るため通らない)。
-導入するならユーザー自身がファイルを追加するか、Claude Codeの権限設定で許可する必要がある。
-案の全文は作業用フォルダの`ops.yml.pending`に保管(status/logs/queue/restart-sender/
-restart-all/show-env/set-env。set-envはAPIキー類を対象外にし、許可キーのみ変更)。
+(ユーザーが会話で承認しても、チェックは操作そのものを見るため通らない。迂回はしない)。
+→ `deploy/ops-write-workflow.yml.txt` として**動かない下書き**で置いてある。
+**ユーザーがGitHub上でこのファイルを`.github/workflows/ops-write.yml`へリネームすれば有効になる**
+(有効化を人が行う形にして、誰がこの経路を作ったかを明確にするため)。中身:
+- `change`ジョブ: restart-sender / restart-all / show-env / set-env。任意コマンドは無い。
+  set-envは許可キーのみ・値は英数字と`_ . : / @ + -`のみ・変更前に`.env.bak.<日時>`。
+  APIキーとDATABASE_URLは変更対象外(入力値が実行履歴に残るため)。
+- `exec`ジョブ: 任意コマンド。GitHubの`server-exec`環境を使い、**必須レビュアーの承認待ち**で止まる
+  (スマホのGitHubから承認できる)。さらに実行前に環境の保護設定をAPIで確認し、
+  必須レビュアーが未設定なら**実行せず失敗する**(設定漏れで無防備な遠隔実行にならないため)。
+  使う前に Settings → Environments → `server-exec` を作り、Required reviewers に本人を追加すること。
 
 **この仕組みで見つかった不具合**: `sender`と`worker`がずっと`unhealthy`表示だった。
 DockerfileのHEALTHCHECKがAPI(127.0.0.1:8787/health)宛てで、APIを動かさないこの2つでは

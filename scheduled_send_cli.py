@@ -47,7 +47,8 @@ def _execute(con, s, worker):
                            sender_template_id=s["sender_template_id"],
                            allow_no_solicit=bool(s.get("allow_no_solicit")),
                            cancel_recent_days=s.get("cancel_recent_days"),
-                           sender_override=override)
+                           sender_override=override,
+                           skip_already_sent=bool(s.get("resumed")))
         if res is None:
             db.finish_scheduled_send(con, s["id"], "FAILED",
                                      {"error": "リストが見つかりません(削除された可能性)"})

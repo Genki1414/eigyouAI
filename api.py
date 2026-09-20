@@ -1116,7 +1116,7 @@ def h_tenant_send_log(con, tenant_id, qs):
 
     q = f"""SELECT l.id, l.company_id, c.name company_name, l.status, l.reason_code,
             l.contact_url, l.target_url, l.started_at, l.finished_at, l.retry_count,
-            l.execution_seconds, l.note, l.manual_sent_at,
+            l.execution_seconds, l.note, l.manual_sent_at, l.error_message,
             (SELECT MAX(t.email_click_count) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
                WHERE tl.id=l.list_id AND t.company_id=l.company_id) click_count,
             (SELECT MAX(t.email_clicked_at) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
@@ -1297,7 +1297,7 @@ def h_tenant_send_log_csv(con, tenant_id, qs):
     if (qs.get("clicked", [""])[0] or "") in ("1", "true"):
         where += CLICKED_WHERE_SQL
     rows = con.execute(f"""SELECT l.id, c.name company_name, l.contact_url, l.status,
-            l.reason_code, l.note, l.manual_sent_at, l.started_at, l.finished_at,
+            l.reason_code, l.error_message, l.note, l.manual_sent_at, l.started_at, l.finished_at,
             (SELECT MAX(t.email_click_count) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
                WHERE tl.id=l.list_id AND t.company_id=l.company_id) click_count,
             (SELECT MAX(t.email_clicked_at) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
@@ -1309,11 +1309,11 @@ def h_tenant_send_log_csv(con, tenant_id, qs):
     import csv, io
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["ID", "会社名", "お問い合わせURL", "結果", "詳細", "備考",
+    w.writerow(["ID", "会社名", "お問い合わせURL", "結果", "詳細", "エラー内容", "備考",
                 "手動送信済み", "登録日時", "実行日時", "URLクリック数", "最終クリック日時"])
     for r in rows:
         w.writerow([r["id"], r["company_name"] or "", r["contact_url"] or "", r["status"],
-                    r["reason_code"] or "", r["note"] or "",
+                    r["reason_code"] or "", (r["error_message"] or "")[:300], r["note"] or "",
                     "済" if r["manual_sent_at"] else "", r["started_at"] or "",
                     r["finished_at"] or "", r["click_count"] or 0, r["last_clicked_at"] or ""])
     return 200, {"csv": buf.getvalue()}
@@ -4507,6 +4507,19 @@ def self_test(port=8899):
         (t22_company, tid_a, t22_list_id, now_t22))
     con.execute("UPDATE touches SET email_click_count=3, email_clicked_at=? WHERE campaign_id=?",
                 (now_t22, t22_campaign_id))
+    con.commit()
+
+    # T110: 中断した送信の自動再開では、既に届いた会社へ再送しない
+    # (2026-09-19の四国2,975社で、デプロイのたびに最初から送り直して274社へ重複送信した)
+    import senders as SND_t110
+    stats_all = SND_t110.send_campaign(con, t22_campaign_id, dry_run=True)
+    stats_resume = SND_t110.send_campaign(con, t22_campaign_id, dry_run=True, skip_already_sent=True)
+    n_all = sum(v for k, v in stats_all.items() if isinstance(v, int))
+    n_resume = sum(v for k, v in stats_resume.items() if isinstance(v, int))
+    t("自動再開では送信成功済みの会社を対象から外す(重複送信の防止。T110)",
+      n_all == 1 and n_resume == 0, f"通常={stats_all} 再開={stats_resume}")
+    t("人が「送信する」を押し直したときは従来どおり全社が対象(意図的な再送信は許す)",
+      n_all == 1)
     con.commit()
 
     st, r = get_auth("/api/tenant/send-log/executions")

@@ -595,7 +595,8 @@ def _is_quota_error(error):
 
 
 def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clicks=False,
-                   sender_template_id=None, allow_no_solicit=False, sender_override=None):
+                   sender_template_id=None, allow_no_solicit=False, sender_override=None,
+                   skip_already_sent=False):
     """キャンペーンの対象企業へ実際に送る。
     campaign.py simulate の本番版がこれ。接触ガードはここでも最終確認する。
 
@@ -606,6 +607,10 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
     誤操作での連打による意図しない二重送信は、下記のrun_nonceを使った
     idem_keyで防ぐ(=同じ1回の呼び出しの中で同じ会社への重複配信は防ぐが、
     別の呼び出し<つまり「送信する」を改めて押す>なら再送信できる)。
+
+    ただし中断した送信の「自動再開」(デプロイ・ワーカー再起動・自動再試行)は人の操作では
+    ないので、skip_already_sent=Trueで既に届いた会社を除外する(T110。これが無かったため、
+    2026-09-19の四国2,975社の送信で274社に重複送信してしまった)。
     can_contact()(配信停止/オプトアウト・テナント除外・重複レコード)は
     これとは無関係に、以前と変わらず必ずチェックされる。
 
@@ -666,6 +671,15 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
            WHERE t.campaign_id=? AND t.step=?
              AND t.body IS NOT NULL AND t.body != ''"""
     p = [campaign_id, step]
+    if skip_already_sent:
+        # 中断した送信の「自動再開」用(T110)。既に届いた会社には二度と送らない。
+        # 判定にtouches.sent_atを使わないのは、ドライランでもsent_atが入るため
+        # (ドライラン→本番の順で使うと全社が「送信済み」に見えてしまう)。
+        # form_send_logはドライランでは書かれないので、実際に届いた会社だけを正しく外せる。
+        # 「送信する」を人が押し直したときは従来どおり全社が対象(再送信は意図的な操作)。
+        q += """ AND NOT EXISTS (SELECT 1 FROM form_send_log f
+                     WHERE f.company_id = t.company_id AND f.list_id = tl.id
+                       AND f.status = 'SUCCESS')"""
     if limit:
         q += " LIMIT ?"; p.append(limit)
     rows = con.execute(q, p).fetchall()

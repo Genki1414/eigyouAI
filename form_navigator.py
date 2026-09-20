@@ -179,7 +179,9 @@ _SUCCESS_HINTS = (
     "thank you", "thanks for", "successfully",
 )
 
-_CAPTCHA_SELECTORS = (
+# 旧CAPTCHA判定のセレクタ。広すぎて誤検出が多かったためT109で使用をやめた
+# (判定本体は _BLOCKING_CAPTCHA_JS / _detect_captcha)。復活させないこと。
+_CAPTCHA_SELECTORS_DEPRECATED = (
     "iframe[src*='recaptcha']", "iframe[src*='hcaptcha']", ".g-recaptcha",
     "[class*='captcha']", "[id*='captcha']",
 )
@@ -414,14 +416,57 @@ def _page_text(page):
         return ""
 
 
+# T109: 「実際に人手が要るチャレンジ」だけを検出する。
+# 旧実装は iframe[src*='recaptcha'] / [class*='captcha'] / [id*='captcha'] の存在だけで
+# SKIP_CAPTCHAにしていたため、送信自体は普通に通る reCAPTCHA v3(スコア判定。画面には
+# 右下のバッジが出るだけ)や、非表示のv2、単にclass名にcaptchaを含む枠まで除外していた。
+# 実測(四国6,425件)ではこれが1,429件=22%を占め、最大の取りこぼしだった。
+# 判定できないものは「とりあえず送ってみる」側に倒す(通らなければ結果として失敗が残るだけで、
+# 相手に迷惑はかからない)。
+_BLOCKING_CAPTCHA_JS = """() => {
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 20) return false;
+    const st = getComputedStyle(el);
+    return st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity) > 0.1;
+  };
+  // reCAPTCHA v2「私はロボットではありません」/ hCaptcha のチェックボックス枠
+  for (const f of document.querySelectorAll('iframe')) {
+    const src = f.getAttribute('src') || '';
+    if (!/recaptcha\/api2\/anchor|hcaptcha\.com\/captcha|turnstile/.test(src)) continue;
+    if (src.includes('size=invisible')) continue;
+    if (visible(f)) return 'checkbox_challenge';
+  }
+  for (const el of document.querySelectorAll('.g-recaptcha, .h-captcha, .cf-turnstile')) {
+    if ((el.getAttribute('data-size') || '') === 'invisible') continue;
+    if (visible(el)) return 'checkbox_challenge';
+  }
+  // 画像認証(表示された画像+それを書き写す入力欄)
+  for (const img of document.querySelectorAll('img')) {
+    const hint = ((img.getAttribute('src') || '') + ' ' + (img.getAttribute('alt') || '')
+                  + ' ' + (img.className || '') + ' ' + (img.id || '')).toLowerCase();
+    if (!/captcha|認証画像/.test(hint)) continue;
+    if (visible(img)) return 'image_challenge';
+  }
+  return '';
+}"""
+
+
 def _detect_captcha(page):
-    for sel in _CAPTCHA_SELECTORS:
-        try:
-            if page.query_selector(sel):
-                return True
-        except Exception:  # noqa: BLE001
-            continue
-    return False
+    """人手でないと突破できないCAPTCHAがあるときだけTrueを返す(T109)。
+    reCAPTCHA v3・非表示のv2(バッジのみ)は送信が通るので対象にしない。"""
+    try:
+        return bool(page.evaluate(_BLOCKING_CAPTCHA_JS))
+    except Exception:  # noqa: BLE001
+        # JSが動かないページでは、確実に人手が要るものだけ従来どおりの要素判定で拾う
+        for sel in ("iframe[src*='recaptcha/api2/anchor']", ".g-recaptcha", ".h-captcha"):
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
 
 
 def _detect_no_solicit(text):
@@ -1028,7 +1073,9 @@ if __name__ == "__main__":
 
             print("\n── SKIP検知 ──")
             skip_cases = [
-                ("CAPTCHA", '<div class="g-recaptcha"></div>', _detect_captcha, "page"),
+                # T109以降は「見えるチェックボックス枠」だけがCAPTCHA扱い(大きさ指定が必要)
+                ("CAPTCHA", '<div class="g-recaptcha" style="width:304px;height:78px"></div>',
+                 _detect_captcha, "page"),
                 ("営業禁止文言", "営業目的の問い合わせはご遠慮ください", _detect_no_solicit, "text"),
                 ("採用専用", "新卒採用専用のエントリーフォームです", _detect_recruit_only, "text"),
                 ("会員専用", "契約者様専用のお問い合わせ窓口です", _detect_support_only, "text"),
@@ -1047,6 +1094,32 @@ if __name__ == "__main__":
             e2 = _detect_submission_error(
                 "お問い合わせいただきありがとうございます。担当者より追ってご連絡いたします。")
             print(f"  {'✓' if e2 is None else '✗'} 通常の完了ページはエラー扱いにしない")
+
+            print("\n── CAPTCHA判定(T109。人手が要るものだけ除外する) ──")
+            captcha_cases = [
+                ("reCAPTCHA v3(バッジのみ。送信は通る)", """
+                    <form><input name=x><button type=submit>送信</button></form>
+                    <div class="grecaptcha-badge" style="width:70px;height:60px"></div>
+                    <iframe src="https://www.google.com/recaptcha/api2/anchor?size=invisible&k=x"
+                            style="width:0;height:0"></iframe>""", False),
+                ("非表示のv2(data-size=invisible)", """
+                    <div class="g-recaptcha" data-size="invisible" style="width:300px;height:78px"></div>""", False),
+                ("class名にcaptchaを含むだけの枠", """
+                    <div class="captcha-wrapper" style="display:none"><input name="captcha"></div>""", False),
+                ("v2チェックボックス(人手が要る)", """
+                    <div class="g-recaptcha" style="width:304px;height:78px"></div>""", True),
+                ("v2チェックボックスのiframe", """
+                    <iframe src="https://www.google.com/recaptcha/api2/anchor?k=x"
+                            style="width:304px;height:78px"></iframe>""", True),
+                ("画像認証(書き写し式)", """
+                    <img src="/inc/captcha_image.php" alt="認証画像" style="width:120px;height:40px">
+                    <input name="auth">""", True),
+            ]
+            for label, html, expect in captcha_cases:
+                page.set_content(html)
+                got = _detect_captcha(page)
+                print(f"  {'✓' if got == expect else '✗'} {label}: "
+                      f"{'除外する' if got else '送信を試みる'}(期待: {'除外' if expect else '送信'})")
 
             print("\n── ブラウザ使い回し(T107。1社ごとの起動をやめて所要時間を削る) ──")
             # このテストは既にsync_playwrightを1つ起動済みなので、同じドライバから

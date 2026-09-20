@@ -2001,7 +2001,7 @@ async function refreshSendLog() {
         return `<tr><td>${x.company_name || "—"}</td>
         <td style="max-width:360px;word-break:break-all">${url ? `<a href="${url}" target="_blank" rel="noopener" style="font-size:11px" title="${url.replace(/"/g, "&quot;")}">${url.length > 90 ? url.slice(0, 90) + "…" : url}</a>` : "—"}</td>
         <td><span class="pill${cls ? " " + cls : ""}">${label}</span></td>
-        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.reason_code || "—"}</td>
+        <td style="font-size:11px;color:var(--steel)">${REASON_LABELS[x.reason_code] || x.reason_code || "—"}${x.error_message ? `<br><span title="${x.error_message.replace(/"/g, "&quot;")}">${x.error_message.length > 60 ? x.error_message.slice(0, 60) + "…" : x.error_message}</span>` : ""}</td>
         <td>${x.has_screenshot_before ? `<button class="ghost shotbtn" data-id="${x.id}" data-kind="before">確認</button>` : "—"}</td>
         <td>${x.has_screenshot_after ? `<button class="ghost shotbtn" data-id="${x.id}" data-kind="after">確認</button>` : "—"}</td>
         <td>${canAssist ? `<button class="ghost autofillbtn" data-id="${x.id}">自動入力</button>` : "—"}</td>
@@ -3684,6 +3684,9 @@ async function renderSendForm(container, id) {
           background:#FBEAE4;color:var(--warn);border-radius:6px;font-weight:700">
           ⚠ 現在Kill Switchにより本番送信が停止されています。解除されるまで送信できません。</div>
         <div class="btnrow"><button id="btnSend">送信する</button></div>
+        <p class="hint">同じリストへもう一度「送信する」と、<b>既に届いた会社にも再送されます</b>。
+          重複を避けたいときは上の「過去送信対象キャンセル」にチェックを入れてください。
+          なお、更新やサーバー再起動による自動再開では、既に届いた会社へは送りません。</p>
         <div id="sendResult"></div>
         <div id="sendProgressWrap" style="display:none;margin-top:12px">
           <p class="hint">送信には時間がかかる場合があります。件数・混雑状況によっては数分かかることもあります。

@@ -536,6 +536,9 @@ def migrate(con):
         ("scheduled_sends", "claimed_at", "TEXT"),  # 送信ワーカーが取り込んだ日時(T91。複数ワーカーの取り合い防止)
         ("scheduled_sends", "worker", "TEXT"),      # 取り込んだワーカーの名前(T91。障害調査用)
         ("scheduled_sends", "attempts", "INTEGER DEFAULT 0"),  # 例外で失敗して自動再試行した回数(T98)
+        # 自動再開(デプロイ・ワーカー障害・自動再試行)で取り込み直した予約は1。
+        # 再開時は既に届いた会社へ送らないための目印(T110)
+        ("scheduled_sends", "resumed", "INTEGER DEFAULT 0"),
         # T29: フォーム送信のペーシングを「全テナント合算の単一プール」から
         # 「テナントごとの公平な取り分」へ再設計。NULL=config.pyの
         # FORM_MAX_PER_TENANT_PER_*_DEFAULTを使う(=契約プラン未設定の
@@ -909,7 +912,8 @@ def cancel_scheduled_send(con, tenant_id, scheduled_id):
 def due_scheduled_sends(con, now_iso):
     """期限が来たPENDINGを取得する。scheduled_send_cli.pyがcronから呼ぶ。"""
     rows = con.execute("""SELECT id, tenant_id, list_id, subject, body, dry_run, track_clicks,
-            sender_template_id, allow_no_solicit, cancel_recent_days, sender_override_json, attempts
+            sender_template_id, allow_no_solicit, cancel_recent_days, sender_override_json, attempts,
+            resumed
         FROM scheduled_sends WHERE status='PENDING' AND scheduled_at<=?
         ORDER BY scheduled_at""", (now_iso,)).fetchall()
     return [dict(r) for r in rows]
@@ -930,7 +934,7 @@ def claim_scheduled_send(con, scheduled_id, worker):
 def requeue_stale_running(con, older_than_iso):
     """RUNNINGのまま長時間経った予約(ワーカーが途中で落ちた等)をPENDINGへ戻す(T91)。
     send_list()は送信済みの会社を冪等に飛ばすので、やり直しても二重送信にはならない。"""
-    cur = con.execute("""UPDATE scheduled_sends SET status='PENDING', claimed_at=NULL, worker=NULL
+    cur = con.execute("""UPDATE scheduled_sends SET status='PENDING', resumed=1, claimed_at=NULL, worker=NULL
         WHERE status='RUNNING' AND claimed_at IS NOT NULL AND claimed_at<?""", (older_than_iso,))
     con.commit()
     return cur.rowcount
@@ -943,7 +947,7 @@ def requeue_all_running(con):
     (3時間)を待つと再開まで最長3時間止まるため、起動時は即座に戻す。送信サービスは1コンテナ
     なので、起動時点で本当に実行中の予約は存在しない。send_list()は送信済みの会社を冪等に
     飛ばすので二重送信にはならない。"""
-    cur = con.execute("""UPDATE scheduled_sends SET status='PENDING', claimed_at=NULL, worker=NULL
+    cur = con.execute("""UPDATE scheduled_sends SET status='PENDING', resumed=1, claimed_at=NULL, worker=NULL
         WHERE status='RUNNING'""")
     con.commit()
     return cur.rowcount
@@ -952,7 +956,7 @@ def requeue_all_running(con):
 def requeue_running_by_worker(con, worker):
     """特定ワーカー(hostname-pid-idx)が取り込んだままのRUNNING予約をPENDINGへ戻す(T96)。
     子プロセスがOOM等で突然死んだとき、監督側(loop)が起動し直す前に呼ぶ。"""
-    cur = con.execute("""UPDATE scheduled_sends SET status='PENDING', claimed_at=NULL, worker=NULL
+    cur = con.execute("""UPDATE scheduled_sends SET status='PENDING', resumed=1, claimed_at=NULL, worker=NULL
         WHERE status='RUNNING' AND worker=?""", (worker,))
     con.commit()
     return cur.rowcount
@@ -963,7 +967,7 @@ def requeue_for_retry(con, scheduled_id, attempts, error, delay_seconds=60):
     一過性の障害で数千社の送信が「失敗」で止まらないようにする。送信済みの会社は
     send_list()が冪等に飛ばす。result_jsonにエラーを残すので画面から経緯が分かる。"""
     next_at = (datetime.now() + timedelta(seconds=delay_seconds)).isoformat(timespec="seconds")
-    con.execute("""UPDATE scheduled_sends SET status='PENDING', claimed_at=NULL, worker=NULL,
+    con.execute("""UPDATE scheduled_sends SET status='PENDING', resumed=1, claimed_at=NULL, worker=NULL,
         attempts=?, scheduled_at=?, result_json=? WHERE id=?""",
         (attempts, next_at, json.dumps({"error": error, "retrying": True, "attempts": attempts},
                                        ensure_ascii=False), scheduled_id))

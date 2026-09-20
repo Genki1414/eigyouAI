@@ -4675,6 +4675,28 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T115. 参照用キーを本部画面から発行できるように(スマホだけで完結)(2026-09-20)
+
+ユーザー「スマホから設定変更できる?」。T114の参照専用キーは`.env`に書く前提で、
+サーバーへSSHできない状況(外出中・スマホのみ)では設定できなかった。
+
+- `app_settings`テーブル(key/value)を追加し、参照専用キーをDBにも持てるようにした。
+  `db.get_setting/set_setting`。
+- `GET /api/ops/readonly-key`(発行済みか+末尾4文字のみ)、
+  `POST /api/ops/readonly-key/rotate`(発行/再発行、`{"revoke":true}`で無効化)。
+  いずれも**本部キー(SALES_ENGINE_API_KEY)でしか叩けない**(参照専用キーでは再発行できない)。
+- `verify_ops_readonly_bearer(auth, con)`が`.env`のOPS_READONLY_KEYとDBの値の両方を見る。
+  値は発行時に一度だけ全体を返し、以後は末尾4文字だけ。再発行で旧キーは即無効。
+- `hq.html`のシステム診断ページに「参照用キー」カード(発行/再発行・無効化)。
+- テスト12件で権限境界(診断は見られる/テナント一覧は見られない/再発行はできない/
+  再発行で旧キー失効/無効化後は使えない)を固定。
+
+**ネットワーク許可の手順(公式ドキュメント確認済み)**: claude.ai/code またはClaudeアプリの
+メッセージ欄の上にある雲アイコン(環境名が出ているボタン)→ 既存環境の歯車 →
+**Network access**を**Custom**にし、**Allowed domains**へ`app.ashibase.jp`を1行で追加、
+**Also include default list of common package managers**にチェック(外すとnpm/pypiが止まる)。
+環境設定はセッション開始時に読み込まれるため、**変更後は新しいセッションを開始する必要がある**。
+
 ### T114. Claude側から本番を確認できるようにする準備(参照専用キー)(2026-09-20)
 
 ユーザー「(Claudeから本番が見られないのを)改善して。あなたがやれるようにして」。

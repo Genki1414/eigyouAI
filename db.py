@@ -211,6 +211,14 @@ CREATE TABLE IF NOT EXISTS scheduled_sends (
 );
 
 -- 監査ログ: 誰がいつ何を実行したか。デューデリで運用実態を示す材料になる。
+-- 運用設定の置き場(T115)。いまは参照専用キーだけ。サーバーへSSHできない状況でも
+-- 本部画面から設定を変えられるようにするため、.envではなくDBに持てる項目をここに置く。
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS run_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   step TEXT NOT NULL, status TEXT NOT NULL,
@@ -938,6 +946,22 @@ def requeue_stale_running(con, older_than_iso):
         WHERE status='RUNNING' AND claimed_at IS NOT NULL AND claimed_at<?""", (older_than_iso,))
     con.commit()
     return cur.rowcount
+
+
+def get_setting(con, key):
+    row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(con, key, value):
+    """valueがNoneなら削除(=その設定を無効化する)。"""
+    if value is None:
+        con.execute("DELETE FROM app_settings WHERE key=?", (key,))
+    else:
+        con.execute("""INSERT INTO app_settings (key, value, updated_at) VALUES (?,?,?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+            (key, value, datetime.now().isoformat(timespec="seconds")))
+    con.commit()
 
 
 def requeue_all_running(con):

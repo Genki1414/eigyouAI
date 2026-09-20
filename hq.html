@@ -314,6 +314,19 @@ td{padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
       <div id="diagSummary" style="margin-top:12px"></div>
       <div id="diagBody" style="margin-top:12px"></div>
     </div>
+
+    <div class="card" style="margin-top:12px">
+      <h3 style="margin:0 0 6px">参照用キー(状態確認だけを任せる)</h3>
+      <div class="hint">開発や運用を手伝う相手に、このキーだけ渡せば状態確認を任せられます。
+        このキーでできるのは<b>システム診断・稼働状況・集計の閲覧だけ</b>で、テナント作成・送信・
+        全体停止はできず、テナントのAPIキーも見えません。心当たりのない相手に渡さないでください。</div>
+      <div id="roKeyState" class="hint" style="margin-top:8px"></div>
+      <div class="btnrow" style="margin-top:8px">
+        <button id="btnIssueRoKey">キーを発行(再発行)</button>
+        <button class="ghost" id="btnRevokeRoKey">無効化</button>
+      </div>
+      <div id="roKeyResult" class="result" style="display:none;word-break:break-all"></div>
+    </div>
   </div>
 
   <div class="page" data-page="convert">
@@ -373,7 +386,7 @@ function goPage(pageId) {
   document.querySelectorAll(".navitem").forEach(n => n.classList.toggle("active", n.dataset.page === pageId));
   document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.dataset.page === pageId));
   $("pageTitle").textContent = PAGE_TITLES[pageId];
-  if (pageId === "diagnostics") refreshDiagnostics();
+  if (pageId === "diagnostics") { refreshDiagnostics(); refreshRoKey(); }
 }
 document.querySelectorAll(".navitem").forEach(item => {
   item.addEventListener("click", () => goPage(item.dataset.page));
@@ -431,6 +444,38 @@ async function refreshDiagnostics() {
   }
 }
 $("btnRefreshDiag").addEventListener("click", refreshDiagnostics);
+
+// 参照用キーの発行・無効化(T115)。サーバーへログインできない状況でもここで完結する
+async function refreshRoKey() {
+  try {
+    const r = await call("/api/ops/readonly-key");
+    $("roKeyState").textContent = r.configured
+      ? `発行済みです${r.hint ? "(" + r.hint + ")" : r.from_env ? "(.envで設定)" : ""}。値は発行時しか表示されません。`
+      : "まだ発行されていません。";
+  } catch (e) {
+    $("roKeyState").textContent = "状態を取得できませんでした: " + e.message;
+  }
+}
+$("btnIssueRoKey").addEventListener("click", async () => {
+  if (!confirm("参照用キーを発行します。前のキーは使えなくなります。よろしいですか?")) return;
+  try {
+    const r = await call("/api/ops/readonly-key/rotate", { method: "POST", body: "{}" });
+    showResult($("roKeyResult"), true, `発行しました。この値をコピーして渡してください:\n${r.key}`);
+    await refreshRoKey();
+  } catch (e) {
+    showResult($("roKeyResult"), false, "発行に失敗しました: " + e.message);
+  }
+});
+$("btnRevokeRoKey").addEventListener("click", async () => {
+  if (!confirm("参照用キーを無効化します。よろしいですか?")) return;
+  try {
+    await call("/api/ops/readonly-key/rotate", { method: "POST", body: JSON.stringify({ revoke: true }) });
+    showResult($("roKeyResult"), true, "無効化しました。");
+    await refreshRoKey();
+  } catch (e) {
+    showResult($("roKeyResult"), false, "無効化に失敗しました: " + e.message);
+  }
+});
 
 function showResult(el, ok, text) {
   el.style.display = "block";

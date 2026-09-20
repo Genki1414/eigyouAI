@@ -337,6 +337,7 @@ import mimetypes
 import os
 import re
 import sqlite3
+import secrets
 import sys
 import threading
 import urllib.parse
@@ -2261,14 +2262,43 @@ def h_ops_diagnostics(con):
     return 200, out
 
 
-def verify_ops_readonly_bearer(auth_header: str) -> bool:
-    """参照専用キー(OPS_READONLY_KEY)の検証(T114)。未設定なら常にFalse。
+OPS_READONLY_SETTING_KEY = "ops_readonly_key"
+
+
+def verify_ops_readonly_bearer(auth_header: str, con=None) -> bool:
+    """参照専用キーの検証(T114/T115)。値は.envのOPS_READONLY_KEYか、本部画面から
+    発行してDBに入れたもの(app_settings)。どちらも未設定なら常にFalse。
     これが通っても許可されるのはOPS_READONLY_PATHSのGETだけ。"""
-    if not OPS_READONLY_KEY:
-        return False
     if not auth_header or not auth_header.startswith("Bearer "):
         return False
-    return hmac.compare_digest(auth_header[len("Bearer "):], OPS_READONLY_KEY)
+    token = auth_header[len("Bearer "):]
+    if not token:
+        return False
+    if OPS_READONLY_KEY and hmac.compare_digest(token, OPS_READONLY_KEY):
+        return True
+    if con is None:
+        return False
+    stored = db.get_setting(con, OPS_READONLY_SETTING_KEY)
+    return bool(stored) and hmac.compare_digest(token, stored)
+
+
+def h_ops_readonly_key_get(con):
+    """本部画面の表示用。発行済みかどうかと、確認用の末尾4文字だけ返す。"""
+    stored = db.get_setting(con, OPS_READONLY_SETTING_KEY)
+    return 200, {"configured": bool(stored) or bool(OPS_READONLY_KEY),
+                 "from_env": bool(OPS_READONLY_KEY),
+                 "hint": (f"末尾 {stored[-4:]}" if stored else "")}
+
+
+def h_ops_readonly_key_rotate(con, data):
+    """参照専用キーを発行し直す(T115)。SSHできない状況でも本部画面だけで完結させる。
+    revoke=trueなら無効化する。発行時だけ全体の値を返す(以後は末尾4文字のみ)。"""
+    if data.get("revoke"):
+        db.set_setting(con, OPS_READONLY_SETTING_KEY, None)
+        return 200, {"revoked": True}
+    key = secrets.token_urlsafe(32)
+    db.set_setting(con, OPS_READONLY_SETTING_KEY, key)
+    return 200, {"key": key, "note": "この値は発行時だけ表示されます。控えてから閉じてください"}
 
 
 def verify_ops_bearer(auth_header: str) -> bool:
@@ -2782,6 +2812,16 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
+        if path == "/api/ops/readonly-key/rotate":
+            if not verify_ops_bearer(self.headers.get("Authorization")):
+                return self._json(401, {"error": "unauthorized"})
+            con = self._con()
+            try:
+                st, res = h_ops_readonly_key_rotate(con, data)
+                return self._json(st, res)
+            finally:
+                con.close()
+
         if path == "/api/ops/tenants":
             if not verify_ops_bearer(self.headers.get("Authorization")):
                 return self._json(401, {"error": "unauthorized"})
@@ -3160,18 +3200,24 @@ class Handler(BaseHTTPRequestHandler):
                 con.close()
 
         if u.path in ("/api/ops/status", "/api/ops/metrics", "/api/ops/kill-switch", "/api/ops/tenants",
-                       "/api/ops/plan-change-requests", "/api/ops/inquiries", "/api/ops/diagnostics"):
+                       "/api/ops/plan-change-requests", "/api/ops/inquiries", "/api/ops/diagnostics",
+                       "/api/ops/readonly-key"):
             auth = self.headers.get("Authorization")
-            # 参照専用キーは診断系のGETだけ通す(T114)
-            if not (verify_ops_bearer(auth)
-                    or (u.path in OPS_READONLY_PATHS and verify_ops_readonly_bearer(auth))):
-                return self._json(401, {"error": "unauthorized"})
+            # 参照専用キーは診断系のGETだけ通す(T114)。DBに発行した鍵も見るためconが要る
             con = self._con()
+            if not (verify_ops_bearer(auth)
+                    or (u.path in OPS_READONLY_PATHS
+                        and verify_ops_readonly_bearer(auth, con))):
+                con.close()
+                return self._json(401, {"error": "unauthorized"})
             try:
                 if u.path == "/api/ops/status":
                     return self._json(200, R.status_dict(con))
                 if u.path == "/api/ops/diagnostics":
                     st, res = h_ops_diagnostics(con)
+                    return self._json(st, res)
+                if u.path == "/api/ops/readonly-key":
+                    st, res = h_ops_readonly_key_get(con)
                     return self._json(st, res)
                 if u.path == "/api/ops/kill-switch":
                     st, res = h_ops_kill_switch_get(con)
@@ -3567,6 +3613,31 @@ def self_test(port=8899):
         _api_self.OPS_READONLY_KEY = orig_ro
     st, r = get_auth("/api/ops/diagnostics", token="readonly-test-key")
     t("OPS_READONLY_KEY未設定なら参照専用キーは効かない", st == 401)
+
+    # T115: SSHできない状況向けに、本部画面から参照専用キーを発行できる(DB保存)
+    st, r = get_auth("/api/ops/readonly-key", token=ops_key)
+    t("発行前は未設定として返る", st == 200 and r["configured"] is False)
+    st, r = post_auth("/api/ops/readonly-key/rotate", {}, token=ops_key)
+    issued = r.get("key", "")
+    t("本部キーで参照専用キーを発行でき、その場で値が返る", st == 200 and len(issued) > 20)
+    st, r = get_auth("/api/ops/readonly-key", token=ops_key)
+    t("以後は末尾4文字だけ見える(全体は再表示しない)",
+      st == 200 and r["configured"] is True and r["hint"].endswith(issued[-4:])
+      and issued not in json.dumps(r))
+    st, r = get_auth("/api/ops/diagnostics", token=issued)
+    t("発行した参照専用キーでシステム診断が見られる", st == 200 and "problems" in r)
+    st, r = get_auth("/api/ops/tenants", token=issued)
+    t("発行した参照専用キーでもテナント一覧は見られない", st == 401)
+    st, r = post_auth("/api/ops/readonly-key/rotate", {}, token=issued)
+    t("参照専用キーでは参照専用キーの再発行もできない", st == 401)
+    st, r = post_auth("/api/ops/readonly-key/rotate", {}, token=ops_key)
+    reissued = r.get("key", "")
+    st, r = get_auth("/api/ops/diagnostics", token=issued)
+    t("再発行すると古いキーは使えなくなる", st == 401 and reissued != issued)
+    st, r = post_auth("/api/ops/readonly-key/rotate", {"revoke": True}, token=ops_key)
+    t("無効化できる", st == 200 and r.get("revoked") is True)
+    st, r = get_auth("/api/ops/diagnostics", token=reissued)
+    t("無効化後はそのキーで見られない", st == 401)
 
     # T113: 本部画面の「システム診断」。SSHせずにスマホだけで状態を確認できるようにする
     st, r = get_auth("/api/ops/diagnostics")

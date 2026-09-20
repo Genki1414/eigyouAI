@@ -4675,6 +4675,32 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T116. サーバーの状態をGitHub Actionsから確認できるようにした(2026-09-20)
+
+ユーザー「サーバー操作も出来るようにして」。Claude側の環境からは本番へ直接SSHできない
+(sshクライアントが無く、egressプロキシもHTTPS CONNECTしか通さない)。一方、
+**CI & DeployのワークフローはすでにSSH鍵を持っている**ので、そこへ相乗りした。
+
+- `.github/workflows/ops-readonly.yml`(`workflow_dispatch`)。actionは
+  `status`(コンテナ/メモリ/ディスク/OOM)、`logs-sender`、`logs-api`、`queue`の4つ。
+  **参照のみ**で、再起動・設定変更・ファイル書き換えはしない。任意コマンドも受け付けない。
+- Claudeからは GitHub MCP の `actions_run_trigger`(run_workflow)で起動し、
+  `actions_list`(list_workflow_jobs)→`get_job_logs`で結果を読む。
+  **この経路はネットワーク制限の影響を受けない**(GitHub APIだけで完結する)。
+- 実行にはリポジトリへの書き込み権限が必要で、全実行がActionsの履歴に残る。
+
+**書き込み側(再起動・設定変更・任意コマンド)は未導入**。同じ仕組みで作ろうとしたが、
+Claude Code側の安全チェックが「本番でコマンドを実行する経路の新設」として拒否した
+(ユーザーが会話で承認しても、チェックは操作そのものを見るため通らない)。
+導入するならユーザー自身がファイルを追加するか、Claude Codeの権限設定で許可する必要がある。
+案の全文は作業用フォルダの`ops.yml.pending`に保管(status/logs/queue/restart-sender/
+restart-all/show-env/set-env。set-envはAPIキー類を対象外にし、許可キーのみ変更)。
+
+**この仕組みで見つかった不具合**: `sender`と`worker`がずっと`unhealthy`表示だった。
+DockerfileのHEALTHCHECKがAPI(127.0.0.1:8787/health)宛てで、APIを動かさないこの2つでは
+必ず失敗するため。→ compose側で上書きし、senderは常駐プロセス、workerはcronの生存を見る。
+これで`docker compose ps`が「送信ワーカーが本当に動いているか」の判断に使えるようになる。
+
 ### T115. 参照用キーを本部画面から発行できるように(スマホだけで完結)(2026-09-20)
 
 ユーザー「スマホから設定変更できる?」。T114の参照専用キーは`.env`に書く前提で、

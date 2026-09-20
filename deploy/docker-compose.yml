@@ -49,6 +49,15 @@ services:
     command: ["python3", "scheduled_send_cli.py", "loop"]
     stop_grace_period: 60s
     restart: unless-stopped
+    # Dockerfileの死活監視はAPI(127.0.0.1:8787/health)宛てで、APIを動かさない
+    # このコンテナでは必ず失敗し、ずっとunhealthy表示になっていた(2026-09-20発覚)。
+    # 「送信ワーカーの常駐プロセスが生きているか」を見る形に置き換える
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'scheduled_send_cli.py loop' > /dev/null"]
+      interval: 60s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     depends_on: { postgres: { condition: service_healthy } }
     networks: [default]
 
@@ -63,6 +72,13 @@ services:
     volumes: ["engine-data:/app/out", "../data:/app/data:ro", "../backup_ssh:/root/.ssh"]
     command: ["/bin/bash", "-c", "crontab /app/deploy/crontab && cron -f"]
     restart: unless-stopped
+    # senderと同じ理由でAPI宛ての死活監視は使えない。cronが動いているかを見る
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x cron > /dev/null"]
+      interval: 60s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     depends_on: { postgres: { condition: service_healthy } }
 
   postgres:

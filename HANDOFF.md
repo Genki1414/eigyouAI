@@ -4675,6 +4675,24 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T112. ashibase.jp に /track/click の転送を入れて送信済みリンクを復活(2026-09-20)
+
+T111で判明した「送信済み778社のリンクが繋がらない」問題の救済。`ashibase.jp`のDNSは
+**Vercelのプロジェクト`ashibase`**(prj_tr9gtnu2Ggt1MUiGAXyIMlck6nA0 / team_2frOUGi1HpcsrphCj5fT78YJ)
+を向いており、Hetznerのサーバー(app.ashibase.jp = 167.233.123.173)とは別物だった。
+
+- Vercelのルーティング設定に**リダイレクトを1本**追加(ユーザーの許可を得て実施):
+  `src: /track/click/:token` → `dest: https://app.ashibase.jp/track/click/:token` (307)。
+  ルート名`hirakeru-track-click-redirect`。追加前の既存ルートは0本だったため、
+  サイトの他のページには影響しない。
+- これで`https://ashibase.jp/track/click/<token>`が
+  307→API→クリック記録→302→LP(`app.ashibase.jp/lp_hirakeru.html`)と繋がる。
+  トークンはDBに残っているので**過去に送った分すべて**が有効(期限なし)。
+- 動作確認: スマホで`https://ashibase.jp/track/click/test123`を開き、`app.ashibase.jp`へ
+  遷移して`{"error": "このリンクは無効です"}`(=存在しないトークンの正しい応答)を確認。
+- **このリダイレクトを消すと、2026-09-19までに送った778社分のリンクが再び死ぬ**。
+  Vercel側の設定なのでこのリポジトリのデプロイでは復元されない。消さないこと。
+
 ### T111. クリック計測リンクが繋がっていなかった(778社に届いたのにクリック0件)(2026-09-20)
 
 ユーザー「778社に届いて、まだどこもURL開封無し?」→ CSV 6,727行すべて`URLクリック数=0`。

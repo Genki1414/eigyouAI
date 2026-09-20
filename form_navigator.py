@@ -23,6 +23,7 @@ import os
 import random
 import re
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -36,6 +37,16 @@ NAV_TIMEOUT_MS = int(os.environ.get("FORM_NAV_TIMEOUT_MS", "30000"))
 ACTION_TIMEOUT_MS = int(os.environ.get("FORM_ACTION_TIMEOUT_MS", "10000"))
 SETTLE_TIMEOUT_MS = int(os.environ.get("FORM_SETTLE_TIMEOUT_MS", "6000"))
 POST_SUBMIT_WAIT_MS = int(os.environ.get("FORM_POST_SUBMIT_WAIT_MS", "1200"))
+# ページを開いてから入力欄が描画されるまでの待ち上限(2026-09-20)。入力欄が現れた
+# 時点で即座に抜けるため、フォームがあるサイトでの所要時間はほとんど増えない。
+# 逆に「そもそもフォームが無いページ」ではこの秒数だけ待つことになるので、
+# 送信全体の所要時間とのトレードオフで.envから調整できるようにしている。
+FORM_RENDER_WAIT_MS = int(os.environ.get("FORM_RENDER_WAIT_MS", "3000"))
+# 問い合わせページの探索にかけてよい時間の上限(2026-09-20)。多段探索(MAX_CRAWL_PAGES)と
+# 描画待ち(FORM_RENDER_WAIT_MS)を素直に掛け算すると、「どこにもフォームが無い会社」1社に
+# 30秒以上かけてしまい、送信全体の所要時間が伸びる。フォームが見つかる会社は数秒で
+# 抜けるので、この上限は実質「見つからない会社を早めに諦める」ためのもの。
+FORM_DISCOVER_BUDGET_MS = int(os.environ.get("FORM_DISCOVER_BUDGET_MS", "20000"))
 # ブラウザ再利用(T107)。旧実装は1社ごとにPlaywrightドライバ起動+Chromium起動+終了を
 # していて、これだけで1社あたり数秒かかっていた。スレッドごとに1つ起動して使い回し、
 # 会社ごとにはコンテキスト(Cookie等は毎回まっさら)だけ作り直す。
@@ -171,6 +182,30 @@ _CONTACT_LINK_HINTS = [
 ]
 _CONTACT_PATH_HINTS = ["contact", "inquiry", "otoiawase", "toiawase"]
 
+# 2026-09-20: 実在の四国企業82社で検出ロジックだけを走らせたところ、到達できた77社のうち
+# 28社(36%)が「問い合わせフォームが見つからない」だった。内訳を見ると原因は探索側に偏って
+# いたため、以下を足がかりに作り直す(本番CSVの form_not_found 598件に対応)。
+#
+# パス側の手がかり。"form"は information に、"mail"は mailmagazine に部分一致してしまうため、
+# 紛れ込みやすい語だけは区切り文字付きで見る(単純な部分一致リストに足すと誤爆する)。
+_CONTACT_PATH_RE = re.compile(
+    r"contact|inquiry|inquire|otoiawase|toiawase|o-toiawase|mailform|formmail|"
+    r"soudan|consult|(^|[/_\-.])(form|mail|entry)([/_\-.0-9]|$)|"
+    # 日本語パス(「お問い合わせ」「問合せ」)のパーセントエンコード
+    r"%e3%81%8a%e5%95%8f|%e5%95%8f%e5%90%88|%e5%95%8f%e3%81%84%e5%90%88",
+    re.I)
+
+# リンク文言。表記ゆれを広めに取る(「お問い合せ」「ご相談」「お見積り」まで)
+_CONTACT_TEXT_STRONG = ("お問い合わせ", "お問合せ", "お問合わせ", "お問い合せ", "問い合わせ",
+                        "問合せ", "問い合せ", "ご相談", "お見積", "見積り依頼", "資料請求")
+_CONTACT_TEXT_WEAK = ("contact", "inquiry", "inquiries", "enquiry", "get in touch")
+
+# 「お問い合わせ」を含んでいても営業の宛先として不適切なリンク。実測で拾ってしまった例:
+# 「お問合せ伝票番号検索」(配送追跡の検索ページ)、「採用に関するお問い合わせ」(採用窓口)。
+_CONTACT_TEXT_NEGATIVE = ("採用", "求人", "エントリー", "recruit", "応募", "ログイン", "login",
+                          "マイページ", "会員", "伝票番号", "追跡", "検索", "よくあるご質問",
+                          "faq", "サイトマップ", "個人情報", "プライバシー")
+
 _SUCCESS_HINTS = (
     "ありがとうございます", "ありがとうございました", "送信が完了", "送信しました",
     "送信いたしました", "送信されました", "受け付け", "受付ました", "受付いたしました",
@@ -221,8 +256,24 @@ _ERROR_HINTS = (
 # Cloudflare等のボット検証チャレンジ画面。CAPTCHAと同じく自動突破の対象にはしない
 _BOT_CHALLENGE_TITLE_HINTS = ["just a moment", "attention required", "checking your browser"]
 
-_SUBMIT_TEXT_RE = re.compile(r"送信|確認する|この内容で送信|次へ進む|送信する|submit", re.I)
+# 2026-09-20: 実在サイトでの計測で、フォームは見つかっているのに送信ボタンだけ
+# 見つからない例が多数あった(本番CSVの submit_button_not_found 271件)。実際に外した例:
+#   「確認画面へ」(Contact Form 7の確認ステップ) / 「次へ」(旧実装は「次へ進む」のみ) /
+#   「確認」(input[type=submit] value="確認") / 画像ボタン(input[type=image] のalt文言)
+# 文字の間に空白を入れる表記(「送 信」「送　信」)も実在するため、判定前に空白を潰す。
+_SUBMIT_TEXT_RE = re.compile(
+    r"送信|送付|確認画面|確認する|確認へ|内容を確認|入力内容の確認|この内容で|上記内容で|"
+    r"次へ|進む|申し込|申込|お申し?込み|問い合わせる|問合せる|相談する|submit|send|confirm|next",
+    re.I)
 _CONFIRM_TEXT_RE = re.compile(r"確認画面|入力内容を確認|内容を確認|次へ|確認する", re.I)
+
+# 「送信」らしく見えても押してはいけないもの。サイト内検索ボタンを押すと検索結果へ
+# 遷移してしまい、URLが変わったことで「送信成功」と誤記録されうる(実測で
+# 「お問合せ伝票番号検索開始」という画像ボタンを拾った例がある)。
+_NOT_SUBMIT_TEXT_RE = re.compile(
+    r"検索|search|クリア|clear|リセット|reset|取り消|キャンセル|cancel|戻る|back|"
+    r"閉じる|close|ログイン|login|絞り込|ダウンロード|download|同意|accept|拒否|deny",
+    re.I)
 
 
 @dataclass
@@ -345,67 +396,191 @@ def _classify_field(page, el):
 
 
 # ── 問い合わせページの探索 ───────────────────
+FILLABLE_SELECTOR = ("input[type=text], input[type=email], input[type=tel], "
+                      "input:not([type]), textarea")
+
+# iframeで埋め込まれた外部フォーム(Googleフォーム・formrun・HubSpot等)も対象にする。
+# ただしチャットウィジェットや広告・計測系のiframeは「入力欄がある」だけで拾ってしまう
+# ので除外する(そこへ営業文を打ち込んでも相手には届かない)。
+_FRAME_URL_DENY_RE = re.compile(
+    r"recaptcha|hcaptcha|turnstile|googletagmanager|google-analytics|doubleclick|"
+    r"youtube\.com|facebook\.com|twitter\.com|zendesk|intercom|chatplus|tawk|crisp|"
+    r"channel\.io|karte|sync\.|adservice", re.I)
+
+
 def _looks_like_contact_page(url):
     low = (url or "").lower()
     return any(h in low for h in _CONTACT_PATH_HINTS)
 
 
-def _has_fillable_form(page):
+def _has_fillable_form(scope):
+    """scopeはPageでもFrameでもよい(query_selectorの使い方が同じ)。"""
     try:
-        return page.query_selector("input[type=text], input[type=email], "
-                                    "input:not([type]), textarea") is not None
+        return scope.query_selector(FILLABLE_SELECTOR) is not None
     except Exception:  # noqa: BLE001
         return False
+
+
+def _form_scopes(page):
+    """入力欄を持つスコープ(メインフレーム優先、次にiframe)を返す。
+    2026-09-20: 旧実装はメインフレームしか見ておらず、外部フォームサービスを
+    iframeで埋め込んでいるサイトが一律 form_not_found になっていた。"""
+    scopes = []
+    try:
+        frames = list(page.frames)
+    except Exception:  # noqa: BLE001
+        return [page] if _has_fillable_form(page) else []
+    main = None
+    try:
+        main = page.main_frame
+    except Exception:  # noqa: BLE001
+        pass
+    for f in frames:
+        if f is main:
+            continue
+        url = ""
+        try:
+            url = f.url or ""
+        except Exception:  # noqa: BLE001
+            pass
+        if not url or url == "about:blank" or _FRAME_URL_DENY_RE.search(url):
+            continue
+        if _has_fillable_form(f):
+            scopes.append(f)
+    if _has_fillable_form(page):
+        scopes.insert(0, page)   # メインフレームにあるならそれを最優先
+    return scopes
+
+
+def _wait_for_form(page, timeout_ms=None):
+    """JSで後から描画されるフォームを待つ。実測(大塚テクノ等)では
+    domcontentloadedの時点で入力欄0件、2秒後に5件というサイトがあり、
+    待たずに判定していたことが form_not_found の一因だった。
+    入力欄が現れた時点で即座に返るので、フォームがあるサイトでは待ち時間はほぼ増えない。"""
+    if timeout_ms is None:
+        timeout_ms = FORM_RENDER_WAIT_MS
+    if timeout_ms <= 0:
+        return
+    try:
+        page.wait_for_selector(FILLABLE_SELECTOR, timeout=timeout_ms, state="attached")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _looks_like_real_contact_form(page):
     """『トップページに検索窓やニュースレター登録欄があるだけ』を問い合わせフォームと
-    誤認しないための強めの判定。textarea(お問い合わせ本文欄)の存在を必須にする
-    (検索窓・メール登録欄は通常textareaを持たないが、問い合わせフォームはほぼ必ず持つ)。"""
+    誤認しないための強めの判定。
+
+    2026-09-20に強化: 旧実装は「textareaが1つでもあれば本物」としていたため、
+    フッターに使われていない入力欄を持つトップページで探索が止まり、実際の
+    /contact/ まで辿り着けないサイトが実測で複数あった(赤松化成・喜多機械ほか)。
+    いまは『同じform要素の中に 本文欄(textarea) と 連絡先らしい入力欄 が揃っている』
+    ことを条件にする(検索窓・メール登録欄はこの条件を満たさない)。"""
     try:
-        return page.query_selector("textarea") is not None
+        return bool(page.evaluate("""() => {
+          for (const f of document.querySelectorAll('form')) {
+            if (!f.querySelector('textarea')) continue;
+            const others = f.querySelectorAll(
+              'input[type=text], input[type=email], input[type=tel], input:not([type])');
+            if (others.length >= 1) return true;
+          }
+          return false;
+        }"""))
     except Exception:  # noqa: BLE001
         return False
 
 
-def _find_contact_link(page):
-    """ヘッダー/フッター/ナビゲーションから問い合わせページらしいリンクを探す。"""
+def _contact_link_score(text, href):
+    """問い合わせページらしさの点数。0以下なら候補にしない。
+    旧実装は「条件に当たった最初のリンク」を無条件に採用していたため、
+    mailto:リンク(page.gotoが必ず失敗する)や「お問合せ伝票番号検索」のような
+    別物のページを選んでしまっていた。"""
+    t = (text or "").strip()
+    tl = t.lower()
+    h = (href or "").strip()
+    hl = h.lower()
+    if not h or h.startswith("#") or hl.startswith(("javascript:", "mailto:", "tel:", "fax:")):
+        # mailto:/tel: は「ページ」ではないので辿れない。旧実装はこれを選んで
+        # 「問い合わせページへの遷移に失敗」で終わっていた
+        return 0
+    score = 0
+    if any(k in t for k in _CONTACT_TEXT_STRONG):
+        score += 10
+    if any(k in tl for k in _CONTACT_TEXT_WEAK):
+        score += 8
+    if _CONTACT_PATH_RE.search(hl):
+        score += 6
+    if any(k in t or k in tl for k in _CONTACT_TEXT_NEGATIVE):
+        # 減点方式だと「採用に関するお問い合わせ」(強い文言+contactを含むパス)が
+        # 残ってしまうため、これらは点数に関わらず候補から外す
+        return 0
+    return score
+
+
+def _find_contact_link(page, exclude=()):
+    """ヘッダー/フッター/ナビゲーションから問い合わせページらしいリンクを探す。
+    候補が複数あるときは点数の高いものを選ぶ(同点ならDOM順で先のもの)。
+    リンク文言とhrefの取得は1回のevaluateでまとめて行う——1リンクずつCDPを往復する
+    旧実装は、リンクが数百ある企業サイトで無視できない時間がかかっていた。"""
     try:
-        links = page.query_selector_all("a[href]")
+        links = page.evaluate("""() => Array.from(document.querySelectorAll('a[href]'))
+            .slice(0, 800).map(a => ({
+              text: (a.innerText || a.getAttribute('title') ||
+                     (a.querySelector('img') ? a.querySelector('img').getAttribute('alt') || '' : '')),
+              href: a.getAttribute('href') || '',
+              abs: a.href || ''}))""")
     except Exception:  # noqa: BLE001
         return None
-    for a in links:
-        try:
-            text = (a.inner_text() or "").strip()
-            href = a.get_attribute("href") or ""
-        except Exception:  # noqa: BLE001
+    best, best_score = None, 0
+    for l in links or []:
+        absolute = (l.get("abs") or "").split("#")[0]
+        if not absolute or absolute in exclude:
             continue
-        if any(h in text for h in _CONTACT_LINK_HINTS) or any(h in href.lower() for h in _CONTACT_PATH_HINTS):
-            if href and not href.startswith("#") and not href.lower().startswith("javascript:"):
-                try:
-                    return a.get_attribute("href"), page.evaluate("(h) => new URL(h, location.href).href", href)
-                except Exception:  # noqa: BLE001
-                    return href, href
-    return None
+        score = _contact_link_score(l.get("text"), l.get("href"))
+        if score > best_score:
+            best, best_score = (l.get("href") or "", absolute), score
+    return best
 
 
 def _resolve_contact_page(page, start_url):
-    """トップページ等しか無い場合に、問い合わせページへ1階層だけ辿る。
-    既に問い合わせページらしいURL、または『本物の』問い合わせフォームが直接見つかれば
-    そのまま使う。単なる入力欄(検索窓等)の存在だけでは早期確定しない。"""
-    if _looks_like_contact_page(start_url) or _looks_like_real_contact_form(page):
+    """問い合わせページへ辿る。MAX_CRAWL_PAGESの範囲で「次に有力なリンク」を順に試す。
+
+    2026-09-20に多段化: 旧実装は1階層しか辿らず、しかも最初に当たったリンクが外れ
+    (会社案内・電話番号へのアンカー等)だとそこで打ち切っていた。実測では
+    『トップ → 会社情報 → お問い合わせ』や『1つ目のリンクは外れだが2つ目が当たり』の
+    サイトが少なくない。フォームが見つかった時点で打ち切るので、当たりのサイトでは
+    往復は増えない。"""
+    _wait_for_form(page)
+    if _looks_like_real_contact_form(page):
+        return page.url, None
+    if _looks_like_contact_page(start_url) and _has_fillable_form(page):
         return page.url, None
 
-    found = _find_contact_link(page)
-    if not found:
-        return page.url, "問い合わせページへのリンクが見つからず"
-
-    _, absolute_url = found
-    try:
-        page.goto(absolute_url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
-    except Exception as e:  # noqa: BLE001
-        return page.url, f"問い合わせページへの遷移に失敗: {type(e).__name__}"
-    return page.url, None
+    visited = set()
+    for u in (start_url, page.url):
+        if u:
+            visited.add(u.split("#")[0])
+    last_err = "問い合わせページへのリンクが見つからず"
+    deadline = time.monotonic() + FORM_DISCOVER_BUDGET_MS / 1000.0
+    for _ in range(MAX_CRAWL_PAGES):
+        if time.monotonic() > deadline:
+            last_err = "問い合わせページを探す時間の上限に達した"
+            break
+        found = _find_contact_link(page, exclude=visited)
+        if not found:
+            break
+        _, absolute_url = found
+        visited.add(absolute_url)
+        try:
+            page.goto(absolute_url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+        except Exception as e:  # noqa: BLE001
+            last_err = f"問い合わせページへの遷移に失敗: {type(e).__name__}"
+            continue
+        _wait_for_form(page)
+        if _form_scopes(page):
+            return page.url, None
+        last_err = "問い合わせページにフォームが見つからず"
+    return page.url, last_err
 
 
 # ── 検知系(送るべきでないフォームの判定) ─────────
@@ -496,25 +671,113 @@ def _detect_bot_challenge(page):
 
 
 # ── 送信ボタン ───────────────────────────
-def _find_button(page, text_re):
-    for sel in ("button[type=submit]", "input[type=submit]"):
-        try:
-            btn = page.query_selector(sel)
-            if btn and btn.is_visible():
-                return btn
-        except Exception:  # noqa: BLE001
-            pass
+def _button_labels(el):
+    """(見えている文言, 属性まで含めた手がかり)を返す。
+    画像だけのボタン(<button><img alt="送信"></button> / <input type="image" alt="送信">)は
+    innerTextが空で、旧実装では永久に見つけられなかった。value/alt/aria-label/title、
+    さらにname/id/classまで手がかりにする(class="btn-submit"のような命名を拾うため)。
+    「送 信」「送　信」のような字間空けの表記に当てるため空白は潰す。"""
     try:
-        for el in page.query_selector_all("button, a, input[type=button]"):
-            if not el.is_visible():
-                continue
-            text = (el.inner_text() if el.evaluate("e=>e.tagName") != "INPUT"
-                    else (el.get_attribute("value") or "")).strip()
-            if text_re.search(text):
-                return el
+        parts = el.evaluate("""e => {
+            const tag = e.tagName.toLowerCase();
+            const img = e.querySelector ? e.querySelector('img') : null;
+            const visible = tag === 'input'
+                ? (e.getAttribute('value') || e.getAttribute('alt') || '')
+                : ((e.innerText || '') + ' ' + (img ? (img.getAttribute('alt') || '') : ''));
+            const extra = [e.getAttribute('aria-label') || '', e.getAttribute('title') || '',
+                           e.getAttribute('name') || '', e.id || '',
+                           typeof e.className === 'string' ? e.className : '',
+                           img ? (img.getAttribute('src') || '') : ''].join(' ');
+            return [visible, visible + ' ' + extra];
+        }""")
     except Exception:  # noqa: BLE001
-        pass
+        return "", ""
+    squash = lambda t: re.sub(r"[\s\u3000]+", "", t or "")
+    return squash(parts[0]), squash(parts[1])
+
+
+def _is_submit_candidate(el, text_re):
+    visible_text, blob = _button_labels(el)
+    if _NOT_SUBMIT_TEXT_RE.search(visible_text):
+        return False
+    if text_re.search(visible_text):
+        return True
+    # 文言が無い(画像だけ等)ときに限り、属性まで含めた手がかりで判定する
+    return not visible_text and bool(text_re.search(blob))
+
+
+def _visible(el):
+    try:
+        return el.is_visible()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _find_button(scope, text_re, form_el=None):
+    """送信ボタンを探す。form_elを渡すと、まずそのフォームの中だけを見る。
+
+    2026-09-20の作り直し(submit_button_not_found対策):
+    - query_selector(最初の1件だけ)をやめた。旧実装はページ先頭の非表示の
+      input[type=submit](サイト内検索の残骸など)を1件だけ見て「見つからない」と
+      判定し、そのすぐ下にある本物の送信ボタンへ辿り着けていなかった。
+      しかも文言による探索の対象セレクタに input[type=submit] が入っていないため、
+      一度ここで外すと二度と拾えない構造だった。
+    - 対象フォームの中を優先する(ヘッダーのサイト内検索ボタンを押さないため)。
+    - input[type=image](画像の送信ボタン)を対象に加えた。
+    """
+    roots = [r for r in (form_el, scope) if r is not None]
+    # (1) type=submit / image を持つ要素。これが最も確実
+    for root in roots:
+        for sel in ("button[type=submit]", "input[type=submit]", "input[type=image]"):
+            try:
+                els = root.query_selector_all(sel)
+            except Exception:  # noqa: BLE001
+                continue
+            for el in els:
+                if _visible(el) and not _NOT_SUBMIT_TEXT_RE.search(_button_labels(el)[0]):
+                    return el
+    # (2) 文言・属性から送信ボタンらしいものを探す
+    for root in roots:
+        try:
+            els = root.query_selector_all(
+                "button, a, input[type=button], input[type=submit], input[type=image], [role=button]")
+        except Exception:  # noqa: BLE001
+            continue
+        for el in els:
+            if _visible(el) and _is_submit_candidate(el, text_re):
+                return el
     return None
+
+
+def _submit_form_directly(scope, form_el):
+    """押せる送信ボタンが1つも無いとき、フォーム自体を送信する最後の手段。
+    実測(大輪総合運輸)では <input type="submit" value="確認"> がCSSで潰されていて
+    クリック対象にならず、送信ボタンが見つからない扱いになっていた。
+    requestSubmit()はブラウザのHTML5検証(required等)をそのまま通すので、
+    「必須欄が埋まっていないのに送ったことにする」誤判定は増えない。
+    送信ボタンが1つも無いフォーム(検索窓等)では何もせずFalseを返す。"""
+    if form_el is None:
+        return False
+    try:
+        return bool(form_el.evaluate("""f => {
+            const btn = f.querySelector(
+              'input[type=submit], button[type=submit], input[type=image], button:not([type])');
+            if (!btn) return false;
+            if (typeof f.requestSubmit === 'function') { f.requestSubmit(btn.disabled ? undefined : btn); }
+            else { btn.click(); }
+            return true;
+        }"""))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _owning_form(el):
+    """入力欄が属する<form>要素。送信ボタンの探索範囲を絞るために使う。"""
+    try:
+        handle = el.evaluate_handle("e => e.closest('form')")
+        return handle.as_element()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _click(el):
@@ -802,23 +1065,28 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 result.reason_code = "support_only_form"
                 return result
 
-            if not _has_fillable_form(page):
+            # フォームはメインフレームとは限らない(Googleフォーム等のiframe埋め込み)。
+            # 以降の入力・送信はこのスコープに対して行う(PageでもFrameでもAPIは同じ)。
+            scopes = _form_scopes(page)
+            if not scopes:
                 result.status = "FAILED_UNSUPPORTED"
                 result.reason_code = discover_err or "form_not_found"
                 result.page_text_snippet = page_text[:400]
                 return result
+            scope = scopes[0]
 
-            fields = page.query_selector_all(
+            fields = scope.query_selector_all(
                 "input[type=text], input[type=email], input[type=tel], "
                 "input:not([type]), textarea")
             detected, filled = {}, []
+            first_filled_el = None
             for el in fields:
                 try:
                     if not el.is_visible():
                         continue
                 except Exception:  # noqa: BLE001
                     continue
-                kind = _classify_field(page, el)
+                kind = _classify_field(scope, el)
                 if not kind:
                     continue
                 detected[kind] = detected.get(kind, 0) + 1
@@ -838,6 +1106,8 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                         except Exception:  # noqa: BLE001
                             pass
                         filled.append(kind)
+                        if first_filled_el is None:
+                            first_filled_el = el
                     except Exception:  # noqa: BLE001
                         pass
 
@@ -850,7 +1120,7 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
 
             # プルダウン(お問い合わせ種類・都道府県等)。必須なのに未選択のままだと
             # 送信がブロックされるサイトが多いため埋める
-            n_selects = _fill_selects(page)
+            n_selects = _fill_selects(scope)
             if n_selects:
                 detected["select"] = n_selects
                 filled.append(f"select×{n_selects}")
@@ -860,16 +1130,16 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
 
             # 同意チェックボックス
             try:
-                for cb in page.query_selector_all("input[type=checkbox]"):
+                for cb in scope.query_selector_all("input[type=checkbox]"):
                     if not cb.is_visible() or cb.is_checked():
                         continue
-                    if any(h in (_label_for(page, cb) or "") for h in _CONSENT_HINTS):
+                    if any(h in (_label_for(scope, cb) or "") for h in _CONSENT_HINTS):
                         cb.check(timeout=ACTION_TIMEOUT_MS)
             except Exception:  # noqa: BLE001
                 pass
 
             # 必須のラジオ群が未選択なら先頭を選ぶ(2026-09-19)
-            n_radios = _check_required_radios(page)
+            n_radios = _check_required_radios(scope)
             if n_radios:
                 filled.append(f"radio×{n_radios}")
                 result.filled_fields = filled
@@ -878,7 +1148,7 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             # 残っていればブラウザが送信をブロックするので、押しても送られない。
             # その状態を「成功」と誤記録しないため、ここで失敗として記録し、
             # どの欄が埋まらなかったかを残す(「自動入力」での手動フォローに使える)
-            missing = _invalid_visible_fields(page)
+            missing = _invalid_visible_fields(scope)
             if missing:
                 result.status = "FAILED_UNSUPPORTED"
                 result.reason_code = "required_field_unfilled"
@@ -888,17 +1158,33 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                     page, screenshot_dir, result.run_id, "after")
                 return result
 
-            submit_btn = _find_button(page, _SUBMIT_TEXT_RE)
+            # 埋めた欄が属する<form>の中を優先して探す(ヘッダーのサイト内検索ボタンを
+            # 押してしまうと、URLが変わるだけで「送信成功」と誤記録されうる)
+            form_el = _owning_form(first_filled_el) if first_filled_el is not None else None
+            submit_btn = _find_button(scope, _SUBMIT_TEXT_RE, form_el=form_el)
             if not submit_btn:
+                # 入力欄より少し遅れて送信ボタンが描画されるサイトがある
+                # (実測: 四国トーセロ。入力欄はある状態で送信ボタンだけ未描画だった)。
+                # 諦める前に一度だけ待ち直す
+                try:
+                    page.wait_for_timeout(POST_SUBMIT_WAIT_MS)
+                except Exception:  # noqa: BLE001
+                    pass
+                submit_btn = _find_button(scope, _SUBMIT_TEXT_RE, form_el=form_el)
+            if submit_btn:
+                result.submit_attempted = True
+                if not _click(submit_btn):
+                    result.status = "FAILED_RETRYABLE"
+                    result.reason_code = "submit_click_failed"
+                    return result
+            elif _submit_form_directly(scope, form_el):
+                # 押せる送信ボタンは無かったが、フォーム自体は送信できた
+                # (CSSで潰された input[type=submit] 等。_submit_form_directly参照)
+                result.submit_attempted = True
+            else:
                 result.status = "FAILED_UNSUPPORTED"
                 result.reason_code = "submit_button_not_found"
                 result.page_text_snippet = _page_text(page)[:400]
-                return result
-
-            result.submit_attempted = True
-            if not _click(submit_btn):
-                result.status = "FAILED_RETRYABLE"
-                result.reason_code = "submit_click_failed"
                 return result
             try:
                 page.wait_for_load_state("networkidle", timeout=SETTLE_TIMEOUT_MS)
@@ -906,7 +1192,8 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 pass
 
             # 入力→確認→送信の2段階フォーム対応。確認画面が残っていればもう一度押す
-            confirm_btn = _find_button(page, _CONFIRM_TEXT_RE) or _find_button(page, _SUBMIT_TEXT_RE)
+            confirm_btn = (_find_button(scope, _CONFIRM_TEXT_RE)
+                           or _find_button(scope, _SUBMIT_TEXT_RE))
             if confirm_btn:
                 _click(confirm_btn)
                 try:
@@ -924,7 +1211,10 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             result.screenshot_after_path = _save_screenshot(
                 page, screenshot_dir, result.run_id, "after")
             result.final_url = page.url
+            # 完了文言はiframe側に出ることがあるので、フォームのスコープの文言も足して見る
             final_text = _page_text(page)
+            if scope is not page:
+                final_text += "\n" + _page_text(scope)
             result.page_text_snippet = final_text[:400]
             # 明確な拒否・エラー文言が出ていれば、以下のSUCCESS判定(文言一致/URL変化/
             # フォーム消失)より優先する。「日本国内からのみ送信可能です」という
@@ -933,8 +1223,8 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             # 送信後もブラウザ検証で無効な欄が残り、入力した値もそのまま残っている
             # =ブラウザが送信をブロックした(JSで後から必須になった欄など)。
             # 文言一致・URL変化・フォーム消失の判定より優先する(2026-09-19)
-            still_invalid = _invalid_visible_fields(page)
-            if still_invalid and _has_fillable_form(page) and _form_keeps_our_values(page, values):
+            still_invalid = _invalid_visible_fields(scope)
+            if still_invalid and _has_fillable_form(scope) and _form_keeps_our_values(scope, values):
                 result.status = "FAILED_UNSUPPORTED"
                 result.reason_code = "required_field_empty"
                 result.error_message = "必須欄が未入力のまま送信がブロックされました: " + "・".join(still_invalid)
@@ -948,7 +1238,7 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             url_changed = page.url != contact_url
             # フォームがDOM上から消えている(=AJAXで完了画面に差し替わった)ことも
             # 成功の傍証として見る。文言・URLどちらも一致しないAJAX系フォーム向けの保険
-            form_gone = not _has_fillable_form(page)
+            form_gone = not _form_scopes(page)
             hit = next((k for k in _SUCCESS_HINTS if k in final_text), None)
             if hit:
                 result.status = "SUCCESS"
@@ -1120,6 +1410,161 @@ if __name__ == "__main__":
                 got = _detect_captcha(page)
                 print(f"  {'✓' if got == expect else '✗'} {label}: "
                       f"{'除外する' if got else '送信を試みる'}(期待: {'除外' if expect else '送信'})")
+
+            print("\n── 問い合わせページの探索(2026-09-20。実在82社の計測で作り直し) ──")
+            link_cases = [
+                ("お問い合わせ", "/contact/", True, "ふつうの問い合わせリンク"),
+                ("お問い合わせはこちら", "mailto:info@example.co.jp", False,
+                 "mailto:は辿れない(page.gotoが必ず失敗する)ので候補にしない"),
+                ("お電話でのお問い合わせ", "tel:088-000-0000", False, "tel:も同様"),
+                ("お問合せ伝票番号検索開始", "/webtrace/", False,
+                 "『お問合せ』を含むが配送追跡の検索ページ"),
+                ("採用に関するお問い合わせ", "/recruit/contact/", False, "採用窓口は営業の宛先ではない"),
+                ("Contact", "/en/contact/", True, "英語表記(大文字small文字を問わない)"),
+                ("会社概要", "/company/", False, "無関係なリンク"),
+                ("ご相談・お見積り", "/estimate/", True, "『お問い合わせ』以外の言い回し"),
+                ("トップへ", "#top", False, "ページ内アンカー"),
+            ]
+            for text, href, expect, why in link_cases:
+                got = _contact_link_score(text, href) > 0
+                print(f"  {'✓' if got == expect else '✗'} {'候補にする' if expect else '候補にしない'}: "
+                      f"{text!r} → {href} ({why})")
+            # 点数順: 「お問い合わせ」(本命)がDOM順で後ろにあっても選べること
+            page.set_content("""
+                <a href="/company/">会社概要</a>
+                <a href="mailto:a@example.co.jp">お問い合わせはこちら</a>
+                <a href="/recruit/">採用に関するお問い合わせ</a>
+                <a href="/contact/">お問い合わせ</a>""")
+            picked = _find_contact_link(page)
+            print(f"  {'✓' if picked and picked[0] == '/contact/' else '✗'} "
+                  f"複数候補から点数の高いものを選ぶ(DOM順の最初ではない): {picked[0] if picked else None}")
+
+            print("\n── 『本物の問い合わせフォーム』の判定(トップページで探索を止めない) ──")
+            form_cases = [
+                ("検索窓だけのトップページ",
+                 '<form><input type="text" name="s"><button>検索</button></form>', False),
+                ("使われていないtextareaが1つあるだけのトップページ",
+                 '<textarea id="memo"></textarea><a href="/contact/">お問い合わせ</a>', False),
+                ("本文欄と連絡先欄が揃った問い合わせフォーム",
+                 '<form><input type="text" name="name"><textarea name="body"></textarea>'
+                 '<button type="submit">送信</button></form>', True),
+            ]
+            for label, html, expect in form_cases:
+                page.set_content(html)
+                got = _looks_like_real_contact_form(page)
+                print(f"  {'✓' if got == expect else '✗'} {label}: "
+                      f"{'ここで確定' if got else '問い合わせページを探しに行く'}")
+
+            print("\n── iframeで埋め込まれたフォーム(Googleフォーム等) ──")
+            page.set_content("""
+                <p>お問い合わせはこちらのフォームから</p>
+                <iframe srcdoc="&lt;form&gt;&lt;input name=name&gt;&lt;textarea&gt;&lt;/textarea&gt;
+                    &lt;button type=submit&gt;送信&lt;/button&gt;&lt;/form&gt;"></iframe>""")
+            page.wait_for_timeout(300)
+            iframe_scopes = _form_scopes(page)
+            print(f"  {'✓' if len(iframe_scopes) == 1 and iframe_scopes[0] is not page else '✗'} "
+                  f"メインフレームに入力欄が無くてもiframe内のフォームを見つける(検出数={len(iframe_scopes)})")
+            page.set_content("""
+                <form><input name="a"><textarea></textarea></form>
+                <iframe src="https://www.google.com/recaptcha/api2/anchor?k=x"></iframe>""")
+            page.wait_for_timeout(300)
+            main_first = _form_scopes(page)
+            print(f"  {'✓' if main_first and main_first[0] is page else '✗'} "
+                  f"メインフレームにフォームがあればそちらを優先する")
+
+            print("\n── 送信ボタンの検出(submit_button_not_found 271件への対策) ──")
+            btn_cases = [
+                ("確認画面へ(Contact Form 7)",
+                 '<form><input name="a"><button type="button" class="cf7-fake-confirm">確認画面へ</button></form>',
+                 "確認画面へ"),
+                ("次へ(旧実装は「次へ進む」しか見ていなかった)",
+                 '<form><input name="a"><button type="button">次へ</button></form>', "次へ"),
+                ('input[type=submit] value="確認"',
+                 '<form><input name="a"><input type="submit" value="確認"></form>', "確認"),
+                ("画像の送信ボタン",
+                 '<form><input name="a"><input type="image" alt="送信する" '
+                 'src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></form>',
+                 "送信する"),
+                ("字間を空けた表記(送 信)",
+                 '<form><input name="a"><button type="button">送 信</button></form>', "送 信"),
+                ("先頭に非表示のsubmitがあっても本物を見つける",
+                 '<form style="display:none"><input type="submit" value="検索"></form>'
+                 '<form><input name="a"><input type="submit" value="送信する"></form>', "送信する"),
+            ]
+            for label, html, expect in btn_cases:
+                page.set_content(html)
+                b2 = _find_button(page, _SUBMIT_TEXT_RE)
+                got = ""
+                if b2:
+                    got = b2.evaluate(
+                        "e => (e.innerText || e.getAttribute('value') || e.getAttribute('alt') || '').trim()")
+                ok_btn = got.replace(" ", "").replace("\u3000", "") == expect.replace(" ", "")
+                print(f"  {'✓' if ok_btn else '✗'} {label}: 検出={got!r}")
+
+            page.set_content("""
+                <form id="search"><input type="text" name="q"><input type="submit" value="検索"></form>
+                <form id="contact"><input name="name"><textarea></textarea>
+                  <button type="submit">送信する</button></form>""")
+            contact_form = page.query_selector("#contact")
+            in_form = _find_button(page, _SUBMIT_TEXT_RE, form_el=contact_form)
+            got_in = in_form.evaluate("e => (e.innerText || e.getAttribute('value') || '').trim()") if in_form else ""
+            print(f"  {'✓' if got_in == '送信する' else '✗'} 対象フォームの中を優先し、サイト内検索の"
+                  f"「検索」ボタンを押さない: 検出={got_in!r}")
+            page.set_content('<form><input type="text" name="q"><input type="submit" value="検索"></form>')
+            print(f"  {'✓' if _find_button(page, _SUBMIT_TEXT_RE) is None else '✗'} "
+                  f"検索ボタンしか無いページでは送信ボタン無しと判定する")
+
+            print("\n── 押せる送信ボタンが無いフォームを直接送信する(最後の手段) ──")
+            page.set_content("""
+                <form id="f" onsubmit="window.__submitted = 1; return false;">
+                  <input name="a" value="x">
+                  <input type="submit" value="確認" style="display:none">
+                </form>""")
+            hidden_form = page.query_selector("#f")
+            no_btn = _find_button(page, _SUBMIT_TEXT_RE, form_el=hidden_form) is None
+            sent = _submit_form_directly(page, hidden_form)
+            fired = page.evaluate("() => window.__submitted === 1")
+            print(f"  {'✓' if no_btn else '✗'} CSSで隠された送信ボタンはクリック対象にならない")
+            print(f"  {'✓' if sent and fired else '✗'} それでもフォーム自体は送信できる(submit={sent})")
+            page.set_content('<form id="g"><input type="text" name="q"></form>')
+            no_submit_form = page.query_selector("#g")
+            print(f"  {'✓' if not _submit_form_directly(page, no_submit_form) else '✗'} "
+                  f"送信ボタンを持たないフォーム(検索窓等)は送信しない")
+
+            print("\n── 探索の打ち切り(フォームが無い会社に時間をかけすぎない) ──")
+            # 問い合わせリンクだけが延々と繋がっていてフォームに辿り着かないページを作り、
+            # MAX_CRAWL_PAGES回まわる前に時間で打ち切られることを確認する
+            _orig_budget = FORM_DISCOVER_BUDGET_MS
+            _orig_render = FORM_RENDER_WAIT_MS
+            try:
+                sys.modules[__name__].FORM_DISCOVER_BUDGET_MS = 300
+                sys.modules[__name__].FORM_RENDER_WAIT_MS = 200
+                # 毎回ちがう問い合わせリンクだけを返す(=フォームに永久に辿り着かない)
+                # ページを擬似的に用意し、MAX_CRAWL_PAGES回まわりきる前に時間で
+                # 打ち切られることを見る。set_contentだと遷移自体が失敗して
+                # 「遷移に失敗」で抜けてしまい、上限の判定を通らない
+                hop = {"n": 0}
+
+                def _endless(route):
+                    hop["n"] += 1
+                    route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                                  body=f'<a href="/c{hop["n"]}/contact/">お問い合わせ</a>')
+
+                page.route("**/*", _endless)
+                try:
+                    page.goto("https://example.test/", wait_until="domcontentloaded")
+                    t_start = time.monotonic()
+                    _, budget_err = _resolve_contact_page(page, "https://example.test/")
+                    elapsed = time.monotonic() - t_start
+                finally:
+                    page.unroute("**/*")
+                ok_budget = (budget_err == "問い合わせページを探す時間の上限に達した"
+                             and hop["n"] < MAX_CRAWL_PAGES + 2 and elapsed < 10)
+                print(f"  {'✓' if ok_budget else '✗'} 上限を過ぎたら探索を打ち切る"
+                      f"({elapsed:.1f}秒 / 開いたページ{hop['n']}枚, 理由={budget_err!r})")
+            finally:
+                sys.modules[__name__].FORM_DISCOVER_BUDGET_MS = _orig_budget
+                sys.modules[__name__].FORM_RENDER_WAIT_MS = _orig_render
 
             print("\n── ブラウザ使い回し(T107。1社ごとの起動をやめて所要時間を削る) ──")
             # このテストは既にsync_playwrightを1つ起動済みなので、同じドライバから

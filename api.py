@@ -4717,6 +4717,21 @@ def self_test(port=8899):
     out_runs = _run_cli(SLR.cmd_runs, days=3650, limit=5)
     t("runs: 実行(リスト)単位の成績を出せる", "成功率" in out_runs)
 
+    # T110の宿題: _ERROR_HINTSの誤検出を人が判断できるようにする
+    con.execute("""INSERT INTO form_send_log
+        (company_id, tenant_id, target_url, contact_url, started_at, status,
+         reason_code, error_message, list_id)
+        VALUES (?,?,?,?,?,?,?,?,?)""",
+        (990104, tid_a, "https://slr-d.example.co.jp/contact/",
+         "https://slr-d.example.co.jp/contact/", _slr_now, "FAILED_UNSUPPORTED",
+         "error_message_detected", "送信後ページにエラー文言を検知: 再度お試しください", 9901))
+    con.commit()
+    out_hints = _run_cli(SLR.cmd_error_hints, days=3650, limit=10)
+    t("error-hints: 検知したエラー文言を件数つきで出せる", "再度お試しください" in out_hints)
+    t("error-hints: 誤検出を疑う観点を添える", "誤判定" in out_hints)
+    con.execute("DELETE FROM form_send_log WHERE company_id=990104")
+    con.commit()
+
     out_weak = _run_cli(SLR.cmd_urls, reason="url_changed_after_submit", status=None,
                          days=3650, limit=5)
     t("urls: URL変化だけの成功で『押した要素』が読める(T117。偽の成功の判別に使う)",

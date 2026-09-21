@@ -93,6 +93,30 @@ def cmd_urls(con, args):
             print(f"      エラー: {str(r['error_message'])[:150]}")
 
 
+def cmd_error_hints(con, args):
+    """error_message_detected で「どの文言を検知したか」の内訳(T110で残った宿題)。
+
+    form_navigator._ERROR_HINTS には「再度お試しください」「確認して再度」のように
+    **完了ページにも出うる文言**が入っている。そこに引っかかっていると、実際には
+    送信できているのに失敗として記録していることになる。件数の多い文言から順に、
+    それが本当にエラーなのかを人が判断するための出力。"""
+    rows = con.execute("""SELECT error_message, COUNT(*) n FROM form_send_log
+        WHERE reason_code = 'error_message_detected' AND started_at >= ?
+        GROUP BY error_message ORDER BY n DESC LIMIT ?""",
+        (_since(args.days), args.limit)).fetchall()
+    if not rows:
+        print("error_message_detected の行はありません")
+        return
+    total = sum(r["n"] for r in rows)
+    print(f"検知した文言の内訳(上位{len(rows)}種 / 合計{total:,}件)")
+    print("※「再度お試しください」等が上位にある場合、完了ページを失敗と誤判定している"
+          "可能性があります(form_navigator._ERROR_HINTS を見直す)")
+    print("-" * 92)
+    for r in rows:
+        msg = (r["error_message"] or "").replace("送信後ページにエラー文言を検知: ", "")
+        print(f"  {r['n']:6,d}件  {msg[:70]}")
+
+
 def cmd_runs(con, args):
     """実行(リスト)単位の成績。どの送信がいつ、どれだけ通ったか。"""
     rows = con.execute("""SELECT list_id,
@@ -126,6 +150,10 @@ def main():
     p2.add_argument("--days", type=int, default=30)
     p2.add_argument("--limit", type=int, default=20)
 
+    p4 = sub.add_parser("error-hints", help="エラー文言の内訳(誤検出の確認)")
+    p4.add_argument("--days", type=int, default=30)
+    p4.add_argument("--limit", type=int, default=30)
+
     p3 = sub.add_parser("runs", help="実行(リスト)単位の成績")
     p3.add_argument("--days", type=int, default=30)
     p3.add_argument("--limit", type=int, default=20)
@@ -133,7 +161,8 @@ def main():
     args = ap.parse_args()
     con = db.connect()
     try:
-        {"reasons": cmd_reasons, "urls": cmd_urls, "runs": cmd_runs}[args.cmd](con, args)
+        {"reasons": cmd_reasons, "urls": cmd_urls, "runs": cmd_runs,
+         "error-hints": cmd_error_hints}[args.cmd](con, args)
     finally:
         try:
             con.close()

@@ -27,6 +27,7 @@ on:
           - send-urls-weak # 送信ログ: 「URLが変わっただけ」で成功にした分のURLと押した要素
           - send-urls-noform   # 送信ログ: 問い合わせフォームが見つからなかったURL
           - send-urls-nosubmit # 送信ログ: 送信ボタンが見つからなかったURL
+          - send-error-hints   # 送信ログ: 検知したエラー文言の内訳(誤検出の確認)
 
 jobs:
   look:
@@ -93,6 +94,10 @@ jobs:
                 docker compose -f deploy/docker-compose.yml exec -T sender \
                   python3 send_log_report_cli.py urls \
                     --reason submit_button_not_found --days 30 --limit 40" ;;
+            send-error-hints)
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T sender \
+                  python3 send_log_report_cli.py error-hints --days 30 --limit 30" ;;
             *)
               echo "::error::未知のaction: $ACTION"; exit 1 ;;
           esac

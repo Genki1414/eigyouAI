@@ -58,6 +58,11 @@ FORM_DISCOVER_BUDGET_MS = int(os.environ.get("FORM_DISCOVER_BUDGET_MS", "20000")
 # ここが効くのは「個々の操作は返ってくるが、積み重ねで極端に長くなる」ケース
 # (重いページ・大量の入力欄・プルダウンの選択肢が多いサイト等)。
 FORM_COMPANY_BUDGET_MS = int(os.environ.get("FORM_COMPANY_BUDGET_MS", "120000"))
+# 問い合わせページらしいURLに着いたときだけ、フォームの描画をもう少し長く待つ
+# (2026-09-21)。実測で、松下印刷の /contact/ は素のHTMLに<form>も<input>も無く、
+# 完全にJSで組み立てていた。そこにフォームが無ければ送れないので待つ価値がある一方、
+# トップページで同じだけ待つと「フォームが無い会社」に無駄な時間をかけることになる。
+FORM_CONTACT_RENDER_WAIT_MS = int(os.environ.get("FORM_CONTACT_RENDER_WAIT_MS", "7000"))
 
 
 class _Deadline:
@@ -220,9 +225,18 @@ _CONTACT_PATH_HINTS = ["contact", "inquiry", "otoiawase", "toiawase"]
 # 紛れ込みやすい語だけは区切り文字付きで見る(単純な部分一致リストに足すと誤爆する)。
 _CONTACT_PATH_RE = re.compile(
     r"contact|inquiry|inquire|otoiawase|toiawase|o-toiawase|mailform|formmail|"
-    r"soudan|consult|(^|[/_\-.])(form|mail|entry)([/_\-.0-9]|$)|"
+    r"soudan|consult|(^|[/_\-.])(form|mail)([/_\-.0-9]|$)|"
     # 日本語パス(「お問い合わせ」「問合せ」)のパーセントエンコード
     r"%e3%81%8a%e5%95%8f|%e5%95%8f%e5%90%88|%e5%95%8f%e3%81%84%e5%90%88",
+    re.I)
+
+# 2026-09-21: パス側の除外。テキストが無難でも、URLが採用・会員向け・記事なら
+# 営業の宛先ではない。実測で外していた例:
+#  - 大塚包装「お問い合わせ」→ /recruitment/entry_cgi.htm (採用エントリー)
+#  - 井村造船・宝海運 → /entry.php?eid=327730 (ブログ記事。"entry"を候補パスに
+#    入れていたのが誤爆していた。上の行から"entry"を外し、ここで明示的に除外する)
+_CONTACT_PATH_NEGATIVE_RE = re.compile(
+    r"recruit|saiyo|career|/job|entry|mypage|my-page|login|member|signup|register",
     re.I)
 
 # リンク文言。表記ゆれを広めに取る(「お問い合せ」「ご相談」「お見積り」まで)
@@ -489,6 +503,11 @@ def _wait_for_form(page, timeout_ms=None):
     入力欄が現れた時点で即座に返るので、フォームがあるサイトでは待ち時間はほぼ増えない。"""
     if timeout_ms is None:
         timeout_ms = FORM_RENDER_WAIT_MS
+        try:
+            if _looks_like_contact_page(page.url):
+                timeout_ms = FORM_CONTACT_RENDER_WAIT_MS
+        except Exception:  # noqa: BLE001
+            pass
     if timeout_ms <= 0:
         return
     try:
@@ -544,6 +563,8 @@ def _contact_link_score(text, href):
         # 減点方式だと「採用に関するお問い合わせ」(強い文言+contactを含むパス)が
         # 残ってしまうため、これらは点数に関わらず候補から外す
         return 0
+    if _CONTACT_PATH_NEGATIVE_RE.search(hl):
+        return 0
     return score
 
 
@@ -552,15 +573,30 @@ def _find_contact_link(page, exclude=()):
     候補が複数あるときは点数の高いものを選ぶ(同点ならDOM順で先のもの)。
     リンク文言とhrefの取得は1回のevaluateでまとめて行う——1リンクずつCDPを往復する
     旧実装は、リンクが数百ある企業サイトで無視できない時間がかかっていた。"""
-    try:
-        links = page.evaluate("""() => Array.from(document.querySelectorAll('a[href]'))
+    js = """() => Array.from(document.querySelectorAll('a[href]'))
             .slice(0, 800).map(a => ({
               text: (a.innerText || a.getAttribute('title') ||
                      (a.querySelector('img') ? a.querySelector('img').getAttribute('alt') || '' : '')),
               href: a.getAttribute('href') || '',
-              abs: a.href || ''}))""")
-    except Exception:  # noqa: BLE001
-        return None
+              abs: a.href || ''}))"""
+    links = None
+    for attempt in range(2):
+        try:
+            links = page.evaluate(js)
+            break
+        except Exception:  # noqa: BLE001
+            # JSでページが描き変わっている最中だと "Execution context was destroyed"
+            # で失敗する。旧実装はこれを黙ってNone(=リンク無し)として扱っていたため、
+            # 実測(城北運送)では「お問い合わせ→/contact」のリンクが8本あるのに
+            # 「問い合わせページへのリンクが見つからず」と記録されていた。
+            # 描き変わりが落ち着くのを待って1度だけやり直す。
+            if attempt == 0:
+                try:
+                    page.wait_for_timeout(800)
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            return None
     best, best_score = None, 0
     for l in links or []:
         absolute = (l.get("abs") or "").split("#")[0]
@@ -1500,6 +1536,13 @@ if __name__ == "__main__":
                 ("会社概要", "/company/", False, "無関係なリンク"),
                 ("ご相談・お見積り", "/estimate/", True, "『お問い合わせ』以外の言い回し"),
                 ("トップへ", "#top", False, "ページ内アンカー"),
+                # 2026-09-21: 実測で外していたもの
+                ("お問い合わせ", "/recruitment/entry_cgi.htm", False,
+                 "文言は無難でもURLが採用エントリー(大塚包装で実際に拾っていた)"),
+                ("お問い合わせ", "/entry.php?eid=327730", False,
+                 "ブログ記事。候補パスに入れていた'entry'が誤爆していた(井村造船・宝海運)"),
+                ("お問い合わせ", "/mypage/login", False, "会員向けページ"),
+                ("お問い合わせフォーム", "/inquiry/", True, "通常の問い合わせは従来どおり通る"),
             ]
             for text, href, expect, why in link_cases:
                 got = _contact_link_score(text, href) > 0
@@ -1514,6 +1557,26 @@ if __name__ == "__main__":
             picked = _find_contact_link(page)
             print(f"  {'✓' if picked and picked[0] == '/contact/' else '✗'} "
                   f"複数候補から点数の高いものを選ぶ(DOM順の最初ではない): {picked[0] if picked else None}")
+
+            # ページが描き変わっている最中でも、やり直して拾えること
+            page.set_content('<a href="/contact/">お問い合わせ</a>')
+            _calls = {"n": 0}
+            _real_eval = page.evaluate
+
+            def _flaky_eval(expr, *a, **kw):
+                _calls["n"] += 1
+                if _calls["n"] == 1:
+                    raise RuntimeError("Execution context was destroyed")
+                return _real_eval(expr, *a, **kw)
+
+            page.evaluate = _flaky_eval
+            try:
+                retried = _find_contact_link(page)
+            finally:
+                page.evaluate = _real_eval
+            print(f"  {'✓' if retried and retried[0] == '/contact/' else '✗'} "
+                  f"ページ描き変わりでリンク取得に失敗しても1度やり直す"
+                  f"(旧実装は黙って『リンク無し』にしていた): {retried[0] if retried else None}")
 
             print("\n── 『本物の問い合わせフォーム』の判定(トップページで探索を止めない) ──")
             form_cases = [
@@ -1530,6 +1593,35 @@ if __name__ == "__main__":
                 got = _looks_like_real_contact_form(page)
                 print(f"  {'✓' if got == expect else '✗'} {label}: "
                       f"{'ここで確定' if got else '問い合わせページを探しに行く'}")
+
+            print("\n── 問い合わせページではフォームの描画を長めに待つ(2026-09-21) ──")
+            # 松下印刷の /contact/ は素のHTMLに<form>も<input>も無く、完全にJSで組み立てる。
+            # 待ち時間がトップページと同じだと取りこぼす。逆にトップページで長く待つと
+            # 「フォームが無い会社」に無駄な時間をかけるので、URLで待ち方を変える
+            waits = {}
+            _orig_wait_sel = page.wait_for_selector
+
+            def _record_wait(sel, **kw):
+                waits["timeout"] = kw.get("timeout")
+                raise RuntimeError("待ち時間だけ見たいので中断する(呼び出し側が握りつぶす)")
+
+            for label, url, expect in (
+                    ("トップページ", "https://example.test/", FORM_RENDER_WAIT_MS),
+                    ("問い合わせページ", "https://example.test/contact/", FORM_CONTACT_RENDER_WAIT_MS)):
+                page.route("**/*", lambda r: r.fulfill(
+                    status=200, content_type="text/html; charset=utf-8", body="<p>x</p>"))
+                try:
+                    page.goto(url, wait_until="domcontentloaded")
+                finally:
+                    page.unroute("**/*")
+                waits.clear()
+                page.wait_for_selector = _record_wait
+                try:
+                    _wait_for_form(page)
+                finally:
+                    page.wait_for_selector = _orig_wait_sel
+                got = waits.get("timeout")
+                print(f"  {'✓' if got == expect else '✗'} {label}では{expect}ms待つ: {got}ms")
 
             print("\n── iframeで埋め込まれたフォーム(Googleフォーム等) ──")
             page.set_content("""

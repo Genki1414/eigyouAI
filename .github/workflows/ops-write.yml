@@ -132,7 +132,6 @@ jobs:
     environment: server-exec        # ← ここで承認待ちになる
     permissions:
       contents: read
-      administration: read
     env:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}

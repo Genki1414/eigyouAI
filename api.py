@@ -4681,6 +4681,22 @@ def self_test(port=8899):
             fn(con, _argparse.Namespace(**kw))
         return buf.getvalue()
 
+    # このテストが「他のテストが残した行」に依存しないよう、専用の行を自分で入れる
+    # (最初はform_send_logへのINSERTより前に置いてしまい、CIだけ落ちた)
+    _slr_now = datetime.now().isoformat(timespec="seconds")
+    for _cid, _st, _rc, _url, _ev in (
+            (990101, "FAILED_UNSUPPORTED", "form_not_found", "https://slr-a.example.co.jp/", None),
+            (990102, "SUCCESS", "success_text_matched", "https://slr-b.example.co.jp/contact/",
+             "ありがとうございます"),
+            (990103, "SUCCESS", "url_changed_after_submit", "https://slr-c.example.co.jp/",
+             'https://slr-c.example.co.jp/?s=x (押した要素: a "Next" form外)')):
+        con.execute("""INSERT INTO form_send_log
+            (company_id, tenant_id, target_url, contact_url, started_at, status,
+             reason_code, success_evidence, list_id)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (_cid, tid_a, _url, _url, _slr_now, _st, _rc, _ev, 9901))
+    con.commit()
+
     out_reasons = _run_cli(SLR.cmd_reasons, days=3650)
     t("reasons: 理由別の件数を出せる", "form_not_found" in out_reasons)
     t("reasons: 失敗理由に日本語ラベルが付く",
@@ -4701,9 +4717,19 @@ def self_test(port=8899):
     out_runs = _run_cli(SLR.cmd_runs, days=3650, limit=5)
     t("runs: 実行(リスト)単位の成績を出せる", "成功率" in out_runs)
 
+    out_weak = _run_cli(SLR.cmd_urls, reason="url_changed_after_submit", status=None,
+                         days=3650, limit=5)
+    t("urls: URL変化だけの成功で『押した要素』が読める(T117。偽の成功の判別に使う)",
+      'a "Next" form外' in out_weak)
+
+    _n_before = con.execute("SELECT COUNT(*) FROM form_send_log").fetchone()[0]
+    _run_cli(SLR.cmd_reasons, days=3650)
+    _run_cli(SLR.cmd_urls, reason=None, status=None, days=3650, limit=5)
     t("集計CLIはDBを変更しない(参照のみ)",
-      con.execute("SELECT COUNT(*) FROM form_send_log").fetchone()[0]
-      == con.execute("SELECT COUNT(*) FROM form_send_log").fetchone()[0])
+      con.execute("SELECT COUNT(*) FROM form_send_log").fetchone()[0] == _n_before)
+
+    con.execute("DELETE FROM form_send_log WHERE company_id IN (990101,990102,990103)")
+    con.commit()
 
     print("\n── 送信ログの備考・手動送信済み(MIKOMERU同等) ──")
     st, r = post_auth(f"/api/tenant/send-log/{log_id}/note", {"note": "架電済み"}, token=key_b)

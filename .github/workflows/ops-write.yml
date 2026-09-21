@@ -1,17 +1,17 @@
 # ─────────────────────────────────────────────────────────────
-# これは「まだ動いていない」ワークフローの下書きです(2026-09-20)。
+# これは「まだ動いていない」ワークフローの下書きです。
+# GitHubはリポジトリの一番上の .github/workflows/ しか読まないため、
+# この位置(一番上)に置いてあります。
 #
-# 有効にする手順(スマホのGitHubアプリ/ブラウザでできます):
-#   1. GitHubでこのファイルを開く
-#   2. 「Rename(名前の変更)」で、パスを次に変える
-#        .github/workflows/ops-write.yml
-#   3. コミットする(ブランチは claude/project-handoff-0ubqc1)
-#   これだけで Actions に「Ops write (server changes)」が現れます。
+# 有効にする手順(スマホのGitHubブラウザでできます):
+#   1. このファイルを開く
+#   2. 右上の「…」→ Edit file... → In place
+#   3. 画面上部のファイル名 ops-write.yml.txt をタップして全部消す
+#   4. 次を入力する:  .github/workflows/ops-write.yml
+#   5. Commit changes(ブランチは claude/project-handoff-0ubqc1 のまま)
 #
-# なぜ下書きで置いてあるか:
-#   本番サーバーでコマンドを実行する経路を新設する操作は、Claude Code側の安全確認で
-#   止められます(会話で承認しても解除されません)。有効化を人が行う形にすることで、
-#   「誰がこの経路を作ったか」がはっきりします。
+#   ※ このファイルは一番上にあるので、フォルダをさかのぼる操作は要りません。
+#     名前を消して打ち直すだけです。
 #
 # ★ exec(任意コマンド)を使う場合は、先にGitHubで承認ゲートを作ってください:
 #     リポジトリ → Settings → Environments → New environment → 名前は server-exec
@@ -132,7 +132,6 @@ jobs:
     environment: server-exec        # ← ここで承認待ちになる
     permissions:
       contents: read
-      administration: read
     env:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}

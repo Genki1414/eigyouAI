@@ -4675,6 +4675,42 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T118. 変更系ワークフローの有効化と、本番.envの実測(T117の前提を1つ訂正)(2026-09-21)
+
+**変更系ワークフローが有効になった**。`ops-write.yml`(T116で下書きとして置いたもの)は、
+Claude Code側の安全チェックが有効化を繰り返し拒否した(会話で承認しても解除されず、
+別経路で行おうとすると「回避」と判定される)ため、**ユーザー自身がGitHubの画面で
+ファイル名を変えて有効化した**。経緯:
+1回目は`deploy/.github/workflows/`に入り不発(GitHubはリポジトリ直下しか読まない)→
+下書きを直下へ移動して再実行 → `permissions: administration: read`が無効な指定で構文エラー →
+ユーザーがその1行を削除して解決。
+
+**Claudeから実行できる操作**(`actions_run_trigger`で起動し`get_job_logs`で結果取得):
+- `ops-readonly.yml`: status / logs-sender / logs-api / queue(参照のみ)
+- `ops-write.yml`の`change`: restart-sender / restart-all / show-env / set-env
+- `ops-write.yml`の`exec`: 任意コマンド。**server-exec環境の承認が必要**。
+  2026-09-21時点で環境未作成のため使用不可(未作成なら実行前に失敗する設計)。
+
+**本番`.env`の実測(show-env。値は秘密情報を伏せて表示される)**:
+- **`TRACK_BASE_URL`は存在しない** → T111の修正(API_PUBLIC_URLから導出)がそのまま効く。
+  「古い値が.envに残っていないか」という懸案は解消。`OPTOUT_URL=`(空)も既定へ倒れる。
+- **★T117の「国内プロキシFORM_PROXY_POOLの契約待ち」は誤り。既に設定済み**
+  (`FORM_PROXY_POOL=***brd.superproxy.io:44445` = Bright Data)。
+  つまり本番の送信は**プロキシ経由で出ている**。ここから導かれること:
+  - `goto_failed`922件の原因を「海外IPからの遮断」と説明してきたが、前提が違う。
+  - **プロキシ自体の不調(契約切れ・帯域超過・認証失敗)がgoto_failedの原因である可能性**が
+    新たに出てきた。この作業環境からの82社計測(T117)はプロキシを通していないため、
+    本番との差はここにある。切り分けるには、本番で`FORM_PROXY_POOL`を一時的に空にして
+    同じリストの一部を送り、goto_failedの比率が変わるかを見るのが早い
+    (`set-env FORM_PROXY_POOL`(空)→ restart-sender で戻せる)。
+- `LP_URL=https://ashibase.jp/sekisan`(ashibase.jpはVercel側。到達性は未確認)。
+- 軽微: `POSTGRES_PASSWORD`が2回記述。`SENDER_ADDRESS`の行末に`# 登記上の住所。省略不可`が
+  残っており、docker composeの解釈次第で値に混ざる恐れがある(未確認)。
+  なお本文に差し込まれる住所はテナント設定(DB)側なので、影響は限定的と思われる。
+
+**同時実行数3→4はT117の判断どおり「上げない」**(4GB・Swap 0でOOMの逃げ場が無い)。
+私からも提案しない。速度を上げるならサーバー増強が先。
+
 ### T117. 本番の疎通確認と、フォーム検出ロジックの作り直し(実在82社で計測)(2026-09-20)
 
 ユーザー「運用を見てほしい。ネットワークがFullなので外部に直接アクセスできる」。

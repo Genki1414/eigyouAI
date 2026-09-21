@@ -4668,6 +4668,43 @@ def self_test(port=8899):
     st, r = get_auth("/api/tenant/send-log", token=key_b)
     t("他テナントのログは見えない", st == 200 and len(r.get("log", [])) == 0)
 
+    print("\n── 送信ログの集計CLI(T117: 会社名を出さず、理由と検証用URLだけ出す) ──")
+    import argparse as _argparse
+    import io as _io
+    import contextlib as _contextlib
+
+    import send_log_report_cli as SLR
+
+    def _run_cli(fn, **kw):
+        buf = _io.StringIO()
+        with _contextlib.redirect_stdout(buf):
+            fn(con, _argparse.Namespace(**kw))
+        return buf.getvalue()
+
+    out_reasons = _run_cli(SLR.cmd_reasons, days=3650)
+    t("reasons: 理由別の件数を出せる", "form_not_found" in out_reasons)
+    t("reasons: 失敗理由に日本語ラベルが付く",
+      "問い合わせフォームが見つからない" in out_reasons)
+    t("reasons: 成功理由にも確度つきのラベルが付く(T117)",
+      "完了文言を確認できた" in out_reasons or "URLが変わった" in out_reasons)
+    t("reasons: 成功率を出す", "成功" in out_reasons and "%" in out_reasons)
+
+    out_urls = _run_cli(SLR.cmd_urls, reason="form_not_found", status=None,
+                         days=3650, limit=5)
+    t("urls: 指定した理由のURLだけを出す", "example.co.jp" in out_urls)
+    t("urls: 会社名は出さない(個人情報・営業情報を出さない方針)",
+      "会社名は出しません" in out_urls)
+    # 送信ログに会社名が混ざっていないこと(URLと根拠と時刻だけ)
+    t("urls: 出力にテナント名・担当者名が混ざらない",
+      "テストA" not in out_urls and "担当" not in out_urls)
+
+    out_runs = _run_cli(SLR.cmd_runs, days=3650, limit=5)
+    t("runs: 実行(リスト)単位の成績を出せる", "成功率" in out_runs)
+
+    t("集計CLIはDBを変更しない(参照のみ)",
+      con.execute("SELECT COUNT(*) FROM form_send_log").fetchone()[0]
+      == con.execute("SELECT COUNT(*) FROM form_send_log").fetchone()[0])
+
     print("\n── 送信ログの備考・手動送信済み(MIKOMERU同等) ──")
     st, r = post_auth(f"/api/tenant/send-log/{log_id}/note", {"note": "架電済み"}, token=key_b)
     t("他テナントの送信ログの備考は更新できない(404)", st == 404)

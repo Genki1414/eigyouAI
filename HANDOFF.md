@@ -4945,6 +4945,27 @@ URL変化は傍証として弱いので、**CSVを見て真偽を判断できる
 `<a>`は0になった(`INPUT form外`2件は、入力欄がそもそも`<form>`に属さない
 JS送信のサイトで、押す対象としては妥当)。
 
+**11. 既に送った分のログを外出先から見られるようにした(2026-09-21 追記)**
+
+ユーザー「既に送った分のログは取れるの?」。それまで`ops-readonly.yml`は
+status/logs/queueの4つだけで、**送信ログ(form_send_log)は見られなかった**
+(CSVダウンロードはテナントAPIキーが要り、管理画面=PCからしか開けない)。
+
+- `send_log_report_cli.py`(新規。**参照専用**)。`reasons`(結果・理由別の件数と成功率)、
+  `urls`(指定した理由の問い合わせ先URLと「押した要素」)、`runs`(実行単位の成績)。
+  **会社名・送信本文・メールアドレス・電話番号は一切出さない**。出すのは件数と、
+  検証用の問い合わせ先URL(公開されている企業サイトのURL)だけ。DBは一切変更しない。
+- `ops-readonly.yml`に5つのactionを追加: `send-reasons` / `send-runs` /
+  `send-urls-weak`(URL変化だけで成功にした分) / `send-urls-noform` / `send-urls-nosubmit`。
+- 成功理由に**確度**を付けて表示する:
+  `success_text_matched`=確度high、`form_disappeared_after_submit`=確度mid、
+  `url_changed_after_submit`=**確度low(押した対象を要確認)**。
+  「10.」で入れた「押した要素」の記録と組み合わせると、`send-urls-weak`の出力で
+  `(押した要素: a "Next" form外)`のような**偽の成功が一目で分かる**。
+
+これで、PCが無くてもClaudeから`actions_run_trigger`で実行して`get_job_logs`で
+結果を読める。**次に送信したあと、まずこれを見ること。**
+
 **計測の再現手順**: `git worktree add --detach <dir> <古いコミット>`で旧実装を取り出し、
 診断スクリプトの`sys.path`をそちらへ向ければ新旧を同条件で比較できる。
 **送信は一切しない**(送信ボタンは探すだけで押さない)こと。

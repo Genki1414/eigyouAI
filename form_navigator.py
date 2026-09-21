@@ -785,9 +785,31 @@ def _button_labels(el):
     return squash(parts[0]), squash(parts[1])
 
 
+def _is_navigating_link(el):
+    """押すと別ページへ移動するだけの<a>か(2026-09-21)。
+
+    フォームを送信するリンクは href="#" や javascript: を使うのが通例で、
+    実URLを持つ<a>は「お申込みはこちら」のような単なる導線であることが多い。
+    それを送信ボタンとして押すと、入力内容は送られないのにページが変わるため、
+    url_changed_after_submit で**成功と誤記録される**。実測で
+    阿波製紙の「オンライン商談お申込み」、ネオビエントの「Next」を掴んでいた。"""
+    try:
+        return bool(el.evaluate("""e => {
+            if (e.tagName !== 'A') return false;
+            const h = e.getAttribute('href') || '';
+            if (!h || h.startsWith('#')) return false;
+            if (h.toLowerCase().startsWith('javascript:')) return false;
+            return true;
+        }"""))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _is_submit_candidate(el, text_re):
     visible_text, blob = _button_labels(el)
     if _NOT_SUBMIT_TEXT_RE.search(visible_text):
+        return False
+    if _is_navigating_link(el):
         return False
     if text_re.search(visible_text):
         return True
@@ -858,6 +880,21 @@ def _submit_form_directly(scope, form_el):
         }"""))
     except Exception:  # noqa: BLE001
         return False
+
+
+def _describe_element(el):
+    """ログ用に「何を押したか」を短い文字列にする。"""
+    try:
+        return el.evaluate("""e => {
+            const t = e.tagName.toLowerCase();
+            const label = (e.innerText || e.getAttribute('value') || e.getAttribute('alt') || '').trim().slice(0, 24);
+            const type = e.getAttribute('type') || '';
+            const inForm = !!e.closest('form');
+            return t + (type ? '[' + type + ']' : '') + ' ' + JSON.stringify(label)
+                   + (inForm ? ' form内' : ' form外');
+        }""") or "?"
+    except Exception:  # noqa: BLE001
+        return "?"
 
 
 def _owning_form(el):
@@ -1303,15 +1340,20 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 except Exception:  # noqa: BLE001
                     pass
                 submit_btn = _find_button(scope, _SUBMIT_TEXT_RE, form_el=form_el)
+            # 何を押したかを残す。url_changed_after_submitでSUCCESSにした分が
+            # 本当に送信できていたのかを、あとからCSVで判断するために使う
+            clicked_desc = ""
             if submit_btn:
                 result.submit_attempted = True
+                clicked_desc = _describe_element(submit_btn)
                 if not _click(submit_btn):
                     result.status = "FAILED_RETRYABLE"
                     result.reason_code = "submit_click_failed"
                     return result
             elif _submit_form_directly(scope, form_el):
+                clicked_desc = "form.requestSubmit()"
                 # 押せる送信ボタンは無かったが、フォーム自体は送信できた
-                # (CSSで潰された input[type=submit] 等。_submit_form_directly参照)
+                # (CSSで隠された input[type=submit] 等。_submit_form_directly参照)
                 result.submit_attempted = True
             else:
                 result.status = "FAILED_UNSUPPORTED"
@@ -1380,7 +1422,10 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             if url_changed:
                 result.status = "SUCCESS"
                 result.reason_code = "url_changed_after_submit"
-                result.success_evidence = page.url
+                # URL変化は「送信できた」の傍証としては弱い(押した対象が単なる
+                # リンクでも成立してしまう)。何を押したのかを併記して、あとから
+                # 真偽を判断できるようにする
+                result.success_evidence = f"{page.url} (押した要素: {clicked_desc})"
                 return result
             if form_gone:
                 result.status = "SUCCESS"
@@ -1718,6 +1763,45 @@ if __name__ == "__main__":
             page.set_content('<form><input type="text" name="q"><input type="submit" value="検索"></form>')
             print(f"  {'✓' if _find_button(page, _SUBMIT_TEXT_RE) is None else '✗'} "
                   f"検索ボタンしか無いページでは送信ボタン無しと判定する")
+
+            print("\n── 押すと移動するだけの<a>を送信ボタンにしない(偽の成功を防ぐ) ──")
+            # 実測: 阿波製紙「オンライン商談お申込み」、ネオビエント「Next」を掴んでいた。
+            # 押すと入力内容は送られないのにページが変わるため、
+            # url_changed_after_submit でSUCCESSと誤記録される
+            link_cases = [
+                ("実URLへのリンク(移動するだけ)",
+                 '<form><input name="a"><textarea></textarea></form>'
+                 '<a href="/online-meeting/">オンライン商談お申込み</a>', None),
+                ("href=#のリンク(JSで送信する作り)",
+                 '<form><input name="a"><textarea></textarea>'
+                 '<a href="#" onclick="return false">送信する</a></form>', "送信する"),
+                ("javascript:のリンク",
+                 '<form><input name="a"><textarea></textarea>'
+                 '<a href="javascript:void(0)">送信する</a></form>', "送信する"),
+                ("英語のNextリンク(移動するだけ)",
+                 '<form><input name="a"><textarea></textarea></form>'
+                 '<a href="/step2/">Next</a>', None),
+            ]
+            for label, html, expect in link_cases:
+                page.set_content(html)
+                got_el = _find_button(page, _SUBMIT_TEXT_RE)
+                got = ""
+                if got_el:
+                    got = got_el.evaluate(
+                        "e => (e.innerText || e.getAttribute('value') || '').trim()")
+                ok_link = (got or None) == expect
+                print(f"  {'✓' if ok_link else '✗'} {label}: "
+                      f"{'選ばない' if expect is None else '選ぶ'} → {got or 'なし'}")
+
+            print("\n── 何を押したかを記録する(url_changedの真偽をCSVで判断するため) ──")
+            page.set_content('<form id="f"><input name="a">'
+                             '<button type="submit">送信する</button></form>')
+            desc = _describe_element(page.query_selector("#f button"))
+            ok_desc = "button" in desc and "送信する" in desc and "form内" in desc
+            print(f"  {'✓' if ok_desc else '✗'} 押した要素を短く説明できる: {desc}")
+            page.set_content('<a href="/x/">申し込む</a>')
+            desc2 = _describe_element(page.query_selector("a"))
+            print(f"  {'✓' if 'form外' in desc2 else '✗'} form外かどうかも分かる: {desc2}")
 
             print("\n── 押せる送信ボタンが無いフォームを直接送信する(最後の手段) ──")
             page.set_content("""

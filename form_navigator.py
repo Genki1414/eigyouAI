@@ -976,7 +976,10 @@ def discover_contact_url(start_url, *, headless=True):
                     return result
 
                 contact_url, discover_err = _resolve_contact_page(page, start_url)
-                if _has_fillable_form(page):
+                # navigate_and_submit()と同じ判定にする(iframe内の埋め込みフォームも
+                # 「見つかった」とみなす)。ここだけメインフレームしか見ないと、
+                # CSV取込で埋まるcontact_urlと実際に送信できる範囲がズレる
+                if _form_scopes(page):
                     result["status"] = "FOUND"
                     result["contact_url"] = contact_url
                 else:

@@ -200,7 +200,9 @@ _FIELD_HINTS = {
     "last_name": ["姓", "苗字", "last name", "family name"],
     "first_name": ["名", "first name", "given name"],
     "name": ["お名前", "氏名", "担当者名", "ご担当者", "ご担当者名", "your name", "name"],
-    "furigana": ["フリガナ", "ふりがな", "カナ", "かな", "kana"],
+    # "furi"(白石建設のname="furi")・"yomi"はふりがな欄の実在する命名。
+    # 2026-09-21の本番URL調査で、分類できなかった唯一の欄がこれだった
+    "furigana": ["フリガナ", "ふりがな", "カナ", "かな", "kana", "furi", "yomi"],
     "department": ["部署", "部署名", "所属", "department", "division"],
     "position": ["役職", "役職名", "position", "job title"],
 }
@@ -1550,6 +1552,11 @@ if __name__ == "__main__":
                   <textarea name="field3" placeholder="ご相談内容をご記入ください"></textarea>
                   <input type="submit" value="確認する">
                 </form>""", {"company", "email", "message"}),
+            ("ふりがな欄の別名(name=furi / yomi。実測: 白石建設)", """
+                <form>
+                  <input name="furi" placeholder="">
+                  <input name="yomi_sei" placeholder="">
+                </form>""", {"furigana"}),
             ("姓名分割 + aria-label", """
                 <form>
                   <input name="sei" aria-label="姓"><input name="mei" aria-label="名">

@@ -507,6 +507,14 @@ class FormSender(BaseSender):
         structured_address = "".join(filter(None, [
             sender.prefecture, sender.city, sender.block, sender.building]))
         values = {"company": sender.name, "name": sender.name, "email": sender.email,
+                  # 「メールアドレス（確認用）」。form_navigatorは email_confirm として
+                  # 正しく判定していたのに、ここに値が無かったため**必ず空のまま**になり、
+                  # 必須のフォームで弾かれていた(2026-09-21。本番の
+                  # error_message_detected 625件を追っていて発見)。emailと同じ値を入れる
+                  "email_confirm": sender.email,
+                  # 「お問い合わせ種類」がテキスト欄のフォーム向け(プルダウンなら
+                  # _fill_selects が選ぶ)。件名が無ければ本文の代わりになる短い語を入れる
+                  "inquiry_type": subject or "お問い合わせ",
                   "phone": sender.phone or "",
                   "address": structured_address or (sender.address or ""),
                   "postal_code": sender.postal_code or "",
@@ -1247,6 +1255,17 @@ if __name__ == "__main__":
                   f"first_name={v_default.get('first_name')!r} furigana={v_default.get('furigana')!r}")
             print(f"  {'✓' if ok_default else '✗'} 未設定なら姓欄=会社名/名欄・フリガナ欄・郵便番号は空"
                   "(以前は名欄にも会社名を複製しフリガナは固定文字列だった)")
+            # 2026-09-21: form_navigatorが判定する種類に対して、値の側が欠けていないか。
+            # email_confirm が無いまま「メールアドレス（確認用）」が必須のフォームへ
+            # 送っていて、本番で弾かれていた
+            import form_navigator as _FN_KEYS
+            _kinds = set(_FN_KEYS._FIELD_HINTS) - {"email_confirm"}
+            _missing = sorted(k for k in _kinds if k not in v_default)
+            print(f"  {'✓' if not _missing else '✗'} form_navigatorが判定する欄の種類すべてに"
+                  f"値が用意されている: 不足={_missing}")
+            ok_confirm = v_default.get("email_confirm") == v_default.get("email") != None
+            print(f"  {'✓' if ok_confirm else '✗'} 「メールアドレス（確認用）」にメールと同じ値を入れる: "
+                  f"{v_default.get('email_confirm')!r}")
 
             tid_custom, _ = OF.add_tenant(con, "test-sender-custom", "custom@example.co.jp",
                                            sender_name="東北三上機材株式会社")

@@ -28,6 +28,8 @@ on:
           - send-urls-noform   # 送信ログ: 問い合わせフォームが見つからなかったURL
           - send-urls-nosubmit # 送信ログ: 送信ボタンが見つからなかったURL
           - send-error-hints   # 送信ログ: 検知したエラー文言の内訳(誤検出の確認)
+          - send-urls-error    # 送信ログ: 送信後にエラー表示が出たURL(必須欄の取りこぼし調査)
+          - send-urls-nofield  # 送信ログ: 入力できる欄が見つからなかったURL
 
 jobs:
   look:
@@ -98,6 +100,16 @@ jobs:
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \
                   python3 send_log_report_cli.py error-hints --days 30 --limit 30" ;;
+            send-urls-error)
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T sender \
+                  python3 send_log_report_cli.py urls \
+                    --reason error_message_detected --days 30 --limit 40" ;;
+            send-urls-nofield)
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T sender \
+                  python3 send_log_report_cli.py urls \
+                    --reason no_fields_filled --days 30 --limit 40" ;;
             *)
               echo "::error::未知のaction: $ACTION"; exit 1 ;;
           esac

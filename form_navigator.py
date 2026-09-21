@@ -455,6 +455,18 @@ _FRAME_URL_DENY_RE = re.compile(
     r"channel\.io|karte|sync\.|adservice", re.I)
 
 
+# 問い合わせページ探索の失敗理由。**reason_codeには必ずコードを入れる**こと
+# (2026-09-21: 日本語メッセージをそのままreason_codeにしていたため、本番の集計で
+# 「問い合わせページへのリンクが見つからず」が65件、コードの欄に日本語のまま
+# 入っていた。集計もラベル付けも効かず、画面にも生の日本語が出ていた)。
+DISCOVER_ERROR_JA = {
+    "contact_link_not_found": "問い合わせページへのリンクが見つからない",
+    "contact_page_unreachable": "問い合わせページを開けない",
+    "contact_search_timeout": "問い合わせページを探す時間の上限に達した",
+    "form_not_found": "問い合わせフォームが見つからない",
+}
+
+
 def _looks_like_contact_page(url):
     low = (url or "").lower()
     return any(h in low for h in _CONTACT_PATH_HINTS)
@@ -646,12 +658,12 @@ def _resolve_contact_page(page, start_url, deadline=None):
     for u in (start_url, page.url):
         if u:
             visited.add(u.split("#")[0])
-    last_err = "問い合わせページへのリンクが見つからず"
+    last_err = "contact_link_not_found"
     discover_until = time.monotonic() + FORM_DISCOVER_BUDGET_MS / 1000.0
     for _ in range(MAX_CRAWL_PAGES):
         # 探索そのものの上限と、1社あたりの上限の両方で打ち切る
         if time.monotonic() > discover_until or (deadline is not None and deadline.expired()):
-            last_err = "問い合わせページを探す時間の上限に達した"
+            last_err = "contact_search_timeout"
             break
         found = _find_contact_link(page, exclude=visited)
         if not found:
@@ -663,12 +675,12 @@ def _resolve_contact_page(page, start_url, deadline=None):
         try:
             page.goto(absolute_url, timeout=nav_timeout, wait_until="domcontentloaded")
         except Exception as e:  # noqa: BLE001
-            last_err = f"問い合わせページへの遷移に失敗: {type(e).__name__}"
+            last_err = "contact_page_unreachable"
             continue
         _wait_for_form(page)
         if _form_scopes(page):
             return page.url, None
-        last_err = "問い合わせページにフォームが見つからず"
+        last_err = "form_not_found"
     return page.url, last_err
 
 
@@ -1133,7 +1145,7 @@ def discover_contact_url(start_url, *, headless=True):
                 else:
                     result["status"] = "NO_FORM"
                     result["contact_url"] = contact_url
-                    result["error"] = discover_err
+                    result["error"] = DISCOVER_ERROR_JA.get(discover_err, discover_err)
                 return result
             finally:
                 browser.close()
@@ -1244,7 +1256,9 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             scopes = _form_scopes(page)
             if not scopes:
                 result.status = "FAILED_UNSUPPORTED"
+                # discover_errはコード(DISCOVER_ERROR_JA参照)。日本語はerror_messageへ入れる
                 result.reason_code = discover_err or "form_not_found"
+                result.error_message = DISCOVER_ERROR_JA.get(result.reason_code, "")
                 result.page_text_snippet = page_text[:400]
                 return result
             scope = scopes[0]
@@ -1664,6 +1678,20 @@ if __name__ == "__main__":
                   f"ページ描き変わりでリンク取得に失敗しても1度やり直す"
                   f"(旧実装は黙って『リンク無し』にしていた): {retried[0] if retried else None}")
 
+            print("\n── 探索の失敗は必ずコードで返す(2026-09-21。本番で日本語が漏れていた) ──")
+            # 本番の集計で「問い合わせページへのリンクが見つからず」が65件、
+            # reason_codeの欄に日本語のまま入っていた(集計もラベル付けも効かない)
+            page.set_content('<p>リンクも入力欄も無いページ</p>')
+            _, err_code = _resolve_contact_page(page, "https://example.test/")
+            print(f"  {'✓' if err_code == 'contact_link_not_found' else '✗'} "
+                  f"リンクが無い場合はコードを返す: {err_code!r}")
+            print(f"  {'✓' if err_code in DISCOVER_ERROR_JA else '✗'} "
+                  f"返したコードに日本語ラベルが定義されている: "
+                  f"{DISCOVER_ERROR_JA.get(err_code)!r}")
+            not_ja = all(not any("\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff"
+                                  for ch in code) for code in DISCOVER_ERROR_JA)
+            print(f"  {'✓' if not_ja else '✗'} コード自体に日本語が混ざっていない")
+
             print("\n── 『本物の問い合わせフォーム』の判定(トップページで探索を止めない) ──")
             form_cases = [
                 ("検索窓だけのトップページ",
@@ -1887,7 +1915,7 @@ if __name__ == "__main__":
                     elapsed = time.monotonic() - t_start
                 finally:
                     page.unroute("**/*")
-                ok_budget = (budget_err == "問い合わせページを探す時間の上限に達した"
+                ok_budget = (budget_err == "contact_search_timeout"
                              and hop["n"] < MAX_CRAWL_PAGES + 2 and elapsed < 10)
                 print(f"  {'✓' if ok_budget else '✗'} 上限を過ぎたら探索を打ち切る"
                       f"({elapsed:.1f}秒 / 開いたページ{hop['n']}枚, 理由={budget_err!r})")
@@ -1934,7 +1962,7 @@ if __name__ == "__main__":
                     page.unroute("**/*")
             finally:
                 sys.modules[__name__].FORM_RENDER_WAIT_MS = _orig_render2
-            print(f"  {'✓' if dl_err == '問い合わせページを探す時間の上限に達した' and hop2['n'] <= 2 else '✗'} "
+            print(f"  {'✓' if dl_err == 'contact_search_timeout' and hop2['n'] <= 2 else '✗'} "
                   f"1社あたりの締め切りでも探索を打ち切る(開いたページ{hop2['n']}枚, 理由={dl_err!r})")
 
             print("\n── プルダウンの選択肢を1回で取る(CDPの往復を減らす) ──")

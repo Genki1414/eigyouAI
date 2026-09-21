@@ -4966,6 +4966,39 @@ status/logs/queueの4つだけで、**送信ログ(form_send_log)は見られな
 これで、PCが無くてもClaudeから`actions_run_trigger`で実行して`get_job_logs`で
 結果を読める。**次に送信したあと、まずこれを見ること。**
 
+**12. 本番ログを読んで分かったこと(2026-09-21 追記)**
+
+「11.」の`send-reasons`を本番で実行した結果(直近30日=9/19の四国送信、試行6,742件):
+
+| 理由 | 件数 | 割合 |
+|---|---|---|
+| captcha_detected | 1,506 | 22.3% |
+| **success_text_matched(成功・確度high)** | **1,049** | 15.6% |
+| goto_failed | 970 | 14.4% |
+| success_not_confirmed | 824 | 12.2% |
+| error_message_detected | 625 | 9.3% |
+| form_not_found | 598 | 8.9% |
+| **url_changed_after_submit(成功・確度low)** | **426** | 6.3% |
+| submit_button_not_found | 271 | 4.0% |
+| required_field_unfilled | 183 | 2.7% |
+
+**成功1,485件 / 試行6,742件 = 22.0%**。
+
+**★成功の29%(426件)は「URLが変わっただけ」が根拠**。「9.」「10.」で潰した
+検索ボタン・リンク・カルーセルの誤爆はここに含まれる。9/19時点では「押した要素」を
+記録していないため個々の真偽は判別できないが、**確実なのは完了文言で確認できた
+1,049件**で、実際の到達数はその間のどこか。次回の送信からは`send-urls-weak`で
+1件ずつ判別できる。
+
+**★reason_codeに日本語が漏れていた(この集計で発見)**: `問い合わせページへのリンクが
+見つからず`が**65件、コードの欄に日本語のまま**入っていた。
+`result.reason_code = discover_err or "form_not_found"`の`discover_err`が日本語
+メッセージだったため。集計もラベル付けも効かず、画面にも生の日本語が出ていた。
+→ 探索の失敗を`contact_link_not_found` / `contact_page_unreachable` /
+`contact_search_timeout` / `form_not_found`のコードに分け、日本語は
+`DISCOVER_ERROR_JA`と各画面のラベル辞書へ移した。
+**コード自体に日本語が混ざっていないことをテストで固定した**(同じ漏れの再発防止)。
+
 **計測の再現手順**: `git worktree add --detach <dir> <古いコミット>`で旧実装を取り出し、
 診断スクリプトの`sys.path`をそちらへ向ければ新旧を同条件で比較できる。
 **送信は一切しない**(送信ボタンは探すだけで押さない)こと。

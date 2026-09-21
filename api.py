@@ -4726,6 +4726,11 @@ def self_test(port=8899):
          "https://slr-d.example.co.jp/contact/", _slr_now, "FAILED_UNSUPPORTED",
          "error_message_detected", "送信後ページにエラー文言を検知: 再度お試しください", 9901))
     con.commit()
+    out_deliv = _run_cli(SLR.cmd_delivery, days=3650)
+    t("delivery: 送信処理が通った率(他社比較用)を会社数で出せる",
+      "送信ボタンを押せた" in out_deliv and "送信処理が通った率" in out_deliv)
+    t("delivery: 届いた可能性の上限も出す", "届いた可能性がある上限" in out_deliv)
+
     out_hints = _run_cli(SLR.cmd_error_hints, days=3650, limit=10)
     t("error-hints: 検知したエラー文言を件数つきで出せる", "再度お試しください" in out_hints)
     t("error-hints: 誤検出を疑う観点を添える", "誤判定" in out_hints)

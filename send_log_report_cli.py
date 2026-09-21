@@ -93,6 +93,49 @@ def cmd_urls(con, args):
             print(f"      エラー: {str(r['error_message'])[:150]}")
 
 
+def cmd_delivery(con, args):
+    """「どこまで進めたか」を会社数で出す(2026-09-21)。
+
+    成功の数え方はサービスによって違う。ヒラケルは完了文言・URL変化・フォーム消失で
+    判定しているが、他社が「送信処理が通った率」を成功と呼んでいる場合、それは
+    **送信ボタンを押せた会社の割合**に相当する。同じものさしで比べられるよう、
+    1試行=1行のログを**会社単位**に畳んで段階別に出す(再試行や重複送信で
+    水増しされないよう COUNT(DISTINCT company_id) で数える)。"""
+    since = _since(args.days)
+    row = con.execute("""SELECT
+            COUNT(DISTINCT company_id) companies,
+            COUNT(DISTINCT CASE WHEN submit_attempted=1 THEN company_id END) submitted,
+            COUNT(DISTINCT CASE WHEN status='SUCCESS' THEN company_id END) success_any,
+            COUNT(DISTINCT CASE WHEN reason_code='success_text_matched'
+                  THEN company_id END) success_text,
+            COUNT(DISTINCT CASE WHEN status='SUCCESS'
+                  AND reason_code='url_changed_after_submit' THEN company_id END) success_url,
+            COUNT(DISTINCT CASE WHEN reason_code='success_not_confirmed'
+                  THEN company_id END) unconfirmed
+        FROM form_send_log WHERE started_at >= ?""", (since,)).fetchone()
+    n = row["companies"]
+    if not n:
+        print(f"直近{args.days}日の送信ログはありません")
+        return
+
+    def pct(x):
+        return f"{x*100.0/n:5.1f}%"
+
+    print(f"対象 {n:,}社(会社単位。再試行・重複は畳んで数えています)")
+    print("-" * 74)
+    print(f"  送信ボタンを押せた            {row['submitted']:6,d}社  {pct(row['submitted'])}"
+          "   ←『送信処理が通った率』はこれに相当")
+    print("  （内訳。同じ会社が複数回試行されると重複しうるため合計は一致しません）")
+    print(f"    完了文言を確認(確度high)    {row['success_text']:6,d}社  {pct(row['success_text'])}")
+    print(f"    URL変化のみ(確度low)        {row['success_url']:6,d}社  {pct(row['success_url'])}")
+    print(f"    完了を確認できない          {row['unconfirmed']:6,d}社  {pct(row['unconfirmed'])}")
+    print("-" * 74)
+    print(f"  ヒラケルが『成功』と記録      {row['success_any']:6,d}社  {pct(row['success_any'])}")
+    reached = row["success_any"] + row["unconfirmed"]
+    print(f"  届いた可能性がある上限        {reached:6,d}社  {pct(reached)}"
+          "   (成功 + 未確認)")
+
+
 def cmd_error_hints(con, args):
     """error_message_detected で「どの文言を検知したか」の内訳(T110で残った宿題)。
 
@@ -150,6 +193,9 @@ def main():
     p2.add_argument("--days", type=int, default=30)
     p2.add_argument("--limit", type=int, default=20)
 
+    p5 = sub.add_parser("delivery", help="どこまで進めたかを会社数で(他社比較用)")
+    p5.add_argument("--days", type=int, default=30)
+
     p4 = sub.add_parser("error-hints", help="エラー文言の内訳(誤検出の確認)")
     p4.add_argument("--days", type=int, default=30)
     p4.add_argument("--limit", type=int, default=30)
@@ -162,7 +208,7 @@ def main():
     con = db.connect()
     try:
         {"reasons": cmd_reasons, "urls": cmd_urls, "runs": cmd_runs,
-         "error-hints": cmd_error_hints}[args.cmd](con, args)
+         "error-hints": cmd_error_hints, "delivery": cmd_delivery}[args.cmd](con, args)
     finally:
         try:
             con.close()

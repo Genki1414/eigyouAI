@@ -805,11 +805,30 @@ def _is_navigating_link(el):
         return False
 
 
+def _is_carousel_control(el):
+    """スライダー(カルーセル)の送り矢印か(2026-09-21)。
+    押しても送信されないのにアンカーが付いてURLが変わるため、
+    url_changed_after_submit で偽の成功になりうる。実測:
+    ネオビエントの <a class="carousel-control-next" data-slide="next">Next</a>。
+    「Next」は_SUBMIT_TEXT_REに当たるが、日本企業のフォームで英語の
+    Nextが送信ボタンである例より、カルーセルである例の方が圧倒的に多い。"""
+    try:
+        return bool(el.evaluate("""e => {
+            const cls = (typeof e.className === 'string' ? e.className : '');
+            if (/carousel|slick|swiper|slide|glide|splide|owl-/i.test(cls)) return true;
+            if (e.hasAttribute('data-slide') || e.hasAttribute('data-bs-slide')) return true;
+            const p = e.closest('[class*=carousel], [class*=slider], [class*=swiper], [class*=slick]');
+            return !!p;
+        }"""))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _is_submit_candidate(el, text_re):
     visible_text, blob = _button_labels(el)
     if _NOT_SUBMIT_TEXT_RE.search(visible_text):
         return False
-    if _is_navigating_link(el):
+    if _is_navigating_link(el) or _is_carousel_control(el):
         return False
     if text_re.search(visible_text):
         return True
@@ -1791,6 +1810,27 @@ if __name__ == "__main__":
                         "e => (e.innerText || e.getAttribute('value') || '').trim()")
                 ok_link = (got or None) == expect
                 print(f"  {'✓' if ok_link else '✗'} {label}: "
+                      f"{'選ばない' if expect is None else '選ぶ'} → {got or 'なし'}")
+
+            print("\n── スライダーの送り矢印を送信ボタンにしない ──")
+            carousel_cases = [
+                ("Bootstrapのカルーセル(実測: ネオビエント)",
+                 '<form><input name="a"><textarea></textarea></form>'
+                 '<div class="carousel"><a class="carousel-control-next" href="#c" '
+                 'data-slide="next">Next</a></div>', None),
+                ("swiperの中のボタン",
+                 '<form><input name="a"><textarea></textarea></form>'
+                 '<div class="swiper-container"><button>次へ</button></div>', None),
+                ("カルーセルでない普通の送信ボタンは従来どおり",
+                 '<form><input name="a"><textarea></textarea>'
+                 '<button type="button">次へ</button></form>', "次へ"),
+            ]
+            for label, html, expect in carousel_cases:
+                page.set_content(html)
+                el2 = _find_button(page, _SUBMIT_TEXT_RE)
+                got = el2.evaluate("e => (e.innerText || '').trim()") if el2 else ""
+                ok_c = (got or None) == expect
+                print(f"  {'✓' if ok_c else '✗'} {label}: "
                       f"{'選ばない' if expect is None else '選ぶ'} → {got or 'なし'}")
 
             print("\n── 何を押したかを記録する(url_changedの真偽をCSVで判断するため) ──")

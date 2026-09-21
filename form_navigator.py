@@ -235,9 +235,12 @@ _CONTACT_PATH_RE = re.compile(
 #  - 大塚包装「お問い合わせ」→ /recruitment/entry_cgi.htm (採用エントリー)
 #  - 井村造船・宝海運 → /entry.php?eid=327730 (ブログ記事。"entry"を候補パスに
 #    入れていたのが誤爆していた。上の行から"entry"を外し、ここで明示的に除外する)
+# 注意: recruit/saiyo/career はここに入れないこと(2026-09-21に一度入れて戻した)。
+# オアシスは問い合わせフォームが /recruit/esimateform/ に置かれており、除外すると
+# 送信できていた会社を落とす。「採用に関するお問い合わせ」のような本当に採用窓口の
+# リンクは、上の_CONTACT_TEXT_NEGATIVE(文言側)で既に落ちる。
 _CONTACT_PATH_NEGATIVE_RE = re.compile(
-    r"recruit|saiyo|career|/job|entry|mypage|my-page|login|member|signup|register",
-    re.I)
+    r"entry|mypage|my-page|login|member|signup|register", re.I)
 
 # リンク文言。表記ゆれを広めに取る(「お問い合せ」「ご相談」「お見積り」まで)
 _CONTACT_TEXT_STRONG = ("お問い合わせ", "お問合せ", "お問合わせ", "お問い合せ", "問い合わせ",
@@ -1559,6 +1562,8 @@ if __name__ == "__main__":
                 ("お問い合わせ", "/entry.php?eid=327730", False,
                  "ブログ記事。候補パスに入れていた'entry'が誤爆していた(井村造船・宝海運)"),
                 ("お問い合わせ", "/mypage/login", False, "会員向けページ"),
+                ("お問い合わせ", "/recruit/esimateform/", True,
+                 "パスにrecruitを含むが見積フォーム。オアシスで実際に送信できていた"),
                 ("お問い合わせフォーム", "/inquiry/", True, "通常の問い合わせは従来どおり通る"),
             ]
             for text, href, expect, why in link_cases:

@@ -4730,6 +4730,8 @@ def self_test(port=8899):
     t("delivery: 送信処理が通った率(他社比較用)を会社数で出せる",
       "送信ボタンを押せた" in out_deliv and "送信処理が通った率" in out_deliv)
     t("delivery: 届いた可能性の上限も出す", "届いた可能性がある上限" in out_deliv)
+    t("delivery: 押したが弾かれた分を分けて出す(押せた≠届いた)",
+      "押したが相手に弾かれた" in out_deliv and "届いていない" in out_deliv)
 
     out_hints = _run_cli(SLR.cmd_error_hints, days=3650, limit=10)
     t("error-hints: 検知したエラー文言を件数つきで出せる", "再度お試しください" in out_hints)

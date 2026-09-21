@@ -111,7 +111,10 @@ def cmd_delivery(con, args):
             COUNT(DISTINCT CASE WHEN status='SUCCESS'
                   AND reason_code='url_changed_after_submit' THEN company_id END) success_url,
             COUNT(DISTINCT CASE WHEN reason_code='success_not_confirmed'
-                  THEN company_id END) unconfirmed
+                  THEN company_id END) unconfirmed,
+            COUNT(DISTINCT CASE WHEN reason_code IN
+                  ('error_message_detected','required_field_empty','submit_click_failed')
+                  THEN company_id END) blocked
         FROM form_send_log WHERE started_at >= ?""", (since,)).fetchone()
     n = row["companies"]
     if not n:
@@ -129,11 +132,18 @@ def cmd_delivery(con, args):
     print(f"    完了文言を確認(確度high)    {row['success_text']:6,d}社  {pct(row['success_text'])}")
     print(f"    URL変化のみ(確度low)        {row['success_url']:6,d}社  {pct(row['success_url'])}")
     print(f"    完了を確認できない          {row['unconfirmed']:6,d}社  {pct(row['unconfirmed'])}")
+    print(f"    押したが相手に弾かれた      {row['blocked']:6,d}社  {pct(row['blocked'])}"
+          "   ←届いていない")
     print("-" * 74)
     print(f"  ヒラケルが『成功』と記録      {row['success_any']:6,d}社  {pct(row['success_any'])}")
     reached = row["success_any"] + row["unconfirmed"]
     print(f"  届いた可能性がある上限        {reached:6,d}社  {pct(reached)}"
           "   (成功 + 未確認)")
+    print()
+    print("※『送信ボタンを押せた』は届いた数ではありません。押した後に相手のフォームが")
+    print("  『入力内容に問題があります』等で弾いた分(上の『弾かれた』)が含まれます。")
+    print("  他社が『送信処理が通った率』を成功と呼んでいる場合、その数字にはこの分が")
+    print("  入っている可能性があるため、比べるときはものさしを確認してください。")
 
 
 def cmd_error_hints(con, args):

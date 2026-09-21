@@ -597,15 +597,32 @@ def _find_contact_link(page, exclude=()):
                     pass
                 continue
             return None
-    best, best_score = None, 0
-    for l in links or []:
-        absolute = (l.get("abs") or "").split("#")[0]
-        if not absolute or absolute in exclude:
-            continue
-        score = _contact_link_score(l.get("text"), l.get("href"))
-        if score > best_score:
-            best, best_score = (l.get("href") or "", absolute), score
-    return best
+    def _best(ls):
+        best, best_score = None, 0
+        for l in ls or []:
+            absolute = (l.get("abs") or "").split("#")[0]
+            if not absolute or absolute in exclude:
+                continue
+            score = _contact_link_score(l.get("text"), l.get("href"))
+            if score > best_score:
+                best, best_score = (l.get("href") or "", absolute), score
+        return best
+
+    found = _best(links)
+    if found is None:
+        # ナビゲーションをJSで組み立てるサイトでは、入力欄より遅れてリンクが出る。
+        # _wait_for_form()は入力欄が現れた時点で抜けるので、その時点ではまだ
+        # ヘッダー・フッターのリンクが無いことがある(実測: 城北運送は
+        # 「お問い合わせ→/contact」が8本あるのに見つけられていなかった。
+        # 3秒待ってから探せば正しく拾える)。
+        # 本当にリンクが無いサイトではこの待ちが無駄になるが、そこは
+        # どのみち送信できないので、取りこぼしを減らす方を優先する。
+        try:
+            page.wait_for_timeout(1500)
+            found = _best(page.evaluate(js))
+        except Exception:  # noqa: BLE001
+            return None
+    return found
 
 
 def _resolve_contact_page(page, start_url, deadline=None):
@@ -1593,6 +1610,21 @@ if __name__ == "__main__":
                 got = _looks_like_real_contact_form(page)
                 print(f"  {'✓' if got == expect else '✗'} {label}: "
                       f"{'ここで確定' if got else '問い合わせページを探しに行く'}")
+
+            # ナビゲーションが遅れて描画されるサイト(実測: 城北運送)
+            page.set_content("""
+                <div id="nav"></div>
+                <script>setTimeout(function () {
+                  document.getElementById('nav').innerHTML =
+                    '<a href="/contact/">お問い合わせ</a>';
+                }, 700);</script>""")
+            late = _find_contact_link(page)
+            print(f"  {'✓' if late and late[0] == '/contact/' else '✗'} "
+                  f"リンクが遅れて描画されても、空振りしたら待ってから拾い直す"
+                  f"(旧実装は最初の1回で諦めていた): {late[0] if late else None}")
+            page.set_content('<a href="/company/">会社概要</a>')
+            print(f"  {'✓' if _find_contact_link(page) is None else '✗'} "
+                  f"本当に問い合わせリンクが無いページでは最終的にNoneを返す")
 
             print("\n── 問い合わせページではフォームの描画を長めに待つ(2026-09-21) ──")
             # 松下印刷の /contact/ は素のHTMLに<form>も<input>も無く、完全にJSで組み立てる。

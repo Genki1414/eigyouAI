@@ -889,6 +889,7 @@ REASON_LABELS_JA = {
     "form_not_found": "問い合わせフォームが見つからない",
     "no_fields_filled": "入力できる欄が見つからない",
     "submit_button_not_found": "送信ボタンが見つからない",
+    "company_timeout": "時間がかかりすぎたため中断(送信していません)",
     "submit_click_failed": "送信ボタンを押せない",
     "error_message_detected": "送信後にエラー表示が出た",
     "required_field_unfilled": "自動で埋められない必須欄がある",

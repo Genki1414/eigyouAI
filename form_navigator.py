@@ -47,6 +47,36 @@ FORM_RENDER_WAIT_MS = int(os.environ.get("FORM_RENDER_WAIT_MS", "3000"))
 # 30秒以上かけてしまい、送信全体の所要時間が伸びる。フォームが見つかる会社は数秒で
 # 抜けるので、この上限は実質「見つからない会社を早めに諦める」ためのもの。
 FORM_DISCOVER_BUDGET_MS = int(os.environ.get("FORM_DISCOVER_BUDGET_MS", "20000"))
+# 1社あたりの上限時間(2026-09-21)。0以下で無効。
+# 実測で、あるサイトを開いたままレンダラが11分以上返ってこない事象が起きた。
+# 本番ではその間、送信ワーカーが1本塞がったままになる(T98のrequeue_stale_runningが
+# 拾うまで気づけない)。ここで区切って、次の会社へ進めるようにする。
+#
+# **この上限で止められないもの**: page.evaluate()にはPlaywright側のタイムアウトが
+# 無いため、1回のevaluateがページ側の事情で固まっている間は、下のチェック地点に
+# そもそも到達しない。その場合の最後の砦は従来どおりrequeue_stale_running。
+# ここが効くのは「個々の操作は返ってくるが、積み重ねで極端に長くなる」ケース
+# (重いページ・大量の入力欄・プルダウンの選択肢が多いサイト等)。
+FORM_COMPANY_BUDGET_MS = int(os.environ.get("FORM_COMPANY_BUDGET_MS", "120000"))
+
+
+class _Deadline:
+    """1社あたりの締め切り。expired()で超過判定、remaining_ms()で
+    個々の操作へ渡すタイムアウトを「残り時間」に切り詰める。"""
+
+    def __init__(self, budget_ms=None):
+        budget = FORM_COMPANY_BUDGET_MS if budget_ms is None else budget_ms
+        self.at = None if budget <= 0 else time.monotonic() + budget / 1000.0
+
+    def expired(self):
+        return self.at is not None and time.monotonic() > self.at
+
+    def remaining_ms(self, cap):
+        """capと残り時間の小さい方。ただし最低1秒は与える(0を渡すと
+        Playwrightでは『タイムアウト無し』の意味になってしまうため)。"""
+        if self.at is None:
+            return cap
+        return max(1000, min(cap, int((self.at - time.monotonic()) * 1000)))
 # ブラウザ再利用(T107)。旧実装は1社ごとにPlaywrightドライバ起動+Chromium起動+終了を
 # していて、これだけで1社あたり数秒かかっていた。スレッドごとに1つ起動して使い回し、
 # 会社ごとにはコンテキスト(Cookie等は毎回まっさら)だけ作り直す。
@@ -542,7 +572,7 @@ def _find_contact_link(page, exclude=()):
     return best
 
 
-def _resolve_contact_page(page, start_url):
+def _resolve_contact_page(page, start_url, deadline=None):
     """問い合わせページへ辿る。MAX_CRAWL_PAGESの範囲で「次に有力なリンク」を順に試す。
 
     2026-09-20に多段化: 旧実装は1階層しか辿らず、しかも最初に当たったリンクが外れ
@@ -561,9 +591,10 @@ def _resolve_contact_page(page, start_url):
         if u:
             visited.add(u.split("#")[0])
     last_err = "問い合わせページへのリンクが見つからず"
-    deadline = time.monotonic() + FORM_DISCOVER_BUDGET_MS / 1000.0
+    discover_until = time.monotonic() + FORM_DISCOVER_BUDGET_MS / 1000.0
     for _ in range(MAX_CRAWL_PAGES):
-        if time.monotonic() > deadline:
+        # 探索そのものの上限と、1社あたりの上限の両方で打ち切る
+        if time.monotonic() > discover_until or (deadline is not None and deadline.expired()):
             last_err = "問い合わせページを探す時間の上限に達した"
             break
         found = _find_contact_link(page, exclude=visited)
@@ -571,8 +602,10 @@ def _resolve_contact_page(page, start_url):
             break
         _, absolute_url = found
         visited.add(absolute_url)
+        nav_timeout = (deadline.remaining_ms(NAV_TIMEOUT_MS)
+                       if deadline is not None else NAV_TIMEOUT_MS)
         try:
-            page.goto(absolute_url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+            page.goto(absolute_url, timeout=nav_timeout, wait_until="domcontentloaded")
         except Exception as e:  # noqa: BLE001
             last_err = f"問い合わせページへの遷移に失敗: {type(e).__name__}"
             continue
@@ -907,11 +940,14 @@ def _fill_selects(page):
         try:
             if not sel.is_visible():
                 continue
-            options = sel.query_selector_all("option")
+            # 選択肢は1回のevaluateでまとめて取る。1つずつinner_text()を呼ぶと
+            # 都道府県(47件)のようなプルダウンが複数あるページでCDPの往復が
+            # 数百回になり、1社の所要時間を押し上げていた(2026-09-21)
+            options = sel.evaluate(
+                "e => Array.from(e.options).map(o => [o.text || '', o.value || ''])") or []
             candidates = []
-            for opt in options:
-                text = (opt.inner_text() or "").strip()
-                value = opt.get_attribute("value") or ""
+            for text, value in options:
+                text = (text or "").strip()
                 if not value or _SELECT_PLACEHOLDER_RE.search(text):
                     continue
                 candidates.append((text, value))
@@ -1011,9 +1047,23 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
     result = NavigationResult(status="FAILED_UNSUPPORTED")
     state = None
     owned = False
+    deadline = _Deadline()
+
+    def _timed_out():
+        """1社あたりの上限に達したか。送信を試みた後は呼ばないこと——
+        既に相手へ届いているかもしれないものを『時間切れ』として
+        片付けてしまうと、成功を失敗として記録することになる。"""
+        return deadline.expired()
+
     try:
         state, owned = _acquire_browser(headless)
         context = state["browser"].new_context()
+        # 既定は30秒。個々の操作がそこまで粘ると1社で数分かかりうるので、
+        # このモジュールが明示的に使っている値(ACTION_TIMEOUT_MS)へ揃える。
+        try:
+            context.set_default_timeout(ACTION_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             page = context.new_page()
         except Exception:  # noqa: BLE001
@@ -1021,7 +1071,8 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             raise
         try:
             try:
-                page.goto(start_url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                page.goto(start_url, timeout=deadline.remaining_ms(NAV_TIMEOUT_MS),
+                          wait_until="domcontentloaded")
             except Exception as e:  # noqa: BLE001
                 msg = str(e)
                 if "ERR_CERT_" in msg or "ERR_SSL_" in msg:
@@ -1035,7 +1086,7 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 result.error_message = f"{type(e).__name__}: {e}"
                 return result
 
-            contact_url, discover_err = _resolve_contact_page(page, start_url)
+            contact_url, discover_err = _resolve_contact_page(page, start_url, deadline=deadline)
             result.contact_url_used = contact_url
             result.final_url = page.url
             try:
@@ -1070,6 +1121,14 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
 
             # フォームはメインフレームとは限らない(Googleフォーム等のiframe埋め込み)。
             # 以降の入力・送信はこのスコープに対して行う(PageでもFrameでもAPIは同じ)。
+            if _timed_out():
+                result.status = "FAILED_UNSUPPORTED"
+                result.reason_code = "company_timeout"
+                result.error_message = (
+                    f"1社あたりの上限時間({FORM_COMPANY_BUDGET_MS // 1000}秒)を超えたため中断しました"
+                    "(問い合わせページの探索中)")
+                return result
+
             scopes = _form_scopes(page)
             if not scopes:
                 result.status = "FAILED_UNSUPPORTED"
@@ -1084,6 +1143,8 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             detected, filled = {}, []
             first_filled_el = None
             for el in fields:
+                if _timed_out():
+                    break     # 埋まった分で送信を試みる(下でfilledを見て判断する)
                 try:
                     if not el.is_visible():
                         continue
@@ -1163,6 +1224,18 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
 
             # 埋めた欄が属する<form>の中を優先して探す(ヘッダーのサイト内検索ボタンを
             # 押してしまうと、URLが変わるだけで「送信成功」と誤記録されうる)
+            if _timed_out():
+                # ここまでは入力しただけで、送信は一度も試みていない
+                result.status = "FAILED_UNSUPPORTED"
+                result.reason_code = "company_timeout"
+                result.error_message = (
+                    f"1社あたりの上限時間({FORM_COMPANY_BUDGET_MS // 1000}秒)を超えたため中断しました"
+                    "(送信は試みていません)")
+                result.page_text_snippet = _page_text(page)[:400]
+                return result
+
+            # 以降はデッドラインを見ない。送信を押した後に時間切れで打ち切ると、
+            # 既に届いているかもしれないものを失敗として記録してしまう
             form_el = _owning_form(first_filled_el) if first_filled_el is not None else None
             submit_btn = _find_button(scope, _SUBMIT_TEXT_RE, form_el=form_el)
             if not submit_btn:
@@ -1568,6 +1641,64 @@ if __name__ == "__main__":
             finally:
                 sys.modules[__name__].FORM_DISCOVER_BUDGET_MS = _orig_budget
                 sys.modules[__name__].FORM_RENDER_WAIT_MS = _orig_render
+
+            print("\n── 1社あたりの上限時間(2026-09-21。1社で11分返ってこない実測への対策) ──")
+            dl_off = _Deadline(0)
+            print(f"  {'✓' if not dl_off.expired() else '✗'} 0以下を渡すと無効(締め切り無し)")
+            print(f"  {'✓' if dl_off.remaining_ms(5000) == 5000 else '✗'} "
+                  f"無効なら個々のタイムアウトはそのまま: {dl_off.remaining_ms(5000)}")
+            dl_long = _Deadline(60000)
+            print(f"  {'✓' if not dl_long.expired() else '✗'} 余裕があるうちは超過しない")
+            rem = dl_long.remaining_ms(5000)
+            print(f"  {'✓' if rem == 5000 else '✗'} 残り時間より小さい上限はそのまま使う: {rem}ms")
+            rem2 = dl_long.remaining_ms(300000)
+            print(f"  {'✓' if 50000 < rem2 <= 60000 else '✗'} "
+                  f"残り時間より大きい上限は残り時間まで切り詰める: {rem2}ms")
+            dl_short = _Deadline(1)
+            time.sleep(0.02)
+            print(f"  {'✓' if dl_short.expired() else '✗'} 上限を過ぎたらexpired()になる")
+            print(f"  {'✓' if dl_short.remaining_ms(30000) == 1000 else '✗'} "
+                  f"超過後も最低1秒は渡す(0はPlaywrightでは『無制限』の意味になるため): "
+                  f"{dl_short.remaining_ms(30000)}ms")
+
+            # 探索側が1社あたりの締め切りでも止まること(探索用の上限とは別の経路)
+            hop2 = {"n": 0}
+
+            def _endless2(route):
+                hop2["n"] += 1
+                route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                              body=f'<a href="/d{hop2["n"]}/contact/">お問い合わせ</a>')
+
+            _orig_render2 = FORM_RENDER_WAIT_MS
+            try:
+                sys.modules[__name__].FORM_RENDER_WAIT_MS = 200
+                page.route("**/*", _endless2)
+                try:
+                    page.goto("https://example.test/", wait_until="domcontentloaded")
+                    _, dl_err = _resolve_contact_page(page, "https://example.test/",
+                                                       deadline=_Deadline(1))
+                finally:
+                    page.unroute("**/*")
+            finally:
+                sys.modules[__name__].FORM_RENDER_WAIT_MS = _orig_render2
+            print(f"  {'✓' if dl_err == '問い合わせページを探す時間の上限に達した' and hop2['n'] <= 2 else '✗'} "
+                  f"1社あたりの締め切りでも探索を打ち切る(開いたページ{hop2['n']}枚, 理由={dl_err!r})")
+
+            print("\n── プルダウンの選択肢を1回で取る(CDPの往復を減らす) ──")
+            opts = "".join(f'<option value="{i}">選択肢{i}</option>' for i in range(1, 48))
+            page.set_content(f'<form><select name="pref"><option value="">選択してください</option>'
+                             f'{opts}</select></form>')
+            n_sel = _fill_selects(page)
+            picked_val = page.evaluate("() => document.querySelector('select').value")
+            print(f"  {'✓' if n_sel == 1 and picked_val == '1' else '✗'} "
+                  f"47件の選択肢からプレースホルダーを避けて先頭を選ぶ(選択値={picked_val!r})")
+            page.set_content('<form><select name="kind"><option value="">選択してください</option>'
+                             '<option value="a">資料請求</option>'
+                             '<option value="b">お問い合わせ</option></select></form>')
+            _fill_selects(page)
+            picked_kind = page.evaluate("() => document.querySelector('select').value")
+            print(f"  {'✓' if picked_kind == 'b' else '✗'} "
+                  f"「お問い合わせ」寄りの選択肢があればそちらを選ぶ(選択値={picked_kind!r})")
 
             print("\n── ブラウザ使い回し(T107。1社ごとの起動をやめて所要時間を削る) ──")
             # このテストは既にsync_playwrightを1つ起動済みなので、同じドライバから

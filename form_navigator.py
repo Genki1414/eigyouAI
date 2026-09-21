@@ -658,7 +658,13 @@ def _resolve_contact_page(page, start_url, deadline=None):
     for u in (start_url, page.url):
         if u:
             visited.add(u.split("#")[0])
-    last_err = "contact_link_not_found"
+    # 既に問い合わせページにいる(companies.contact_urlが確定済み等)なら、
+    # 失敗の理由は「リンクが見つからない」ではなく「そのページにフォームが無い」。
+    # 2026-09-21の本番ログ検証で、/contact/ に到達済みの15社が
+    # contact_link_not_found と記録されていて原因を読み違えるところだった。
+    # 実態は403/500/WordPress破損/電話のみ、といった『そもそも送れない』相手。
+    last_err = ("form_not_found" if _looks_like_contact_page(page.url)
+                else "contact_link_not_found")
     discover_until = time.monotonic() + FORM_DISCOVER_BUDGET_MS / 1000.0
     for _ in range(MAX_CRAWL_PAGES):
         # 探索そのものの上限と、1社あたりの上限の両方で打ち切る
@@ -1685,6 +1691,17 @@ if __name__ == "__main__":
             _, err_code = _resolve_contact_page(page, "https://example.test/")
             print(f"  {'✓' if err_code == 'contact_link_not_found' else '✗'} "
                   f"リンクが無い場合はコードを返す: {err_code!r}")
+            # 既に問い合わせページにいるなら「リンクが無い」ではなく「フォームが無い」
+            page.route("**/*", lambda r: r.fulfill(
+                status=200, content_type="text/html; charset=utf-8",
+                body="<p>お問い合わせはお電話で</p>"))
+            try:
+                page.goto("https://example.test/contact/", wait_until="domcontentloaded")
+            finally:
+                page.unroute("**/*")
+            _, err_on_contact = _resolve_contact_page(page, "https://example.test/contact/")
+            print(f"  {'✓' if err_on_contact == 'form_not_found' else '✗'} "
+                  f"問い合わせページに居てフォームが無い場合はform_not_found: {err_on_contact!r}")
             print(f"  {'✓' if err_code in DISCOVER_ERROR_JA else '✗'} "
                   f"返したコードに日本語ラベルが定義されている: "
                   f"{DISCOVER_ERROR_JA.get(err_code)!r}")

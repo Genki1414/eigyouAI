@@ -309,8 +309,10 @@ _BOT_CHALLENGE_TITLE_HINTS = ["just a moment", "attention required", "checking y
 #   「確認」(input[type=submit] value="確認") / 画像ボタン(input[type=image] のalt文言)
 # 文字の間に空白を入れる表記(「送 信」「送　信」)も実在するため、判定前に空白を潰す。
 _SUBMIT_TEXT_RE = re.compile(
-    r"送信|送付|確認画面|確認する|確認へ|内容を確認|入力内容の確認|この内容で|上記内容で|"
-    r"次へ|進む|申し込|申込|お申し?込み|問い合わせる|問合せる|相談する|submit|send|confirm|next",
+    # 「上記の内容で」(小茂田建設)のように助詞が入る表記、「お問い合わせする」のように
+    # サ変で終わる表記も拾う(2026-09-21。本番の実URL検証で漏れていた)
+    r"送信|送付|確認画面|確認する|確認へ|内容を確認|入力内容の確認|この内容で|上記の?内容で|"
+    r"次へ|進む|申し込|申込|お申し?込み|問い?合わ?せ(る|する)|相談する|submit|send|confirm|next",
     re.I)
 _CONFIRM_TEXT_RE = re.compile(r"確認画面|入力内容を確認|内容を確認|次へ|確認する", re.I)
 
@@ -526,8 +528,14 @@ def _wait_for_form(page, timeout_ms=None):
     if timeout_ms <= 0:
         return
     try:
-        page.wait_for_selector(FILLABLE_SELECTOR, timeout=timeout_ms, state="attached")
+        # state="visible"で待つ(2026-09-21)。"attached"はDOMに付いた瞬間に抜けるため、
+        # まだ描画されていない入力欄を「見つけた」ことにして先へ進んでしまい、
+        # 直後のis_visible()チェックで全部弾かれて no_fields_filled になる
+        # (実測: 藤田空調。入力欄も送信ボタンも少し遅れて表示される)。
+        page.wait_for_selector(FILLABLE_SELECTOR, timeout=timeout_ms, state="visible")
     except Exception:  # noqa: BLE001
+        # 可視の入力欄が現れなかった場合でも、DOMには在るかもしれない
+        # (CSSで隠された欄しか無いページ等)。その判断は呼び出し側に任せる
         pass
 
 
@@ -1799,6 +1807,9 @@ if __name__ == "__main__":
                  '<form><input name="a"><input type="image" alt="送信する" '
                  'src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></form>',
                  "送信する"),
+                ("上記の内容でお問い合わせする(実測: 小茂田建設)",
+                 '<form><input name="a"><input type="button" value="上記の内容でお問い合わせする"></form>',
+                 "上記の内容でお問い合わせする"),
                 ("字間を空けた表記(送 信)",
                  '<form><input name="a"><button type="button">送 信</button></form>', "送 信"),
                 ("先頭に非表示のsubmitがあっても本物を見つける",

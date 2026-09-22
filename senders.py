@@ -316,8 +316,15 @@ _SKIP_STATUSES = {"SKIP_CAPTCHA", "SKIP_NO_SOLICIT", "SKIP_RECRUIT_ONLY", "SKIP_
 
 def _log_form_send(con, company_id, result, target_url, tenant_id=None, offer_id=None,
                     list_id=None, started_at=None, keep_debug_fields=False,
-                    retry_count=0, execution_seconds=None):
+                    retry_count=0, execution_seconds=None, send_run_id=None):
     """form_send_logへ1試行分を記録する。個人情報配慮のため入力内容そのものは残さない。
+
+    send_run_id: 「送信する」を押した1回(=send_campaign()の呼び出し1回)を識別する。
+    同じリストへ何度でも送れる仕様(send_campaign()のdocstring参照)なので、これが
+    無いと実行一覧(target_lists.list_send_executions)がリスト単位でしか集計できず、
+    9/19の送信と9/22の送信が1行にまとまってしまっていた(2026-09-22に利用者が発見)。
+    send_campaign()が既に持っているrun_nonce(冪等キー用。呼び出し1回に固有)を
+    そのまま使うので、新しく採番はしない。
     keep_debug_fields=Trueの間だけfinal_url/page_title/page_text_snippetを保存する
     (検証中のみ想定。page_text_snippetは成功判定できなかった原因調査用)。
 
@@ -332,8 +339,8 @@ def _log_form_send(con, company_id, result, target_url, tenant_id=None, offer_id
          success_evidence, error_message, retryable, playwright_run_id, final_url, page_title,
          page_text_snippet, retry_count, execution_seconds, ai_tokens_input, ai_tokens_output,
          ai_cost_yen, external_api_cost_yen, estimated_server_cost_yen, total_estimated_cost_yen,
-         screenshot_before_path, screenshot_after_path)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+         screenshot_before_path, screenshot_after_path, send_run_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (company_id, tenant_id, offer_id, list_id, target_url, result.contact_url_used,
          started_at or datetime.now().isoformat(timespec="seconds"),
          datetime.now().isoformat(timespec="seconds"),
@@ -346,7 +353,7 @@ def _log_form_send(con, company_id, result, target_url, tenant_id=None, offer_id
          result.page_title if keep_debug_fields else None,
          result.page_text_snippet if keep_debug_fields else None,
          retry_count, execution_seconds, 0, 0, 0.0, 0.0, server_cost, server_cost,
-         result.screenshot_before_path, result.screenshot_after_path))
+         result.screenshot_before_path, result.screenshot_after_path, send_run_id))
     con.commit()
 
 
@@ -360,11 +367,14 @@ class FormSender(BaseSender):
     URL_RE = re.compile(r"^https?://", re.I)
 
     def __init__(self, con, dry_run=True, tenant_id=None, offer_id=None, list_id=None,
-                 keep_debug_fields=False, allow_no_solicit=False):
+                 keep_debug_fields=False, allow_no_solicit=False, send_run_id=None):
         super().__init__(con, dry_run=dry_run)
         self.tenant_id = tenant_id
         self.offer_id = offer_id
         self.list_id = list_id
+        # 「送信する」1回を識別する値。send_campaign()がrun_nonceを渡す
+        # (_log_form_send()のdocstring参照)。単体で使うときはNoneでよい
+        self.send_run_id = send_run_id
         self.keep_debug_fields = keep_debug_fields
         self.allow_no_solicit = allow_no_solicit
         self._run_count = 0  # このインスタンス(=1回の実行)での試行数
@@ -530,7 +540,8 @@ class FormSender(BaseSender):
         _log_form_send(self.con, to.company_id, result, to.contact_url,
                         tenant_id=self.tenant_id, offer_id=self.offer_id, list_id=self.list_id,
                         started_at=started_at, keep_debug_fields=self.keep_debug_fields,
-                        retry_count=self._attempt_count - 1, execution_seconds=execution_seconds)
+                        retry_count=self._attempt_count - 1, execution_seconds=execution_seconds,
+                        send_run_id=self.send_run_id)
 
         if result.status == "SUCCESS":
             return SendResult(ok=True, provider_id=f"form_{result.run_id}",
@@ -549,13 +560,13 @@ REGISTRY = {s.channel: s for s in (MailSender, FaxSender, SmsSender, PostSender,
 
 
 def get_sender(channel, con, dry_run=True, tenant_id=None, offer_id=None, list_id=None,
-                allow_no_solicit=False):
+                allow_no_solicit=False, send_run_id=None):
     cls = REGISTRY.get(channel)
     if not cls:
         raise ValueError(f"未対応チャネル: {channel}")
     if cls is FormSender:
         return cls(con, dry_run=dry_run, tenant_id=tenant_id, offer_id=offer_id, list_id=list_id,
-                   allow_no_solicit=allow_no_solicit)
+                   allow_no_solicit=allow_no_solicit, send_run_id=send_run_id)
     return cls(con, dry_run=dry_run)
 
 
@@ -839,7 +850,7 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
 
         adapter = get_sender(r["channel"], con_t, dry_run=dry_run,
                               tenant_id=r["tenant_id"], offer_id=r["offer_id"], list_id=r["list_id"],
-                              allow_no_solicit=allow_no_solicit)
+                              allow_no_solicit=allow_no_solicit, send_run_id=run_nonce)
         # ドライランと本番送信は別の冪等キー空間を使う。同じキーだとドライランが
         # 冪等キーを占有してしまい、その後の本番送信が「送信済み(冪等キー一致)」
         # として何もせず素通りしてしまう(実サイトに一度も送らないまま「完了」扱いになる)。
@@ -1123,6 +1134,24 @@ if __name__ == "__main__":
                    and logged["estimated_server_cost_yen"] > 0
                    and logged["total_estimated_cost_yen"] == logged["estimated_server_cost_yen"])
         print(f"  {'✓' if ok_cost else '✗'} retry_count・execution_seconds・推定原価が記録される")
+        con.execute("DELETE FROM form_send_log WHERE company_id=999999"); con.commit()
+
+        # send_run_id(「送信する」1回の識別子)がログに残る。これが無いと実行一覧が
+        # リスト単位でしか集計できず、9/19の送信と9/22の送信が1行にまとまる
+        # (2026-09-22。_log_form_send()のdocstring参照)
+        _log_form_send(con, 999999, fake_result, "https://example.co.jp/contact/",
+                       tenant_id=1, list_id=None, send_run_id="runtest001")
+        run_logged = con.execute("SELECT send_run_id FROM form_send_log WHERE company_id=999999 "
+                                  "ORDER BY id DESC LIMIT 1").fetchone()["send_run_id"]
+        print(f"  {'✓' if run_logged == 'runtest001' else '✗'} send_run_idがform_send_logに残る "
+              f"(実際の値={run_logged})")
+        # FormSenderがコンストラクタで受け取った値をそのまま使うこと
+        fs_run = FormSender(con, dry_run=True, send_run_id="runtest002")
+        print(f"  {'✓' if fs_run.send_run_id == 'runtest002' else '✗'} "
+              f"FormSenderがsend_run_idを保持する")
+        adapter_run = get_sender("フォーム", con, dry_run=True, send_run_id="runtest003")
+        print(f"  {'✓' if adapter_run.send_run_id == 'runtest003' else '✗'} "
+              f"get_sender()経由でもsend_run_idが渡る(send_campaign()の経路)")
         con.execute("DELETE FROM form_send_log WHERE company_id=999999"); con.commit()
 
         print("\n── フォーム自動送信(dry run) ──")

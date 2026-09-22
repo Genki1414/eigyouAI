@@ -187,13 +187,17 @@ CACもチャネル別成績も出せない = 売り物にならない。
   GET  /api/tenant/lists/<id>/target-count  いま送信を押すと何件に送るか(送信はしない)。
                                   ?cancel_recent_days=30 で「過去送信対象キャンセル」を反映
   GET  /api/tenant/send-log       自テナントのフォーム自動送信履歴(form_send_log)。
-                           ?company_id=/?list_id=で絞り込める(会社別の明細=詳細画面用)
+                           ?company_id=/?list_id=で絞り込める(会社別の明細=詳細画面用)。
+                           ?send_run=で「送信する」1回ぶんだけに絞る(実行一覧の
+                           send_runをそのまま渡す。2026-09-22)
   GET  /api/tenant/send-log/executions  MIKOMERUの「自動送信ログ」一覧相当(T22)。
                            会社別の明細ではなく、「いつ・誰が・どのリストへ送ったか」を
-                           1リスト=1実行として集計して返す(target_lists.pyの
-                           list_send_executions()参照)。?list_id=/?date_from=/?date_to=
-                           (YYYY-MM-DD)で絞り込める。?limit=で件数上限(ホームの
-                           「最近の営業履歴」で使用)
+                           **「送信する」を押した1回=1実行**として集計して返す
+                           (2026-09-22まではリスト単位だったため、同じリストへの
+                           9/19の送信と9/22の送信が1行に合算されていた。
+                           target_lists.list_send_executions()参照)。
+                           ?list_id=/?date_from=/?date_to=(YYYY-MM-DD)で絞り込める。
+                           ?limit=で件数上限(ホームの「最近の営業履歴」で使用)
   POST /api/tenant/send-log/executions/{list_id}/note  {"note"} → 実行(リスト)単位の
                            備考を更新(会社ごとのsend-log/{id}/noteとは別物)
   GET  /api/tenant/send-log/{id}/screenshot?kind=before|after
@@ -1117,6 +1121,14 @@ def h_tenant_send_log(con, tenant_id, qs):
     if list_id and list_id.isdigit():
         base_where += " AND l.list_id=?"
         base_params.append(int(list_id))
+    # ?send_run=: 実行一覧の1行(=「送信する」1回)に絞り込む(2026-09-22)。
+    # list_idだけだと同じリストへの過去の送信が全部混ざる
+    # (target_lists.send_run_key()/send_run_where()参照)
+    send_run = (qs.get("send_run", [""])[0] or "").strip()
+    if send_run:
+        frag, extra = TL.send_run_where(send_run)
+        base_where += frag
+        base_params += extra
     if name_q:
         base_where += " AND c.name LIKE ?"
         base_params.append(f"%{name_q}%")
@@ -1298,6 +1310,11 @@ def h_tenant_send_log_csv(con, tenant_id, qs):
     if list_id and list_id.isdigit():
         where += " AND l.list_id=?"
         params.append(int(list_id))
+    send_run = (qs.get("send_run", [""])[0] or "").strip()
+    if send_run:
+        frag, extra = TL.send_run_where(send_run)
+        where += frag
+        params += extra
     if name_q:
         where += " AND c.name LIKE ?"
         params.append(f"%{name_q}%")
@@ -4961,6 +4978,63 @@ def self_test(port=8899):
     t("POST .../executions/<list_id>/note で実行単位の備考を更新できる", st == 200 and r.get("ok"))
     st, r = get_auth(f"/api/tenant/send-log/executions?list_id={t22_list_id}", token=key_a)
     t("更新した備考が反映される", st == 200 and r["executions"][0]["send_note"] == "テスト実行メモ")
+
+    # ── 実行一覧は「送信する」1回=1行(2026-09-22) ──
+    # 利用者報告:「送信日違うのに同じところにはいってしまう」。同じリストへ何度でも
+    # 送れる仕様なのに集計がリスト単位だったため、9/19の送信と9/22の送信が1行に
+    # 合算されていた(9/19の2,975社ぶんが9/22の実行として表示された)。
+    # 過去の行(send_run_id IS NULL)は日付でまとめ、新しい行はsend_run_idでまとめる。
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url,
+        started_at, status, reason_code, send_run_id)
+        VALUES (?,?,?,'https://example.co.jp','2026-01-05T10:00:00','SUCCESS','success_text_matched',NULL)""",
+        (t22_company, tid_a, t22_list_id))
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url,
+        started_at, status, reason_code, send_run_id)
+        VALUES (?,?,?,'https://example.co.jp','2026-01-06T10:00:00','FAILED_UNSUPPORTED','submit_click_failed',?)""",
+        (t22_company, tid_a, t22_list_id, "runaaaa01"))
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url,
+        started_at, status, reason_code, send_run_id)
+        VALUES (?,?,?,'https://example.co.jp','2026-01-06T10:05:00','SUCCESS','success_text_matched',?)""",
+        (t22_company, tid_a, t22_list_id, "runaaaa02"))
+    con.commit()
+    st, r = get_auth(f"/api/tenant/send-log/executions?list_id={t22_list_id}", token=key_a)
+    execs_split = r.get("executions", [])
+    t("送信日が違えば実行一覧の行も分かれる(リスト単位の合算をやめた)",
+      st == 200 and len(execs_split) == 4, f"n={len(execs_split)}")
+    by_run = {e["send_run"]: e for e in execs_split}
+    t("同じ日に2回送っても、send_run_idが違えば別の実行として分かれる",
+      "runaaaa01" in by_run and "runaaaa02" in by_run
+      and by_run["runaaaa01"]["started_at"] == "2026-01-06T10:00:00"
+      and by_run["runaaaa02"]["started_at"] == "2026-01-06T10:05:00", f"runs={sorted(by_run)}")
+    t("send_run_idが無い過去の行は送信日でまとめる('date:YYYY-MM-DD')",
+      "date:2026-01-05" in by_run and by_run["date:2026-01-05"]["total"] == 1,
+      f"runs={sorted(by_run)}")
+    t("集計は実行ごとに分かれる(1実行の件数が全期間の合計にならない)",
+      by_run["runaaaa01"]["total"] == 1 and by_run["runaaaa01"]["failed"] == 1
+      and by_run["runaaaa01"]["success"] == 0
+      and by_run["runaaaa02"]["success"] == 1)
+    t("実行一覧は新しい順に並ぶ",
+      [e["started_at"] for e in execs_split] == sorted(
+          [e["started_at"] for e in execs_split], reverse=True))
+    st, r = get_auth(f"/api/tenant/send-log?list_id={t22_list_id}&send_run=runaaaa01", token=key_a)
+    t("GET /api/tenant/send-log?send_run= でその1実行ぶんの明細だけに絞れる",
+      st == 200 and len(r.get("log", [])) == 1
+      and r["log"][0]["reason_code"] == "submit_click_failed", f"n={len(r.get('log', []))}")
+    st, r = get_auth(f"/api/tenant/send-log?list_id={t22_list_id}&send_run=date:2026-01-05",
+                     token=key_a)
+    t("?send_run=date:YYYY-MM-DD なら過去の行(send_run_id無し)をその日ぶんだけ返す",
+      st == 200 and len(r.get("log", [])) == 1
+      and r["log"][0]["started_at"] == "2026-01-05T10:00:00", f"n={len(r.get('log', []))}")
+    st, r = get_auth(f"/api/tenant/send-log/executions?list_id={t22_list_id}"
+                     f"&date_from=2026-01-06&date_to=2026-01-06", token=key_a)
+    t("日付で絞り込むと、その日に実行されたぶんだけ返る",
+      st == 200 and len(r.get("executions", [])) == 2, f"n={len(r.get('executions', []))}")
+    con.execute("DELETE FROM form_send_log WHERE list_id=? AND (send_run_id IS NOT NULL "
+                "OR started_at LIKE '2026-01-%')", (t22_list_id,))
+    con.commit()
+    st, r = get_auth(f"/api/tenant/send-log/executions?list_id={t22_list_id}", token=key_a)
+    t("追加した検証用の行を消せば元の1実行に戻る",
+      st == 200 and len(r.get("executions", [])) == 1, f"n={len(r.get('executions', []))}")
 
     st, r = get_auth(f"/api/tenant/send-log?list_id={t22_list_id}", token=key_a)
     t("GET /api/tenant/send-log?list_id=で会社別の明細(詳細ページ用)に絞り込める",

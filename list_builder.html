@@ -1211,7 +1211,8 @@ function goPage(pageId) {
   // URLの#にも入れておく(ブックマーク・共有用。履歴は増やさない)
   try {
     localStorage.setItem("eigyouai_last_page", JSON.stringify({
-      page: pageId, listId: currentSendLogListId, listName: currentSendLogListName }));
+      page: pageId, listId: currentSendLogListId, listName: currentSendLogListName,
+      sendRun: currentSendLogSendRun, sendRunStartedAt: currentSendLogStartedAt }));
     history.replaceState(null, "", "#" + pageId);
   } catch (e) { /* localStorage不可・file://等では無視 */ }
   const navPageId = pageId === "sendlog-detail" ? "sendlog" : pageId;
@@ -1371,6 +1372,10 @@ let editingSenderTemplateId = null;  // T39: 編集中の送信元テンプレ�
 let sendLogExcluded = new Set();   // countpillsでOFFにしたstatus(除外リスト)
 let currentSendLogListId = null;   // 自動送信ログ「詳細」ページが対象にしているリストID
 let currentSendLogListName = "";
+// 「送信する」1回の識別子(実行一覧の1行)。同じリストへ複数回送ったとき、
+// 詳細をその1回ぶんだけに絞るために使う(2026-09-22)。過去分は "date:YYYY-MM-DD"
+let currentSendLogSendRun = null;
+let currentSendLogStartedAt = "";  // 画面の見出しとリロード復元用
 const $ = id => document.getElementById(id);
 
 // このページがapi.py自身から配信されている場合は、同一オリジンを既定値にする
@@ -1603,7 +1608,8 @@ async function refreshDashboard() {
     logEl.querySelectorAll(".dashExecLink").forEach(a => {
       a.addEventListener("click", (e) => {
         e.preventDefault();
-        goSendLogDetail(Number(a.dataset.id), a.dataset.name);
+        goSendLogDetail(Number(a.dataset.id), a.dataset.name,
+                        a.dataset.run || null, a.dataset.started || "");
       });
     });
     $("dashExecSeeAll").addEventListener("click", (e) => { e.preventDefault(); goPage("sendlog"); });
@@ -1831,11 +1837,17 @@ function populateSendLogExecListFilter() {
   if (cur && allLists.some(l => String(l.id) === cur)) sel.value = cur;
 }
 
-function goSendLogDetail(listId, listName) {
+function goSendLogDetail(listId, listName, sendRun, startedAt) {
   currentSendLogListId = listId;
   currentSendLogListName = listName || "";
+  currentSendLogSendRun = sendRun || null;
+  currentSendLogStartedAt = startedAt || "";
   goPage("sendlog-detail");
-  $("sendLogDetailListName").textContent = currentSendLogListName ? `— ${currentSendLogListName}` : "";
+  // どの実行を見ているのかが分かるよう、リスト名に実行日時も添える
+  // (同じリストへ何度も送れるため、リスト名だけでは区別がつかない)
+  const suffix = startedAt ? `（${startedAt} の送信）` : "";
+  $("sendLogDetailListName").textContent =
+    currentSendLogListName ? `— ${currentSendLogListName}${suffix}` : suffix;
 }
 
 async function refreshSendLogExecutions() {
@@ -1866,10 +1878,11 @@ async function refreshSendLogExecutions() {
     el.innerHTML = `<table><tr><th>ID</th><th>担当者(ID)</th><th>会社名</th><th>姓</th><th>名</th>
         <th>メールアドレス</th><th>送信文章</th><th>備考</th><th>送信消化</th><th>送信成功/総数</th>
         <th>URLクリック数</th><th>最新クリック日時</th><th>実行日時</th></tr>` +
-      execs.map(x => { const escSubject = (x.subject || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      execs.map((x, i) => { const escSubject = (x.subject || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
         const escBody = (x.body || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
         return `<tr>
-        <td><a href="#" class="execIdLink" data-id="${x.list_id}" data-name="${(x.list_name || "").replace(/"/g, "&quot;")}">${x.list_id}</a></td>
+        <td><a href="#" class="execIdLink" data-id="${x.list_id}" data-name="${(x.list_name || "").replace(/"/g, "&quot;")}"
+          data-run="${x.send_run || ""}" data-started="${x.started_at || ""}">${x.list_id}</a></td>
         <td>${x.staff_name ? `${x.staff_name}(${x.staff_id})` : "—"}</td>
         <td>${x.company_name || "—"}</td>
         <td>${x.sender_last_name || "—"}</td>
@@ -1877,7 +1890,7 @@ async function refreshSendLogExecutions() {
         <td style="font-size:11px">${x.sender_email || "—"}</td>
         <td style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
           title="${escSubject}">${x.subject || "—"}
-          ${x.subject || x.body ? `<br><a href="#" class="execBodyToggle" data-for="body-${x.list_id}">文面を見る</a>` : ""}</td>
+          ${x.subject || x.body ? `<br><a href="#" class="execBodyToggle" data-for="body-${i}">文面を見る</a>` : ""}</td>
         <td><input type="text" class="execNoteInput" data-id="${x.list_id}"
           value="${(x.send_note || "").replace(/"/g, "&quot;")}" placeholder="例: 中国 解体土木プラント"
           style="font-size:11px;padding:4px 6px;width:120px"></td>
@@ -1887,7 +1900,7 @@ async function refreshSendLogExecutions() {
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.last_clicked_at || "—"}</td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at || "—"}</td>
         </tr>
-        <tr id="body-${x.list_id}" class="execBodyRow" style="display:none">
+        <tr id="body-${i}" class="execBodyRow" style="display:none">
           <td colspan="11" style="background:var(--concrete)">
             <div style="font-size:11px;color:var(--steel);font-weight:700;margin-bottom:4px">件名</div>
             <div style="font-size:13px;margin-bottom:10px">${escSubject || "—"}</div>
@@ -1898,7 +1911,8 @@ async function refreshSendLogExecutions() {
     el.querySelectorAll(".execIdLink").forEach(a => {
       a.addEventListener("click", (e) => {
         e.preventDefault();
-        goSendLogDetail(Number(a.dataset.id), a.dataset.name);
+        goSendLogDetail(Number(a.dataset.id), a.dataset.name,
+                        a.dataset.run || null, a.dataset.started || "");
       });
     });
     el.querySelectorAll(".execBodyToggle").forEach(a => {
@@ -1961,6 +1975,7 @@ async function refreshSendLog() {
     const qs = new URLSearchParams({ limit: "200" });
     if (q) qs.set("q", q);
     if (currentSendLogListId) qs.set("list_id", String(currentSendLogListId));
+    if (currentSendLogSendRun) qs.set("send_run", currentSendLogSendRun);
     if (statuses.length < Object.keys(LOG_STATUS_LABELS).length) qs.set("status", statuses.join(","));
     if ($("sendLogClickedOnly").checked) qs.set("clicked", "1");
     const r = await call(`/api/tenant/send-log?${qs.toString()}`);
@@ -2068,6 +2083,7 @@ async function downloadSendLogCsv() {
     const qs = new URLSearchParams();
     if (q) qs.set("q", q);
     if (currentSendLogListId) qs.set("list_id", String(currentSendLogListId));
+    if (currentSendLogSendRun) qs.set("send_run", currentSendLogSendRun);
     if (statuses.length < Object.keys(LOG_STATUS_LABELS).length) qs.set("status", statuses.join(","));
     if ($("sendLogClickedOnly").checked) qs.set("clicked", "1");
     const r = await call(`/api/tenant/send-log/csv?${qs.toString()}`);
@@ -4016,7 +4032,8 @@ async function refreshScheduledSends(listId) {
   if (!document.querySelector(`.page[data-page="${page}"]`)) return;
   try {
     if (page === "sendlog-detail") {
-      if (saved && saved.listId) goSendLogDetail(saved.listId, saved.listName || "");
+      if (saved && saved.listId) goSendLogDetail(saved.listId, saved.listName || "",
+                                                 saved.sendRun || null, saved.sendRunStartedAt || "");
       else goPage("sendlog");
       return;
     }

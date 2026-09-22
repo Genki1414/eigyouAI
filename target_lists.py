@@ -1025,74 +1025,149 @@ _EXEC_FAILED_SQL = ("SUM(CASE WHEN l.status!='SUCCESS' AND NOT "
                      "THEN 1 ELSE 0 END)")
 
 
+def send_run_key(send_run_id, started_at):
+    """form_send_logの1行が「どの実行(=「送信する」1回)に属するか」を表すキー。
+
+    send_run_idを入れ始めた2026-09-22より前の行はNULLなので、その場合だけ
+    started_atの日付でまとめる('date:2026-09-19')。日付でまとめるのは正確では
+    ない(同じ日に2回押せば1つに見える)が、過去分にこれ以上の情報は残っていない。
+    少なくとも9/19の送信と9/22の送信は別の行として見えるようになる。"""
+    if send_run_id:
+        return send_run_id
+    return "date:" + (started_at or "")[:10]
+
+
+# 実行一覧の絞り込みで使う、送信実行キー→WHERE句の変換。send_run_key()と対になる
+def send_run_where(run_key):
+    """送信実行キーから (SQL断片, パラメータ) を返す。lは form_send_log の別名。"""
+    if run_key.startswith("date:"):
+        return (" AND l.send_run_id IS NULL AND substr(l.started_at,1,10)=?", [run_key[5:]])
+    return (" AND l.send_run_id=?", [run_key])
+
+
 def list_send_executions(con, tenant_id, list_id=None, date_from=None, date_to=None, limit=None):
     """MIKOMERUの「自動送信ログ」一覧相当(送信結果の会社別明細ではなく、
-    「いつ・誰が・どのリストへ送ったか」という実行単位の集計)。既存設計
-    (1リスト=1campaignを使い回す。send_list()参照)にそのまま乗せ、target_listsの
-    1行=1実行として扱う。まだ一度も送信していないリスト(campaign_id IS NULL)は
-    実行ログに出さない。"""
+    「いつ・誰が・どのリストへ送ったか」という実行単位の集計)。
+
+    2026-09-22まではtarget_listsの1行=1実行として集計していたため、同じリストへ
+    複数回送ると全部が1行にまとまってしまっていた(利用者からの報告:
+    「送信日違うのに同じところにはいってしまう」。9/19の2,975社への送信と
+    9/22の再送信が、実行日時9/22の1行に合算されていた)。同じリストへ何度でも
+    送れる仕様(send_list()参照)である以上、集計の単位はリストではなく
+    「送信する」を押した1回でなければならない。
+
+    そこでform_send_logをsend_run_key()でまとめ、**1実行=1行**として返す。
+    send_run_idが無い過去の行は日付でまとめる(send_run_key()参照)。
+
+    既知の制限(過去分にデータが残っていないため直しようがない):
+      - 担当者名・送信元・件名/本文は target_lists/touches に「最後の送信」の
+        ぶんしか無いので、同じリストの全実行に同じ値が出る
+      - URLクリック数はcampaign単位の通算なので実行ごとには分けられない
+      - 備考(send_note)もリスト単位で共有される(update_send_note()参照)
+
+    まだ一度も送信していないリスト(campaign_id IS NULL)は実行ログに出さない。
+    送信を押したがform_send_logが1行も無いリスト(ドライラン等)は、従来どおり
+    件数ゼロの1行として出す。"""
     where = "tl.tenant_id=? AND tl.campaign_id IS NOT NULL"
     params = [tenant_id]
     if list_id:
         where += " AND tl.id=?"
         params.append(list_id)
-    if date_from:
-        where += " AND tl.last_send_started_at>=?"
-        params.append(date_from)
-    if date_to:
-        where += " AND tl.last_send_started_at<=?"
-        params.append(date_to + "T23:59:59")
 
-    rows = con.execute(f"""SELECT tl.id, tl.name, tl.campaign_id, tl.send_note, tl.company_count,
-            tl.last_send_started_at, tl.sent_by_staff_id, tl.sent_sender_template_id,
-            tn.name tenant_name, tn.sender_name tenant_sender_name, tn.sender_email tenant_sender_email,
-            st.name staff_name,
+    meta = {r["id"]: r for r in con.execute(f"""SELECT tl.id, tl.name, tl.campaign_id,
+            tl.send_note, tl.company_count, tl.last_send_started_at, tl.sent_by_staff_id,
+            tl.sent_sender_template_id,
+            tn.name tenant_name, tn.sender_name tenant_sender_name,
+            tn.sender_email tenant_sender_email, st.name staff_name,
             sn.sender_last_name, sn.sender_first_name, sn.sender_name tmpl_sender_name,
             sn.sender_email tmpl_sender_email
         FROM target_lists tl
         JOIN tenants tn ON tn.id = tl.tenant_id
         LEFT JOIN staff st ON st.id = tl.sent_by_staff_id
         LEFT JOIN sender_templates sn ON sn.id = tl.sent_sender_template_id
-        WHERE {where}
-        ORDER BY tl.last_send_started_at DESC
-        {"LIMIT ?" if limit else ""}""", params + ([limit] if limit else [])).fetchall()
+        WHERE {where}""", params).fetchall()}
+    if not meta:
+        return []
+
+    ids = list(meta)
+    ph = ",".join("?" * len(ids))
+    runs = con.execute(f"""SELECT l.list_id,
+            COALESCE(l.send_run_id, 'date:' || substr(l.started_at,1,10)) run_key,
+            MIN(l.started_at) started_at, MAX(l.started_at) last_started_at,
+            COUNT(*) total, {_EXEC_SUCCESS_SQL} success, {_EXEC_FAILED_SQL} failed,
+            {_EXEC_NO_FORM_SQL} no_form, COUNT(DISTINCT l.company_id) sent_companies
+        FROM form_send_log l
+        WHERE l.list_id IN ({ph})
+        GROUP BY l.list_id, run_key""", ids).fetchall()
+
+    # クリック数・文面はcampaign単位でしか残っていないため、リストごとに1回だけ引く
+    cache = {}
+
+    def _campaign_extras(campaign_id):
+        if campaign_id not in cache:
+            clicks = con.execute("""SELECT COALESCE(SUM(email_click_count),0) clicks,
+                    MAX(email_clicked_at) last_clicked_at
+                FROM touches WHERE campaign_id=?""", (campaign_id,)).fetchone()
+            sample = con.execute("SELECT subject, body FROM touches WHERE campaign_id=? LIMIT 1",
+                                  (campaign_id,)).fetchone()
+            cache[campaign_id] = (clicks, sample)
+        return cache[campaign_id]
 
     out = []
-    for r in rows:
-        counts = con.execute(f"""SELECT COUNT(*) total, {_EXEC_SUCCESS_SQL} success,
-                {_EXEC_FAILED_SQL} failed, {_EXEC_NO_FORM_SQL} no_form,
-                COUNT(DISTINCT l.company_id) sent_companies
-            FROM form_send_log l WHERE l.list_id=?""", (r["id"],)).fetchone()
-        clicks = con.execute("""SELECT COALESCE(SUM(email_click_count),0) clicks,
-                MAX(email_clicked_at) last_clicked_at
-            FROM touches WHERE campaign_id=?""", (r["campaign_id"],)).fetchone()
-        sample = con.execute("SELECT subject, body FROM touches WHERE campaign_id=? LIMIT 1",
-                              (r["campaign_id"],)).fetchone()
+    seen_lists = set()
+    for r in runs:
+        m = meta[r["list_id"]]
+        seen_lists.add(r["list_id"])
+        out.append(_exec_row(m, _campaign_extras(m["campaign_id"]),
+                             run_key=r["run_key"], started_at=r["started_at"],
+                             counts=r))
+    # 送信を押したがform_send_logが残っていないリスト(ドライラン等)も1行出す
+    for lid, m in meta.items():
+        if lid in seen_lists:
+            continue
+        out.append(_exec_row(m, _campaign_extras(m["campaign_id"]),
+                             run_key=None, started_at=m["last_send_started_at"], counts=None))
 
-        if r["sender_last_name"] or r["sender_first_name"]:
-            sender_last, sender_first = r["sender_last_name"] or "", r["sender_first_name"] or ""
-        else:
-            src = r["tmpl_sender_name"] if r["sent_sender_template_id"] else r["tenant_sender_name"]
-            parts = (src or "").split(maxsplit=1)
-            sender_last = parts[0] if parts else ""
-            sender_first = parts[1] if len(parts) > 1 else ""
-        sender_email = (r["tmpl_sender_email"] if r["sent_sender_template_id"] else r["tenant_sender_email"]) or ""
+    if date_from:
+        out = [e for e in out if (e["started_at"] or "") >= date_from]
+    if date_to:
+        out = [e for e in out if (e["started_at"] or "") <= date_to + "T23:59:59"]
+    out.sort(key=lambda e: e["started_at"] or "", reverse=True)
+    return out[:limit] if limit else out
 
-        out.append({
-            "list_id": r["id"], "list_name": r["name"], "send_note": r["send_note"] or "",
-            "staff_id": r["sent_by_staff_id"], "staff_name": r["staff_name"],
-            "company_name": r["tenant_name"], "sender_last_name": sender_last,
-            "sender_first_name": sender_first, "sender_email": sender_email,
-            "subject": (sample["subject"] if sample else "") or "",
-            "body": (sample["body"] if sample else "") or "",
-            "success": counts["success"] or 0, "failed": counts["failed"] or 0,
-            "no_form": counts["no_form"] or 0, "total": counts["total"] or 0,
-            # 送信消化(T106): 送信を試した会社数/リストの件数(「350/2,795」表示用)
-            "sent_companies": counts["sent_companies"] or 0, "list_count": r["company_count"] or 0,
-            "click_count": clicks["clicks"] or 0, "last_clicked_at": clicks["last_clicked_at"],
-            "started_at": r["last_send_started_at"],
-        })
-    return out
+
+def _exec_row(m, extras, run_key, started_at, counts):
+    """実行一覧の1行を組み立てる(list_send_executions()専用)。"""
+    clicks, sample = extras
+    if m["sender_last_name"] or m["sender_first_name"]:
+        sender_last, sender_first = m["sender_last_name"] or "", m["sender_first_name"] or ""
+    else:
+        src = m["tmpl_sender_name"] if m["sent_sender_template_id"] else m["tenant_sender_name"]
+        parts = (src or "").split(maxsplit=1)
+        sender_last = parts[0] if parts else ""
+        sender_first = parts[1] if len(parts) > 1 else ""
+    sender_email = (m["tmpl_sender_email"] if m["sent_sender_template_id"]
+                    else m["tenant_sender_email"]) or ""
+    return {
+        "list_id": m["id"], "list_name": m["name"], "send_note": m["send_note"] or "",
+        # 実行(「送信する」1回)の識別子。会社別明細を1実行ぶんに絞るのに使う
+        # (GET /api/tenant/send-log?send_run=)。過去分は 'date:YYYY-MM-DD'
+        "send_run": run_key,
+        "staff_id": m["sent_by_staff_id"], "staff_name": m["staff_name"],
+        "company_name": m["tenant_name"], "sender_last_name": sender_last,
+        "sender_first_name": sender_first, "sender_email": sender_email,
+        "subject": (sample["subject"] if sample else "") or "",
+        "body": (sample["body"] if sample else "") or "",
+        "success": (counts["success"] if counts else 0) or 0,
+        "failed": (counts["failed"] if counts else 0) or 0,
+        "no_form": (counts["no_form"] if counts else 0) or 0,
+        "total": (counts["total"] if counts else 0) or 0,
+        # 送信消化(T106): 送信を試した会社数/リストの件数(「350/2,795」表示用)
+        "sent_companies": (counts["sent_companies"] if counts else 0) or 0,
+        "list_count": m["company_count"] or 0,
+        "click_count": clicks["clicks"] or 0, "last_clicked_at": clicks["last_clicked_at"],
+        "started_at": started_at,
+    }
 
 
 def update_send_note(con, tenant_id, list_id, note):

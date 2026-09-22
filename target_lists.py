@@ -721,6 +721,49 @@ def update_member_company(con, tenant_id, list_id, company_id, fields):
     return {"ok": True, "company": dict(row)}
 
 
+def _sendable_member_ids(con, list_id, cancel_recent_days=None):
+    """このリストで実際に送信対象になる会社のIDと、除外された内訳を返す。
+
+    送信本体(send_list)と画面の件数表示(count_send_targets)が**必ず同じ数**に
+    なるよう、絞り込みはここ1箇所にまとめる(2026-09-22。送信ボタンの隣に
+    「何件に送るか」を出すにあたって、表示と実際がずれると事故のもとになる)。
+
+    戻り値: {"ids": [...], "with_contact_url": n, "cancelled_recent": n}
+    """
+    members = con.execute("""SELECT c.id FROM target_list_members m
+        JOIN companies c ON c.id = m.company_id
+        WHERE m.list_id=? AND c.contact_url IS NOT NULL""", (list_id,)).fetchall()
+    ids = [m["id"] for m in members]
+    out = {"ids": ids, "with_contact_url": len(ids), "cancelled_recent": 0}
+    if not ids or not cancel_recent_days:
+        return out
+    cutoff = (datetime.now() - timedelta(days=cancel_recent_days)).isoformat(timespec="seconds")
+    placeholders = ",".join("?" * len(ids))
+    recently_sent = {row["company_id"] for row in con.execute(
+        f"""SELECT DISTINCT company_id FROM touches
+            WHERE company_id IN ({placeholders}) AND sent_at IS NOT NULL AND sent_at>=?
+              AND COALESCE(note,'') NOT LIKE '%provider_id=mock_%'""",
+        ids + [cutoff]).fetchall()}
+    if recently_sent:
+        out["cancelled_recent"] = len(recently_sent)
+        out["ids"] = [i for i in ids if i not in recently_sent]
+    return out
+
+
+def count_send_targets(con, tenant_id, list_id, cancel_recent_days=None):
+    """「いま送信を押すと何件に送るか」を返す(画面表示用。送信は一切しない)。
+    絞り込みは_sendable_member_ids()を共有するので、実際の送信件数と一致する。"""
+    lst = con.execute("SELECT id, company_count FROM target_lists WHERE id=? AND tenant_id=? "
+                       "AND deleted_at IS NULL", (list_id, tenant_id)).fetchone()
+    if not lst:
+        return None
+    r = _sendable_member_ids(con, list_id, cancel_recent_days)
+    return {"list_total": lst["company_count"] or 0,
+            "with_contact_url": r["with_contact_url"],
+            "cancelled_recent": r["cancelled_recent"],
+            "target_count": len(r["ids"])}
+
+
 def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks=False,
               sender_template_id=None, staff_id=None, allow_no_solicit=False,
               sender_override=None, cancel_recent_days=None, skip_already_sent=False):
@@ -782,30 +825,17 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
     if not offer:
         return {"error": "このテナントにはオファーが設定されていません。管理者に連絡してください"}
 
-    # フォーム自動送信は問い合わせURLが分かっている企業にしか行えない
-    members = con.execute("""SELECT c.id FROM target_list_members m
-        JOIN companies c ON c.id = m.company_id
-        WHERE m.list_id=? AND c.contact_url IS NOT NULL""", (list_id,)).fetchall()
-    if not members:
+    # フォーム自動送信は問い合わせURLが分かっている企業にしか行えない。
+    # 絞り込みは画面の件数表示と共有する(_sendable_member_ids)
+    picked = _sendable_member_ids(con, list_id, cancel_recent_days)
+    if not picked["with_contact_url"]:
         return {"error": "このリストにはフォーム送信可能な企業がありません"
                           "(問い合わせURLが確認できた企業のみ送信対象になります)"}
-
-    cancelled_recent = 0
-    if cancel_recent_days:
-        cutoff = (datetime.now() - timedelta(days=cancel_recent_days)).isoformat(timespec="seconds")
-        member_ids = [m["id"] for m in members]
-        placeholders = ",".join("?" * len(member_ids))
-        recently_sent = {row["company_id"] for row in con.execute(
-            f"""SELECT DISTINCT company_id FROM touches
-                WHERE company_id IN ({placeholders}) AND sent_at IS NOT NULL AND sent_at>=?
-                  AND COALESCE(note,'') NOT LIKE '%provider_id=mock_%'""",
-            member_ids + [cutoff]).fetchall()}
-        if recently_sent:
-            cancelled_recent = len(recently_sent)
-            members = [m for m in members if m["id"] not in recently_sent]
-        if not members:
-            return {"error": f"過去送信対象キャンセルにより、送信可能な企業がありません"
-                              f"(直近{cancel_recent_days}日以内に送信済み)"}
+    cancelled_recent = picked["cancelled_recent"]
+    members = [{"id": i} for i in picked["ids"]]
+    if not members:
+        return {"error": f"過去送信対象キャンセルにより、送信可能な企業がありません"
+                          f"(直近{cancel_recent_days}日以内に送信済み)"}
 
     if lst["campaign_id"]:
         campaign_id = lst["campaign_id"]

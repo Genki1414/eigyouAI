@@ -184,6 +184,8 @@ CACもチャネル別成績も出せない = 売り物にならない。
   GET  /api/tenant/scheduled-sends?list_id=  予約送信の一覧(自テナント分のみ)
   POST /api/tenant/scheduled-sends/cancel  {"scheduled_id"} → PENDINGの予約を
                            キャンセル(実行済み・キャンセル済みは404)
+  GET  /api/tenant/lists/<id>/target-count  いま送信を押すと何件に送るか(送信はしない)。
+                                  ?cancel_recent_days=30 で「過去送信対象キャンセル」を反映
   GET  /api/tenant/send-log       自テナントのフォーム自動送信履歴(form_send_log)。
                            ?company_id=/?list_id=で絞り込める(会社別の明細=詳細画面用)
   GET  /api/tenant/send-log/executions  MIKOMERUの「自動送信ログ」一覧相当(T22)。
@@ -1978,6 +1980,24 @@ def _parse_sender_override(data):
     return (override or None), None
 
 
+def h_tenant_list_target_count(con, tenant_id, list_id, qs):
+    """「いま送信を押すと何件に送るか」を返す(2026-09-22)。送信は一切しない。
+
+    送信ボタンの隣に出すための数。絞り込みはTL.count_send_targets()経由で
+    送信本体と共有しているので、**表示と実際の送信件数が一致する**。
+    ?cancel_recent_days= を付けると「過去送信対象キャンセル」を反映した数になる。"""
+    raw = (qs.get("cancel_recent_days", [""])[0] or "").strip()
+    days = None
+    if raw:
+        if not raw.isdigit() or int(raw) <= 0:
+            return 400, {"error": "cancel_recent_daysは正の整数で指定してください"}
+        days = int(raw)
+    res = TL.count_send_targets(con, tenant_id, list_id, cancel_recent_days=days)
+    if res is None:
+        return 404, {"error": "リストが見つかりません"}
+    return 200, res
+
+
 def h_tenant_list_send(con, tenant_id, list_id, data, staff_id=None):
     """保存済みリストから実際にフォーム自動送信キャンペーンを走らせる。
     dry_runは既定でTrue(=実サイトへは何も送らない)。実送信するには
@@ -3310,6 +3330,13 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_inquiry_get(con, tenant["id"])
                 elif u.path == "/api/tenant/lists":
                     st, res = h_tenant_lists_list(con, tenant["id"], qs)
+                elif u.path.endswith("/target-count"):
+                    list_id_str = u.path[len("/api/tenant/lists/"):-len("/target-count")]
+                    if not list_id_str.isdigit():
+                        st, res = 404, {"error": "not found"}
+                    else:
+                        st, res = h_tenant_list_target_count(
+                            con, tenant["id"], int(list_id_str), qs)
                 else:
                     list_id_str = u.path[len("/api/tenant/lists/"):]
                     if not list_id_str.isdigit():
@@ -4667,6 +4694,30 @@ def self_test(port=8899):
     t("該当しない企業IDでは0件になる", st == 200 and len(r.get("log", [])) == 0)
     st, r = get_auth("/api/tenant/send-log", token=key_b)
     t("他テナントのログは見えない", st == 200 and len(r.get("log", [])) == 0)
+
+    print("\n── 送信ボタンの隣に出す『何件に送るか』(2026-09-22) ──")
+    st, r = get_auth(f"/api/tenant/lists/{list_a_id}/target-count", token=key_a)
+    t("GET .../target-count で送信対象の件数が返る",
+      st == 200 and "target_count" in r and "with_contact_url" in r)
+    t("問い合わせURLが無い会社は対象外として数える",
+      r.get("with_contact_url", 0) <= r.get("list_total", 0))
+    st, r2 = get_auth(f"/api/tenant/lists/{list_a_id}/target-count?cancel_recent_days=30",
+                       token=key_a)
+    t("cancel_recent_days を反映した件数も返る",
+      st == 200 and r2.get("target_count", 0) <= r.get("target_count", 0))
+    t("除外した件数も返す(画面に『送信済みN件を除外』と出すため)",
+      "cancelled_recent" in r2)
+    st, _ = get_auth(f"/api/tenant/lists/{list_a_id}/target-count?cancel_recent_days=0",
+                      token=key_a)
+    t("cancel_recent_daysが不正なら400", st == 400)
+    st, _ = get_auth(f"/api/tenant/lists/{list_a_id}/target-count", token=key_b)
+    t("他テナントのリストの件数は見られない(404)", st == 404)
+    st, _ = get_auth(f"/api/tenant/lists/{list_a_id}/target-count")
+    t("認証ヘッダなしは401", st == 401)
+    # 表示と実際がずれないこと(同じ絞り込みを共有しているか)
+    _picked = TL._sendable_member_ids(con, list_a_id, None)
+    t("表示件数が送信本体の絞り込みと一致する",
+      len(_picked["ids"]) == r.get("target_count"))
 
     print("\n── 送信ログの集計CLI(T117: 会社名を出さず、理由と検証用URLだけ出す) ──")
     import argparse as _argparse

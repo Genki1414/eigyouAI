@@ -211,7 +211,46 @@ _FIELD_HINTS = {
 # 汎用"name"はname="last-name"のようなHTML属性にも紛れ込むため_classify_fieldで別扱いする。
 _NAME_HINTS_STRONG = [h for h in _FIELD_HINTS["name"] if h != "name"]
 
-_CONSENT_HINTS = ["プライバシー", "個人情報", "利用規約", "同意します", "同意する", "agree", "privacy"]
+# 送信前にチェックが要る「同意」系のチェックボックス。ラベルだけでなく
+# name/id/value/aria-label も見る(ラベルを持たない実装が珍しくないため)。
+# 2026-09-22: 本番で「チェックされていません」というエラーが41件出ていた。
+# 「承諾」「確認しました」「取扱い」等の言い回しが元の語彙から漏れていたのが原因。
+_CONSENT_HINTS = ["プライバシー", "個人情報", "利用規約", "規約", "ポリシー",
+                   "同意します", "同意する", "同意", "承諾", "承認", "了承",
+                   "確認しました", "確認済", "取扱い", "取り扱い", "注意事項",
+                   "agree", "privacy", "consent", "terms", "policy", "accept"]
+
+# 上の語に当たっても**チェックしてはいけない**もの。「同意しない」のような
+# 反対の選択肢と、こちらから希望した覚えのないメルマガ購読を弾く
+# (相手に不要な配信登録をさせるのは、営業として明確にやってはいけない)。
+_CONSENT_NEGATIVE_HINTS = ["同意しない", "同意しません", "承諾しない", "承諾しません",
+                            "希望しない", "希望しません", "受け取らない", "拒否",
+                            "メルマガ", "メールマガジン", "ニュースレター", "配信を希望",
+                            "案内を希望", "newsletter", "subscribe", "unsubscribe"]
+
+
+def _consent_blob(scope, el):
+    """同意チェックボックスかどうかを判定するための文字列。ラベル文言に加えて
+    name/id/value/aria-label を連結する(ラベルが無い実装への対応)。"""
+    parts = [_label_for(scope, el) or ""]
+    for attr in ("name", "id", "value", "aria-label", "title"):
+        try:
+            parts.append(el.get_attribute(attr) or "")
+        except Exception:  # noqa: BLE001
+            pass
+    return " ".join(parts).lower()
+
+
+def _is_consent_checkbox(scope, el):
+    """このチェックボックスが「送信するために入れる必要がある同意」かを返す。
+    否定側(_CONSENT_NEGATIVE_HINTS)を先に見るので、「同意しない」を
+    「同意」で拾ってしまうことはない。"""
+    blob = _consent_blob(scope, el)
+    if not blob.strip():
+        return False
+    if any(h.lower() in blob for h in _CONSENT_NEGATIVE_HINTS):
+        return False
+    return any(h.lower() in blob for h in _CONSENT_HINTS)
 
 _CONTACT_LINK_HINTS = [
     "お問い合わせ", "お問合せ", "問い合わせ", "問合せ", "お問い合せ",
@@ -1339,7 +1378,7 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 for cb in scope.query_selector_all("input[type=checkbox]"):
                     if not cb.is_visible() or cb.is_checked():
                         continue
-                    if any(h in (_label_for(scope, cb) or "") for h in _CONSENT_HINTS):
+                    if _is_consent_checkbox(scope, cb):
                         cb.check(timeout=ACTION_TIMEOUT_MS)
             except Exception:  # noqa: BLE001
                 pass
@@ -1615,6 +1654,43 @@ if __name__ == "__main__":
             e2 = _detect_submission_error(
                 "お問い合わせいただきありがとうございます。担当者より追ってご連絡いたします。")
             print(f"  {'✓' if e2 is None else '✗'} 通常の完了ページはエラー扱いにしない")
+
+            print("\n── 同意チェックボックスの判定(2026-09-22) ──")
+            print("  本番で「チェックされていません」が41件。語彙の漏れが原因だった")
+            consent_cases = [
+                # (説明, HTML, チェックすべきか)
+                ("プライバシーポリシーに同意する",
+                 '<input type="checkbox" id="a"><label for="a">プライバシーポリシーに同意する</label>', True),
+                ("個人情報の取扱いについて承諾します",
+                 '<input type="checkbox" id="a"><label for="a">個人情報の取扱いについて承諾します</label>', True),
+                ("上記の注意事項を確認しました",
+                 '<input type="checkbox" id="a"><label for="a">上記の注意事項を確認しました</label>', True),
+                ("利用規約に了承",
+                 '<input type="checkbox" id="a"><label for="a">利用規約に了承</label>', True),
+                ("ラベル無しでname=agree(実装でよくある)",
+                 '<input type="checkbox" name="agree">', True),
+                ("ラベル無しでid=privacy_check",
+                 '<input type="checkbox" id="privacy_check">', True),
+                ("aria-labelだけ持つ",
+                 '<input type="checkbox" aria-label="Accept terms">', True),
+                # ここから下は**押してはいけない**もの
+                ("同意しない(反対の選択肢)",
+                 '<input type="checkbox" id="a"><label for="a">同意しない</label>', False),
+                ("メールマガジンを希望する(こちらから登録させない)",
+                 '<input type="checkbox" id="a"><label for="a">メールマガジンを希望する</label>', False),
+                ("ニュースレターを受け取る",
+                 '<input type="checkbox" id="a"><label for="a">ニュースレターを受け取る</label>', False),
+                ("無関係なチェック(資料請求)",
+                 '<input type="checkbox" id="a"><label for="a">資料請求を希望</label>', False),
+                ("手がかりが何も無い",
+                 '<input type="checkbox">', False),
+            ]
+            for desc, html, want in consent_cases:
+                page.set_content(f"<form>{html}</form>")
+                cb = page.query_selector("input[type=checkbox]")
+                got = _is_consent_checkbox(page, cb)
+                print(f"  {'✓' if got == want else '✗'} {desc} → "
+                      f"{'チェックする' if got else 'チェックしない'}")
 
             print("\n── CAPTCHA判定(T109。人手が要るものだけ除外する) ──")
             captcha_cases = [

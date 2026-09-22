@@ -249,7 +249,12 @@ CREATE TABLE IF NOT EXISTS form_send_log (
   playwright_run_id TEXT,
   final_url TEXT,               -- 開発・検証中のみ埋める想定
   page_title TEXT,
-  page_text_snippet TEXT        -- 開発・検証中のみ埋める想定(成功判定できなかった原因調査用)
+  page_text_snippet TEXT,       -- 開発・検証中のみ埋める想定(成功判定できなかった原因調査用)
+  -- 「送信する」を押した1回(=1実行)を識別する。2026-09-22までは列が無く、
+  -- 実行一覧(list_send_executions)がリスト単位でしか集計できなかったため、
+  -- 同じリストへ複数回送ると9/19と9/22が1行にまとまってしまっていた。
+  -- 過去の行はNULLのままなので、集計側はNULLを日付でまとめて扱う。
+  send_run_id TEXT
 );
 
 -- クォータ追加購入(T55)。AI入札連携で、契約者が基本プランの送信枠(既定500通/月)を
@@ -429,6 +434,7 @@ def migrate(con):
         ("target_list_members", "memo", "TEXT"),
         # 原価計測。AIを使わない処理は0のままでよい(将来compose.py等のAI利用に接続する)
         ("form_send_log", "list_id", "INTEGER"),
+        ("form_send_log", "send_run_id", "TEXT"),   # 「送信する」1回を識別する(2026-09-22)
         ("form_send_log", "retry_count", "INTEGER DEFAULT 0"),
         ("form_send_log", "execution_seconds", "REAL"),
         ("form_send_log", "ai_tokens_input", "INTEGER DEFAULT 0"),

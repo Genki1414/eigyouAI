@@ -725,13 +725,17 @@ def h_click(con, touch_id):
     return f"{LP_URL}?t={touch_id}"
 
 
-def h_track_click(con, token):
+def h_track_click(con, token, user_agent=None, method="GET"):
     """MIKOMERUの「URLアクセスの記録」相当。senders.rewrite_tracked_links()が
     本文に埋め込んだトラッキングリンクのクリックを記録し、本来のURLを返す
     (呼び出し側で302リダイレクトする)。h_click()/LP_URLとは別物(こちらは
     ヒラケル自身の成長エンジンではなく、各テナントが送る文章中の任意のURLを
-    対象にする)。トークンが見つからなければNoneを返す。"""
-    return db.resolve_click_token(con, token)
+    対象にする)。トークンが見つからなければNoneを返す。
+
+    user_agent/methodはbot判定に使う(db.classify_click()参照)。自動アクセスでも
+    リダイレクト自体は通常どおり行う——踏んだ相手が人かどうかに関わらず、
+    リンクが動かないのは困るため。数え方だけを分ける。"""
+    return db.resolve_click_token(con, token, user_agent=user_agent, method=method)
 
 
 def verify_signature(raw: bytes, signature: str) -> bool:
@@ -1093,8 +1097,11 @@ def h_tenant_send_log_execution_note(con, tenant_id, list_id, data):
 # 会社別明細のURLクリック(T105): touches.email_click_count/email_clicked_at を
 # リスト(target_lists.campaign_id)と会社で引く。同じ会社へ複数回送っても行が増えないよう
 # 相関サブクエリで1値にまとめる
+# 「クリックした会社だけ」の絞り込みは**人が踏んだ可能性が高いクリック**で判定する
+# (email_click_countは自動アクセスも含む素の数。追客の優先順位付けに使うのは前者)
 CLICKED_WHERE_SQL = """ AND EXISTS (SELECT 1 FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
-            WHERE tl.id=l.list_id AND t.company_id=l.company_id AND COALESCE(t.email_click_count,0)>0)"""
+            WHERE tl.id=l.list_id AND t.company_id=l.company_id
+              AND COALESCE(t.email_click_human_count,0)>0)"""
 
 
 def h_tenant_send_log(con, tenant_id, qs):
@@ -1139,10 +1146,15 @@ def h_tenant_send_log(con, tenant_id, qs):
     q = f"""SELECT l.id, l.company_id, c.name company_name, l.status, l.reason_code,
             l.contact_url, l.target_url, l.started_at, l.finished_at, l.retry_count,
             l.execution_seconds, l.note, l.manual_sent_at, l.error_message,
+            l.submit_attempted,
             (SELECT MAX(t.email_click_count) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
                WHERE tl.id=l.list_id AND t.company_id=l.company_id) click_count,
             (SELECT MAX(t.email_clicked_at) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
                WHERE tl.id=l.list_id AND t.company_id=l.company_id) last_clicked_at,
+            (SELECT MAX(t.email_click_human_count) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
+               WHERE tl.id=l.list_id AND t.company_id=l.company_id) click_count_human,
+            (SELECT MAX(t.email_human_clicked_at) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
+               WHERE tl.id=l.list_id AND t.company_id=l.company_id) last_human_clicked_at,
             (l.screenshot_before_path IS NOT NULL) has_screenshot_before,
             (l.screenshot_after_path IS NOT NULL) has_screenshot_after
         FROM form_send_log l LEFT JOIN companies c ON c.id = l.company_id
@@ -1329,6 +1341,10 @@ def h_tenant_send_log_csv(con, tenant_id, qs):
                WHERE tl.id=l.list_id AND t.company_id=l.company_id) click_count,
             (SELECT MAX(t.email_clicked_at) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
                WHERE tl.id=l.list_id AND t.company_id=l.company_id) last_clicked_at,
+            (SELECT MAX(t.email_click_human_count) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
+               WHERE tl.id=l.list_id AND t.company_id=l.company_id) click_count_human,
+            (SELECT MAX(t.email_human_clicked_at) FROM touches t JOIN target_lists tl ON tl.campaign_id=t.campaign_id
+               WHERE tl.id=l.list_id AND t.company_id=l.company_id) last_human_clicked_at,
             l.id AS _id
         FROM form_send_log l LEFT JOIN companies c ON c.id = l.company_id
         WHERE {where} ORDER BY l.id DESC""", params).fetchall()
@@ -1336,13 +1352,18 @@ def h_tenant_send_log_csv(con, tenant_id, qs):
     import csv, io
     buf = io.StringIO()
     w = csv.writer(buf)
+    # クリックは会社単位の値(行=試行ごとには分けられない。h_tenant_send_log参照)。
+    # 素のアクセス数と、人が踏んだ可能性が高い数を別々に出す
     w.writerow(["ID", "会社名", "お問い合わせURL", "結果", "詳細", "エラー内容", "備考",
-                "手動送信済み", "登録日時", "実行日時", "URLクリック数", "最終クリック日時"])
+                "手動送信済み", "登録日時", "実行日時",
+                "URLクリック数(この会社。自動アクセス込み)", "最終クリック日時",
+                "URLクリック数(人の可能性が高い)", "最終クリック日時(人)"])
     for r in rows:
         w.writerow([r["id"], r["company_name"] or "", r["contact_url"] or "", r["status"],
                     r["reason_code"] or "", (r["error_message"] or "")[:300], r["note"] or "",
                     "済" if r["manual_sent_at"] else "", r["started_at"] or "",
-                    r["finished_at"] or "", r["click_count"] or 0, r["last_clicked_at"] or ""])
+                    r["finished_at"] or "", r["click_count"] or 0, r["last_clicked_at"] or "",
+                    r["click_count_human"] or 0, r["last_human_clicked_at"] or ""])
     return 200, {"csv": buf.getvalue()}
 
 
@@ -3381,7 +3402,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if u.path.startswith("/track/click/"):
                 token = u.path.split("/track/click/")[1]
-                url = h_track_click(con, token)
+                url = h_track_click(con, token,
+                                     user_agent=self.headers.get("User-Agent"),
+                                     method=self.command)
                 if not url:
                     return self._json(404, {"error": "このリンクは無効です"})
                 self.send_response(302)
@@ -3553,6 +3576,54 @@ def self_test(port=8899):
       con.execute("SELECT email_click_count FROM touches WHERE id=?", (tid,)).fetchone()[0] == 2)
     con.execute("DELETE FROM email_tracking_tokens WHERE token=?", (track_token,))
     con.execute("UPDATE touches SET email_click_count=0, email_clicked_at=NULL WHERE id=?", (tid,))
+    con.commit()
+
+    # bot判定(2026-09-22)。2026-09-22の送信で、別々の2社が**送信の12秒後・13秒後**に
+    # クリックされていた。人の行動としては速すぎ、メールやフォームのリンクを自動で開く
+    # セキュリティスキャナとみるのが自然だった。素の件数をそのまま『反響』として
+    # 見せていると追客の判断を誤るため、人の可能性が高い分だけを別に数える。
+    from datetime import datetime as _dt, timedelta as _td
+    sent_now = _dt.now()
+    old_sent = (sent_now - _td(hours=2)).isoformat(timespec="seconds")
+    t("送信直後(12秒後)のアクセスは自動アクセス扱い(実際に観測されたパターン)",
+      db.classify_click("Mozilla/5.0 (Windows NT 10.0) Chrome/120", "GET",
+                        (sent_now - _td(seconds=12)).isoformat(timespec="seconds"),
+                        now=sent_now) is False)
+    t("十分に時間が経ってからのアクセスは人扱い",
+      db.classify_click("Mozilla/5.0 (Windows NT 10.0) Chrome/120", "GET",
+                        old_sent, now=sent_now) is True)
+    for ua in ("Microsoft Office Word 2016", "Mozilla/5.0 (compatible; Googlebot/2.1)",
+               "curl/8.4.0", "python-requests/2.31", "Mozilla/5.0 HeadlessChrome/120",
+               "Mozilla/5.0 (compatible; proofpoint-urldefense)"):
+        t(f"自動アクセスのUser-Agentを弾く: {ua[:32]}",
+          db.classify_click(ua, "GET", old_sent, now=sent_now) is False)
+    t("User-Agentが無いアクセスは自動扱い",
+      db.classify_click("", "GET", old_sent, now=sent_now) is False)
+    t("GET以外(プリフェッチ等)は自動扱い",
+      db.classify_click("Mozilla/5.0 Chrome/120", "HEAD", old_sent, now=sent_now) is False)
+    t("送信日時が分からない場合は人扱いにする(判定材料が無いのに切り捨てない)",
+      db.classify_click("Mozilla/5.0 Chrome/120", "GET", None, now=sent_now) is True)
+
+    # 実際に踏ませて、素の件数と人の件数が別々に積まれることを確認する
+    con.execute("UPDATE touches SET sent_at=?, email_click_count=0, email_click_human_count=0, "
+                "email_clicked_at=NULL, email_human_clicked_at=NULL WHERE id=?", (old_sent, tid))
+    con.commit()
+    bot_token = db.create_click_token(con, tid, "https://example.co.jp/tracked-page")
+    db.resolve_click_token(con, bot_token, user_agent="curl/8.4.0")
+    raw1, human1 = con.execute("SELECT email_click_count, email_click_human_count "
+                                "FROM touches WHERE id=?", (tid,)).fetchone()
+    t("自動アクセスでも素のクリック数は増える(後から数え直せるように残す)", raw1 == 1)
+    t("自動アクセスは人のクリック数には入らない", human1 == 0)
+    db.resolve_click_token(con, bot_token, user_agent="Mozilla/5.0 (Macintosh) Safari/605.1")
+    raw2, human2 = con.execute("SELECT email_click_count, email_click_human_count "
+                                "FROM touches WHERE id=?", (tid,)).fetchone()
+    t("人のアクセスは両方に入る", raw2 == 2 and human2 == 1)
+    t("自動アクセスでもリダイレクト自体は通す(リンクが動かないのは困るため)",
+      db.resolve_click_token(con, bot_token, user_agent="curl/8.4.0")
+      == "https://example.co.jp/tracked-page")
+    con.execute("DELETE FROM email_tracking_tokens WHERE token=?", (bot_token,))
+    con.execute("UPDATE touches SET email_click_count=0, email_click_human_count=0, "
+                "email_clicked_at=NULL, email_human_clicked_at=NULL WHERE id=?", (tid,))
     con.commit()
 
     print("\n── 配信停止 ──")
@@ -4949,8 +5020,11 @@ def self_test(port=8899):
     con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url, started_at,
         status, reason_code) VALUES (?,?,?,'https://example.co.jp',?,'FAILED_UNSUPPORTED','form_not_found')""",
         (t22_company, tid_a, t22_list_id, now_t22))
-    con.execute("UPDATE touches SET email_click_count=3, email_clicked_at=? WHERE campaign_id=?",
-                (now_t22, t22_campaign_id))
+    # 素のクリック3回のうち2回は「人が踏んだ可能性が高い」という状態にする
+    # (残り1回は自動アクセス。画面・CSV・?clicked=1がどちらを基準にするかを固定する)
+    con.execute("""UPDATE touches SET email_click_count=3, email_clicked_at=?,
+        email_click_human_count=2, email_human_clicked_at=? WHERE campaign_id=?""",
+                (now_t22, now_t22, t22_campaign_id))
     con.commit()
 
     # T110: 中断した送信の自動再開では、既に届いた会社へ再送しない
@@ -5079,14 +5153,28 @@ def self_test(port=8899):
       f"reasons={r.get('reasons')}")
     t("会社別明細にURLクリック数と最終クリック日時が出る",
       st == 200 and all(x["click_count"] == 3 and x["last_clicked_at"] == now_t22 for x in r["log"]))
+    t("会社別明細に『人が踏んだ可能性が高い』クリックも別に出る(自動アクセスと分ける)",
+      st == 200 and all(x["click_count_human"] == 2
+                        and x["last_human_clicked_at"] == now_t22 for x in r["log"]))
+    t("会社別明細にsubmit_attemptedが出る(クリックを実際に送った行にだけ見せるため)",
+      st == 200 and all("submit_attempted" in x for x in r["log"]))
     con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url, started_at,
         status, reason_code) VALUES (999999997,?,?,'https://example.co.jp',?,'SUCCESS','success_text_matched')""",
         (tid_a, t22_list_id, now_t22))
     con.commit()
     st, r = get_auth(f"/api/tenant/send-log?list_id={t22_list_id}&clicked=1", token=key_a)
-    t("?clicked=1でクリックした会社の行だけになる(クリックの無い会社は出ない)",
+    t("?clicked=1は『人が踏んだ』クリックで絞る(自動アクセスだけの会社は出ない)",
       st == 200 and len(r["log"]) == 2 and all(x["company_id"] == t22_company for x in r["log"])
       and sum(r["counts"].values()) == 2)
+    con.execute("UPDATE touches SET email_click_human_count=0 WHERE campaign_id=?",
+                (t22_campaign_id,))
+    con.commit()
+    st, r_bot = get_auth(f"/api/tenant/send-log?list_id={t22_list_id}&clicked=1", token=key_a)
+    t("自動アクセスしかない会社は?clicked=1に出ない(反響の水増しを避ける)",
+      st == 200 and len(r_bot["log"]) == 0, f"n={len(r_bot.get('log', []))}")
+    con.execute("UPDATE touches SET email_click_human_count=2 WHERE campaign_id=?",
+                (t22_campaign_id,))
+    con.commit()
     st, r = get_auth(f"/api/tenant/send-log/csv?list_id={t22_list_id}&clicked=1", token=key_a)
     t("CSVにもURLクリック数・最終クリック日時の列が入り、?clicked=1が効く",
       st == 200 and "URLクリック数" in r["csv"] and r["csv"].count("\n") == 3 and ",3," in r["csv"])

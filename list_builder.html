@@ -1877,7 +1877,8 @@ async function refreshSendLogExecutions() {
     if (!execs.length) { el.innerHTML = `<div class="empty">該当する自動送信ログがありません</div>`; return; }
     el.innerHTML = `<table><tr><th>ID</th><th>担当者(ID)</th><th>会社名</th><th>姓</th><th>名</th>
         <th>メールアドレス</th><th>送信文章</th><th>備考</th><th>送信消化</th><th>送信成功/総数</th>
-        <th>URLクリック数</th><th>最新クリック日時</th><th>実行日時</th></tr>` +
+        <th title="人が踏んだ可能性が高いクリックのみ。自動アクセスは除いています">URLクリック数</th>
+        <th>最新クリック日時</th><th>実行日時</th></tr>` +
       execs.map((x, i) => { const escSubject = (x.subject || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
         const escBody = (x.body || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
         return `<tr>
@@ -1896,8 +1897,11 @@ async function refreshSendLogExecutions() {
           style="font-size:11px;padding:4px 6px;width:120px"></td>
         <td title="送信を試した会社数/リストの件数">${(x.sent_companies || 0).toLocaleString()}/${(x.list_count || 0).toLocaleString()}${x.list_count ? ` <span style="font-size:11px;color:var(--steel)">(${Math.round((x.sent_companies || 0) * 100 / x.list_count)}%)</span>` : ""}</td>
         <td>${x.success.toLocaleString()}/${x.total.toLocaleString()}</td>
-        <td>${x.click_count.toLocaleString()}</td>
-        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.last_clicked_at || "—"}</td>
+        <td>${(x.click_count_human || 0).toLocaleString()}${
+          x.click_count > (x.click_count_human || 0)
+            ? `<br><span style="font-size:10px;color:var(--steel)" title="セキュリティスキャナ等による自動アクセスとみなした分">(自動 ${(x.click_count - (x.click_count_human || 0)).toLocaleString()})</span>`
+            : ""}</td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.last_human_clicked_at || x.last_clicked_at || "—"}</td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at || "—"}</td>
         </tr>
         <tr id="body-${i}" class="execBodyRow" style="display:none">
@@ -2012,7 +2016,7 @@ async function refreshSendLog() {
     if (!r.log.length) { el.innerHTML = `<div class="empty">該当する送信履歴がありません</div>`; return; }
     el.innerHTML = `<table><tr><th>会社名</th><th>お問い合わせURL</th><th>結果</th><th>詳細</th>
         <th>送信前</th><th>送信後</th><th>自動入力</th><th>手動送信済み</th><th>備考</th>
-        <th>URLクリック</th><th>日時</th></tr>` +
+        <th title="クリックは会社単位の記録です。どの試行で踏まれたかは区別できません">この会社のクリック</th><th>日時</th></tr>` +
       r.log.map(x => {
         const cls = LOG_STATUS_CLASS[x.status] || "";
         const label = LOG_STATUS_LABELS[x.status] || x.status;
@@ -2030,7 +2034,9 @@ async function refreshSendLog() {
             ${x.manual_sent_at ? "checked" : ""}></label></td>
         <td><input type="text" class="noteInput" data-id="${x.id}" value="${(x.note || "").replace(/"/g, "&quot;")}"
           placeholder="例: 架電済み" style="font-size:11px;padding:4px 6px"></td>
-        <td>${x.click_count ? `<b style="color:var(--accent)">${x.click_count}回</b><br><span style="font-family:var(--mono);font-size:10px;color:var(--steel)">${x.last_clicked_at || ""}</span>` : "—"}</td>
+        <td>${!x.submit_attempted ? `<span style="color:var(--steel)">—</span>`
+          : (x.click_count_human ? `<b style="color:var(--accent)">${x.click_count_human}回</b><br><span style="font-family:var(--mono);font-size:10px;color:var(--steel)">${x.last_human_clicked_at || ""}</span>`
+             : (x.click_count ? `<span style="color:var(--steel)" title="自動アクセス(セキュリティスキャナ等)とみなした分だけです">自動 ${x.click_count}回</span>` : "—"))}</td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--steel)">${x.started_at}</td></tr>`;
       }).join("") +
       `</table>`;

@@ -23,6 +23,13 @@ API_PUBLIC_URL = os.environ.get("API_PUBLIC_URL", "https://app.ashibase.jp")
 # ("or"なのは.envにTRACK_BASE_URL=(空)があってもデフォルトへ倒すため。OPTOUT_URL参照)
 TRACK_BASE_URL = os.environ.get("TRACK_BASE_URL") or API_PUBLIC_URL
 
+# クリック計測で「人が踏んだ」と数える最短の経過秒数(送信からの差。2026-09-22)。
+# これより早いアクセスは自動アクセス(セキュリティスキャナ等)とみなし、
+# email_click_human_count には数えない。素のemail_click_countは必ず加算するので
+# 値を変えれば後から数え直せる(db.classify_click()参照)。
+# 実測: 2026-09-22の送信で、別々の2社が送信の12秒後・13秒後にクリックされていた。
+CLICK_HUMAN_MIN_SECONDS = int(os.environ.get("CLICK_HUMAN_MIN_SECONDS", "60"))
+
 # 特定電子メール法上必須の配信停止URL。2026-09-09発覚: 専用のOPTOUT_URL環境変数を
 # 想定していたコード(.env.example)はあったが、どのPythonコードからも参照されて
 # おらず、senders.py/api.pyの複数箇所で"https://ashibase.jp/optout"という

@@ -455,6 +455,10 @@ def migrate(con):
         ("touches", "email_open_count", "INTEGER DEFAULT 0"),
         ("touches", "email_clicked_at", "TEXT"),
         ("touches", "email_click_count", "INTEGER DEFAULT 0"),
+        # 「人が踏んだ可能性が高いクリック」だけを別に数える(2026-09-22)。
+        # email_click_count は従来どおり素のアクセス数(botも含む)を保つ
+        ("touches", "email_click_human_count", "INTEGER DEFAULT 0"),
+        ("touches", "email_human_clicked_at", "TEXT"),
         ("touches", "email_bounced_at", "TEXT"),
         ("touches", "email_bounce_type", "TEXT"),
         ("touches", "email_unsubscribed_at", "TEXT"),
@@ -877,18 +881,83 @@ def create_click_token(con, touch_id, target_url):
     return token
 
 
-def resolve_click_token(con, token):
+# 自動アクセス(人が踏んだのではないクリック)を見分けるためのUser-Agent。
+# メールやフォームのリンクを先回りして開くセキュリティゲートウェイ・プレビュー
+# 生成・各種クローラを想定している。ブラウザのUAはどれもMozillaを含むので、
+# Mozillaの有無では判定できない——「そのソフト固有の語」だけを並べること。
+_BOT_UA_RE = re.compile(
+    r"bot|crawler|spider|slurp|scrap|preview|monitor|validator|fetch|scan|"
+    r"curl|wget|python-requests|httpx|aiohttp|go-http-client|java/|okhttp|libwww|"
+    r"headlesschrome|phantomjs|puppeteer|playwright|selenium|"
+    r"safelinks|proofpoint|mimecast|barracuda|symantec|forcepoint|trendmicro|"
+    r"sophos|cloudmark|messagelabs|ironport|zscaler|netskope|"
+    r"slackbot|twitterbot|facebookexternalhit|linkedinbot|discordbot|"
+    r"skypeuripreview|whatsapp|telegrambot|"
+    r"ms-office|msoffice|microsoft office|outlook|windows-update-agent",
+    re.I)
+
+
+def classify_click(user_agent, method, sent_at, now=None, min_seconds=None):
+    """このクリックが「人が踏んだ可能性が高い」かを判定する(2026-09-22)。
+
+    Trueを返す=人の可能性が高い。Falseなら自動アクセスとみなす。
+
+    きっかけ: 2026-09-22の送信で、別々の2社が**送信の12秒後・13秒後**にクリック
+    されていた。人の行動としては速すぎ、メールやフォームのリンクを自動で開く
+    セキュリティスキャナとみるのが自然だった。配信停止(h_optout_page)は
+    「GETだけでは停止しない」とプリフェッチ対策が入っているのに、クリック計測には
+    同じ配慮が無く、素のアクセス数がそのまま『反響』として出ていた。
+
+    判定は次のいずれかに当たれば自動アクセス扱い:
+      - GET以外(HEAD等のプリフェッチ)
+      - User-Agentが空、または_BOT_UA_REに一致
+      - 送信からmin_seconds以内のアクセス(既定はconfig.CLICK_HUMAN_MIN_SECONDS)
+
+    判定を誤っても素のemail_click_countは必ず加算するので、後から数え直せる。
+    """
+    if (method or "GET").upper() != "GET":
+        return False
+    ua = (user_agent or "").strip()
+    if not ua or _BOT_UA_RE.search(ua):
+        return False
+    if sent_at:
+        if min_seconds is None:
+            min_seconds = C.CLICK_HUMAN_MIN_SECONDS
+        try:
+            elapsed = ((now or datetime.now()) - datetime.fromisoformat(sent_at)).total_seconds()
+        except ValueError:
+            return True
+        if 0 <= elapsed < min_seconds:
+            return False
+    return True
+
+
+def resolve_click_token(con, token, user_agent=None, method="GET"):
     """クリック計測トークンを解決し、初回クリック日時(email_clicked_at)と
     クリック回数(email_click_count)をtouchesへ記録する。存在しないトークン
-    (typo・改ざん・期限切れ等)ならNoneを返す(呼び出し側は404にする)。"""
-    row = con.execute("""SELECT touch_id, target_url FROM email_tracking_tokens
-        WHERE token=? AND kind='click'""", (token,)).fetchone()
+    (typo・改ざん・期限切れ等)ならNoneを返す(呼び出し側は404にする)。
+
+    email_click_count/email_clicked_at は**素のアクセス**をそのまま数える(従来の
+    意味を変えない)。あわせてclassify_click()が「人の可能性が高い」と判定した分だけ
+    email_click_human_count/email_human_clicked_at にも記録する。画面で『反響』として
+    見せるのは後者——自動アクセスで水増しされた数字を追客の根拠にしないため。"""
+    row = con.execute("""SELECT t.id touch_id, e.target_url, t.sent_at
+        FROM email_tracking_tokens e JOIN touches t ON t.id = e.touch_id
+        WHERE e.token=? AND e.kind='click'""", (token,)).fetchone()
     if not row:
         return None
+    now = datetime.now()
+    stamp = now.isoformat(timespec="seconds")
+    human = classify_click(user_agent, method, row["sent_at"], now=now)
     con.execute("""UPDATE touches SET
         email_clicked_at = COALESCE(email_clicked_at, ?),
         email_click_count = email_click_count + 1
-        WHERE id=?""", (datetime.now().isoformat(timespec="seconds"), row["touch_id"]))
+        WHERE id=?""", (stamp, row["touch_id"]))
+    if human:
+        con.execute("""UPDATE touches SET
+            email_human_clicked_at = COALESCE(email_human_clicked_at, ?),
+            email_click_human_count = COALESCE(email_click_human_count, 0) + 1
+            WHERE id=?""", (stamp, row["touch_id"]))
     con.commit()
     return row["target_url"]
 

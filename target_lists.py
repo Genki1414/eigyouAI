@@ -1110,7 +1110,9 @@ def list_send_executions(con, tenant_id, list_id=None, date_from=None, date_to=N
     def _campaign_extras(campaign_id):
         if campaign_id not in cache:
             clicks = con.execute("""SELECT COALESCE(SUM(email_click_count),0) clicks,
-                    MAX(email_clicked_at) last_clicked_at
+                    MAX(email_clicked_at) last_clicked_at,
+                    COALESCE(SUM(email_click_human_count),0) clicks_human,
+                    MAX(email_human_clicked_at) last_human_clicked_at
                 FROM touches WHERE campaign_id=?""", (campaign_id,)).fetchone()
             sample = con.execute("SELECT subject, body FROM touches WHERE campaign_id=? LIMIT 1",
                                   (campaign_id,)).fetchone()
@@ -1170,6 +1172,9 @@ def _exec_row(m, extras, run_key, started_at, counts):
         "sent_companies": (counts["sent_companies"] if counts else 0) or 0,
         "list_count": m["company_count"] or 0,
         "click_count": clicks["clicks"] or 0, "last_clicked_at": clicks["last_clicked_at"],
+        # 自動アクセスを除いた「人が踏んだ可能性が高い」クリック(db.classify_click())
+        "click_count_human": clicks["clicks_human"] or 0,
+        "last_human_clicked_at": clicks["last_human_clicked_at"],
         "started_at": started_at,
     }
 

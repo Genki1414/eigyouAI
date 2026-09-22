@@ -24,6 +24,7 @@ on:
           - queue          # 送信キュー(順番待ち・送信中)の一覧
           - send-delivery  # 送信ログ: どこまで進めたかを会社数で(他社との比較用)
           - send-delivery-today  # 同上を「今日ぶん」だけで(実行中の成績を見る)
+          - dup-check      # 既に成功済みの会社へ再送していないか(件数のみ)
           - send-reasons-today   # 結果・理由別の件数と成功率を「今日ぶん」だけで
           - send-reasons   # 送信ログ: 結果・理由別の件数と成功率(直近30日)
           - send-runs      # 送信ログ: 実行(リスト)単位の成績(直近30日)
@@ -78,6 +79,13 @@ jobs:
             # 問い合わせ先URLだけ)。URLは公開されている企業サイトのもの。
             # --days 1 は「今日ぶん」の意味で使う(_since()が現在時刻からの相対で
             # 絞るため、厳密には直近24時間。1回の送信の成績を見るのに使う)
+            # 二重送信の実数を件数だけで確認する(会社名・本文は出さない)。
+            # form_send_logは追記のみなので、実行開始時刻を境にすれば過去の状態を
+            # そのまま再現できる(touches.sent_atは再送信で上書きされるため使えない)。
+            dup-check)
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T sender \
+                  python3 -c 'import db; c=db.connect(); t=\"2026-09-22T14:38:00\"; S=\"SUCCESS\"; n=lambda q,a: c.execute(q,a).fetchone()[0]; a=n(\"SELECT COUNT(DISTINCT company_id) FROM form_send_log WHERE started_at<? AND status=?\",(t,S)); b=n(\"SELECT COUNT(DISTINCT company_id) FROM form_send_log WHERE started_at>=?\",(t,)); cc=n(\"SELECT COUNT(*) FROM (SELECT company_id FROM form_send_log GROUP BY company_id HAVING SUM(CASE WHEN started_at>=? THEN 1 ELSE 0 END)>0 AND SUM(CASE WHEN started_at<? AND status=? THEN 1 ELSE 0 END)>0) x\",(t,t,S)); d=n(\"SELECT COUNT(*) FROM (SELECT company_id FROM form_send_log GROUP BY company_id HAVING SUM(CASE WHEN started_at>=? AND status=? THEN 1 ELSE 0 END)>0 AND SUM(CASE WHEN started_at<? AND status=? THEN 1 ELSE 0 END)>0) x\",(t,S,t,S)); print(\"境界 %s より前=過去 / 以降=今回の実行\" % t); print(\"  境界より前に成功していた会社数           %6d\" % a); print(\"  境界以降に送信を試した会社数             %6d\" % b); print(\"  うち既に成功済みだった会社数(=二重送信)  %6d\" % cc); print(\"    うち今回も成功した会社数               %6d\" % d)'" ;;
             send-delivery-today)
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \

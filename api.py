@@ -4558,6 +4558,33 @@ def self_test(port=8899):
       res_cr_off is not None and "error" not in res_cr_off
       and res_cr_off.get("target_count") == 2 and res_cr_off.get("cancelled_recent") == 0)
 
+    # 上の2件はtarget_count(=画面に出る件数)しか見ていなかったため、
+    # 「表示は正しいのに実際には全社へ送っている」というバグを通してしまった
+    # (2026-09-22、既に成功済みの460社へ二重送信。send_campaign()のdocstring参照)。
+    # **実際に誰へ送ったか**をstatsで検証する。
+    # バグの再現条件は「同じリストへの2回目以降の送信」。同じリストは同じcampaignを
+    # 使い回すので、1回目でリスト全社ぶんのtouchesが出来ている状態で2回目を送ると、
+    # send_campaign()が絞り込みを無視して全touchesを拾ってしまっていた。
+    # ここまでで res_cr(1社) → res_cr_off(2社) と送ったので、campaignには2社ぶんの
+    # touchesがある。この状態で改めて除外付きで送るのが本番と同じ条件になる。
+    res_cr2 = TL.send_list(con, tid_a, cr_list_id, "件名", "本文", dry_run=True,
+                            cancel_recent_days=30)
+    cr_stats = res_cr2.get("stats") or {}
+    cr_touched = sum(v for k, v in cr_stats.items() if isinstance(v, int))
+    t("2回目以降でも、除外した会社へは実際に送らない(表示だけでなく実体。二重送信の防止)",
+      res_cr2.get("target_count") == 1 and cr_touched == 1,
+      f"target_count={res_cr2.get('target_count')} stats={cr_stats}")
+    cr_stats_off = res_cr_off.get("stats") or {}
+    cr_touched_off = sum(v for k, v in cr_stats_off.items() if isinstance(v, int))
+    t("cancel_recent_days未指定なら実際にも2社が送信処理へ回る",
+      cr_touched_off == 2, f"stats={cr_stats_off}")
+    # company_ids=[] は「全社」ではなく「0件」。取り違えると事故になるので固定する
+    import senders as SND_cr
+    empty_stats = SND_cr.send_campaign(con, res_cr["campaign_id"], step=1, dry_run=True,
+                                        company_ids=[])
+    t("send_campaign(company_ids=[])は1件も送らない(Noneの「全社」と区別する)",
+      sum(v for k, v in empty_stats.items() if isinstance(v, int)) == 0, f"stats={empty_stats}")
+
     con.execute("DELETE FROM touches WHERE campaign_id IN (?,?)",
                  (prior_campaign_id, res_cr["campaign_id"]))
     con.execute("DELETE FROM campaigns WHERE id IN (?,?)", (prior_campaign_id, res_cr["campaign_id"]))

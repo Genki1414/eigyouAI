@@ -615,7 +615,7 @@ def _is_quota_error(error):
 
 def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clicks=False,
                    sender_template_id=None, allow_no_solicit=False, sender_override=None,
-                   skip_already_sent=False):
+                   skip_already_sent=False, company_ids=None):
     """キャンペーンの対象企業へ実際に送る。
     campaign.py simulate の本番版がこれ。接触ガードはここでも最終確認する。
 
@@ -630,6 +630,15 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
     ただし中断した送信の「自動再開」(デプロイ・ワーカー再起動・自動再試行)は人の操作では
     ないので、skip_already_sent=Trueで既に届いた会社を除外する(T110。これが無かったため、
     2026-09-19の四国2,975社の送信で274社に重複送信してしまった)。
+
+    company_ids: 送信対象の会社を明示的に絞る(2026-09-22)。指定しなければ従来どおり
+    キャンペーン配下の全touchesが対象。**同じリストは同じcampaignを使い回す**ため、
+    これが無いと呼び出し側(send_list)がどれだけ対象を絞っても、ここで過去の送信ぶんの
+    touchesまで拾ってしまう。実際、send_list()の「過去送信対象キャンセル」は
+    画面の件数表示と件名・本文の更新にしか効いておらず、2026-09-22の四国再送信で
+    **既に成功していた460社へ二重送信**する事故になった(利用者が気づいて発覚)。
+    除外された会社のtouchesは前回の本文が残ったままなので body!='' を通過し、
+    9/19と同じ文面がもう一度送られていた。
     can_contact()(配信停止/オプトアウト・テナント除外・重複レコード)は
     これとは無関係に、以前と変わらず必ずチェックされる。
 
@@ -690,6 +699,15 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
            WHERE t.campaign_id=? AND t.step=?
              AND t.body IS NOT NULL AND t.body != ''"""
     p = [campaign_id, step]
+    if company_ids is not None:
+        # 呼び出し側が対象を絞ったなら、その会社だけに送る。空リストなら1件も送らない
+        # (「全社が対象」を意味するNoneと区別する。ここを取り違えると事故になる)
+        if not company_ids:
+            print("送信対象がありません（呼び出し側の絞り込みで0件）")
+            return {"sent": 0, "failed": 0, "blocked": 0, "suppressed": 0, "stopped": 0,
+                    "blocked_by_reason": {}, "failed_by_reason": {}}
+        q += f" AND t.company_id IN ({','.join('?' * len(company_ids))})"
+        p += list(company_ids)
     if skip_already_sent:
         # 中断した送信の「自動再開」用(T110)。既に届いた会社には二度と送らない。
         # 判定にtouches.sent_atを使わないのは、ドライランでもsent_atが入るため

@@ -900,10 +900,14 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
         (staff_id, sender_template_id, datetime.now().isoformat(timespec="seconds"), list_id))
     con.commit()
 
+    # 絞り込んだ対象(picked["ids"])を**必ず渡す**。渡さないとsend_campaign()は
+    # キャンペーン配下の全touchesを対象にしてしまい、ここでの除外が画面表示だけの
+    # 飾りになる(2026-09-22の二重送信事故。send_campaign()のdocstring参照)。
     stats = senders.send_campaign(con, campaign_id, step=1, dry_run=dry_run,
                                    track_clicks=track_clicks, sender_template_id=sender_template_id,
                                    allow_no_solicit=allow_no_solicit, sender_override=sender_override,
-                                   skip_already_sent=skip_already_sent)
+                                   skip_already_sent=skip_already_sent,
+                                   company_ids=[m["id"] for m in members])
     if not dry_run:
         db.sync_target_list_member_status(con, list_id, campaign_id, step=1)
         _notify_completion(con, tenant_id, lst["name"], len(members), stats,

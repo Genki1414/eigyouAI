@@ -147,15 +147,81 @@ def _parse_proxy(proxy_url):
     return proxy
 
 
+# プロキシが落ちているときに、直接接続へ切り替えるための状態(2026-09-23)。
+# 2026-09-22の四国2,975社への送信で、プロキシが8時間以上ダウンしたまま
+# ERR_TUNNEL_CONNECTION_FAILED を出し続け、goto_failedが試行の19.4%(1,442件、
+# 約480社)に達した。プロキシ経由でしか接続しない作りだったため、**落ちた瞬間に
+# 送信全体が無価値になる**。IPを分散できないことより、1社も送れないことの方が
+# はるかに重い損失なので、続けて失敗したら自動で直接接続へ落とす。
+_PROXY_LOCK = threading.Lock()
+_PROXY_FAILS = 0
+_PROXY_DISABLED = False
+# 何回続けてプロキシ由来の失敗が出たら直接接続へ切り替えるか
+PROXY_FAILURE_THRESHOLD = int(os.environ.get("PROXY_FAILURE_THRESHOLD", "5"))
+# プロキシ自体に到達できない/認証が通らないときにChromiumが返すエラー。
+# 相手サイト都合のエラー(ERR_CONNECTION_REFUSED等)を混ぜないこと——混ぜると
+# 相手が落ちているだけでプロキシを捨ててしまう
+_PROXY_ERROR_RE = re.compile(
+    r"ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|"
+    r"ERR_PROXY_AUTH_(REQUESTED|UNSUPPORTED)|ERR_NO_SUPPORTED_PROXIES|"
+    r"ERR_SOCKS_CONNECTION_FAILED|ERR_UNEXPECTED_PROXY_AUTH")
+
+
+def proxy_disabled():
+    """このプロセスがプロキシを諦めて直接接続に切り替えたか。"""
+    with _PROXY_LOCK:
+        return _PROXY_DISABLED
+
+
+def note_proxy_result(error_message):
+    """1回のページ遷移の結果をプロキシの健全性として記録する。
+
+    プロキシ由来のエラーが PROXY_FAILURE_THRESHOLD 回続いたら、以後この
+    プロセスでは直接接続に切り替える(Trueを返す)。成功が1回でも挟まれば
+    カウンタは戻る——たまたま1社が開けなかっただけでプロキシを捨てないため。
+
+    プロセスが再起動すれば設定は読み直されるので、プロキシを直した後は
+    デプロイやワーカー再起動でそのまま元に戻る(恒久的に無効化はしない)。
+    """
+    global _PROXY_FAILS, _PROXY_DISABLED
+    import config as C
+    if not C.FORM_PROXY_POOL:
+        return False
+    with _PROXY_LOCK:
+        if _PROXY_DISABLED:
+            return False
+        if error_message and _PROXY_ERROR_RE.search(error_message):
+            _PROXY_FAILS += 1
+            if _PROXY_FAILS >= PROXY_FAILURE_THRESHOLD:
+                _PROXY_DISABLED = True
+                print(f"  [proxy] プロキシ由来の失敗が{_PROXY_FAILS}回続いたため、"
+                      f"以後は直接接続に切り替えます(送信を止めないための緊急回避。"
+                      f"FORM_PROXY_POOLの状態を確認してください)")
+                return True
+        else:
+            _PROXY_FAILS = 0
+    return False
+
+
+def _reset_proxy_state():
+    """テスト用。プロセス内の状態を初期化する。"""
+    global _PROXY_FAILS, _PROXY_DISABLED
+    with _PROXY_LOCK:
+        _PROXY_FAILS = 0
+        _PROXY_DISABLED = False
+
+
 def _pick_proxy():
     """config.FORM_PROXY_POOL(T42: 送信元IPの分散)からランダムに1つ選ぶ。
     未設定(空リスト)ならNoneを返し、直接接続する(既定・後方互換の挙動)。
     T41で並列化した複数ワーカーそれぞれがブラウザ起動時に呼ぶため、単純な
     ランダム選択で長期的にはプール全体へ分散する(厳密なラウンドロビンは
     ワーカー間の共有カウンタが要るぶん複雑になるだけで、目的<IPの分散>には
-    どちらでも十分)。"""
+    どちらでも十分)。
+
+    プロキシが落ちていると判断した後(note_proxy_result参照)はNoneを返す。"""
     import config as C
-    if not C.FORM_PROXY_POOL:
+    if not C.FORM_PROXY_POOL or proxy_disabled():
         return None
     return _parse_proxy(random.choice(C.FORM_PROXY_POOL))
 
@@ -1263,7 +1329,18 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                     result.status = "FAILED_RETRYABLE"
                     result.reason_code = "goto_failed"
                 result.error_message = f"{type(e).__name__}: {e}"
+                if note_proxy_result(msg):
+                    # 直接接続へ切り替わった。いま掴んでいるブラウザはプロキシ設定の
+                    # ままなので捨てる(次の_acquire_browser()が直接接続で開き直す)。
+                    # この会社自体はFAILED_RETRYABLEなので呼び出し側が再試行する
+                    try:
+                        close_thread_browser()
+                    except Exception:  # noqa: BLE001
+                        pass
                 return result
+
+            # 1社でも開けたならプロキシは生きている。連続失敗のカウンタを戻す
+            note_proxy_result(None)
 
             contact_url, discover_err = _resolve_contact_page(page, start_url, deadline=deadline)
             result.contact_url_used = contact_url
@@ -1654,6 +1731,49 @@ if __name__ == "__main__":
             e2 = _detect_submission_error(
                 "お問い合わせいただきありがとうございます。担当者より追ってご連絡いたします。")
             print(f"  {'✓' if e2 is None else '✗'} 通常の完了ページはエラー扱いにしない")
+
+            print("\n── プロキシ障害時の直接接続フォールバック(2026-09-23) ──")
+            print("  9/22の送信でプロキシが8時間以上落ち、goto_failedが試行の19.4%になった")
+            import config as C_px
+            orig_px = C_px.FORM_PROXY_POOL
+            try:
+                C_px.FORM_PROXY_POOL = ["http://dead.example.com:8080"]
+                _reset_proxy_state()
+                tunnel = "Error: Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://x.jp/"
+                switched = [note_proxy_result(tunnel) for _ in range(PROXY_FAILURE_THRESHOLD)]
+                print(f"  {'✓' if not any(switched[:-1]) else '✗'} "
+                      f"{PROXY_FAILURE_THRESHOLD - 1}回までは切り替えない(たまたまの失敗で捨てない)")
+                print(f"  {'✓' if switched[-1] else '✗'} "
+                      f"{PROXY_FAILURE_THRESHOLD}回続いたら直接接続へ切り替える")
+                print(f"  {'✓' if proxy_disabled() else '✗'} 切り替え後はproxy_disabled()がTrue")
+                print(f"  {'✓' if _pick_proxy() is None else '✗'} "
+                      f"切り替え後は_pick_proxy()がNone(直接接続)を返す")
+
+                # 成功が挟まればカウンタは戻る
+                _reset_proxy_state()
+                for _ in range(PROXY_FAILURE_THRESHOLD - 1):
+                    note_proxy_result(tunnel)
+                note_proxy_result(None)
+                more = [note_proxy_result(tunnel) for _ in range(PROXY_FAILURE_THRESHOLD - 1)]
+                print(f"  {'✓' if not any(more) and not proxy_disabled() else '✗'} "
+                      f"間に成功が挟まればカウンタが戻る(断続的な失敗で捨てない)")
+
+                # 相手サイト都合のエラーはプロキシのせいにしない
+                _reset_proxy_state()
+                site_err = "Error: Page.goto: net::ERR_CONNECTION_REFUSED at https://x.jp/"
+                site = [note_proxy_result(site_err) for _ in range(PROXY_FAILURE_THRESHOLD * 2)]
+                print(f"  {'✓' if not any(site) and not proxy_disabled() else '✗'} "
+                      f"相手サイト都合のエラー(ERR_CONNECTION_REFUSED)では切り替えない")
+
+                # プロキシを使っていないときは何もしない
+                _reset_proxy_state()
+                C_px.FORM_PROXY_POOL = []
+                none_px = [note_proxy_result(tunnel) for _ in range(PROXY_FAILURE_THRESHOLD * 2)]
+                print(f"  {'✓' if not any(none_px) and not proxy_disabled() else '✗'} "
+                      f"FORM_PROXY_POOL未設定なら判定自体を行わない")
+            finally:
+                C_px.FORM_PROXY_POOL = orig_px
+                _reset_proxy_state()
 
             print("\n── 同意チェックボックスの判定(2026-09-22) ──")
             print("  本番で「チェックされていません」が41件。語彙の漏れが原因だった")

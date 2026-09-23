@@ -31,6 +31,7 @@ on:
           - send-delivery-since  # 同上を since 以降で(改修の効果を測る)
           - send-reasons-since   # 理由別の件数を since 以降で
           - send-before-after    # since を境に、同じ会社の結果がどう変わったか
+          - send-urls-unconfirmed # since 以降で「完了を確認できない」になったURL
           - dup-check      # 既に成功済みの会社へ再送していないか(件数のみ)
           - proxy-check    # プロキシが今使えるか(認証情報は出さない)
           - send-reasons-today   # 結果・理由別の件数と成功率を「今日ぶん」だけで
@@ -107,6 +108,19 @@ jobs:
             # --days は現在時刻からのスライド窓なので、時間をおいて2回実行すると
             # 母集団が変わり、改修の前後を比べても意味のない数字になる(実際にやった:
             # 2時間後に測り直したら前半が窓から外れて件数が減っただけだった)。
+            # 「完了を確認できない」は押した後にURLも変わらずフォームも残る状態で、
+            # error_message も page_text_snippet も記録されない(後者は本番では
+            # keep_debug_fields=False のため常にNULL)。DBに残る手がかりは
+            # 問い合わせ先URLだけなので、それを取り出して実ページを見に行く。
+            send-urls-unconfirmed)
+              case "$SINCE" in
+                "") echo "::error::since を指定してください"; exit 1 ;;
+                *[!0-9T:-]*) echo "::error::sinceは日時のみ(例 2026-09-23T15:05:00)"; exit 1 ;;
+              esac
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T \
+                  -e SINCE_AT='$SINCE' sender \
+                  python3 -c 'import os,argparse,db,send_log_report_cli as R; from datetime import datetime; s=os.environ[\"SINCE_AT\"]; d=round((datetime.now()-datetime.fromisoformat(s)).total_seconds()/86400,6); k=dict(days=d,reason=\"success_not_confirmed\",status=None,limit=60); ns=argparse.Namespace(since=s,**k) if hasattr(R,\"_window\") else argparse.Namespace(**k); print(\"集計開始: \"+s); R.cmd_urls(db.connect(),ns)'" ;;
             # 改修の効果は「全体の成功率」では測れない。送信し直す対象は
             # 前回うまくいかなかった会社に偏っているので、母集団が違う
             # 数字を並べても比べたことにならない。**同じ会社**が境界の

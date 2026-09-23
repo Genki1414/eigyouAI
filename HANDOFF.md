@@ -4675,6 +4675,30 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T131. スマホ(GitHub承認)から「前回と同じ内容で送り直し」を始める(2026-09-24)
+
+**なぜ**: 送り直しの準備(T126〜T130)が整ったが、ユーザーがパソコンから離れていて
+本部画面を開けない。停止・取り消し(T127)はスマホからできるようになったので、開始も
+できれば「送る→見る→止める」が全部スマホで回る。
+
+**作り**(任意の文面は受け付けない。過去の予約の複製だけ):
+- `db.clone_scheduled_send(src_id, cancel_recent_days=, scheduled_at=)`: 過去の予約の
+  件名・本文・リスト・送信元・各設定(track_clicks / allow_no_solicit / sender_override)を写して
+  新しい PENDING を作る。`cancel_recent_days` は上書きできる(送り直しでは30日を付け、
+  届いた可能性のある会社を除外する。T130)
+- `scheduled_send_cli.py clone ID [--cancel-recent-days N] [--at ISO]`: 何社に送るかを
+  表示してから作る
+- `ops-write.yml` の `send-clone`(+ `scheduled_id`、`cancel_recent_days` 既定30): **`exec` と
+  同じ `server-exec` の承認ゲート**を通る別ジョブ(本番送信が始まるため)。`change` ジョブの
+  対象からは外した。コマンドは決め打ちで、入力は数字しか通さない
+
+**使い方(9/22の四国リストを送り直す場合)**: ops-readonly `send-targets` で送る社数を確認 →
+ops-write `send-clone` に `scheduled_id=3`、`cancel_recent_days=30` → GitHub で承認 →
+ops-readonly `queue` で「処理 N/959社」を見る → 止めたければ ops-write `send-stop`。
+
+**テスト**: `api.py test` に複製の内容(件名・本文・設定が写り、cancel_recent_days だけ
+上書き、今すぐのPENDING)と、元が無ければNone。CLIはローカルで実走して件数表示を確認。
+
 ### T130. 送り直しの除外に「完了を確認できない」を含める(2026-09-23)
 
 **なぜ**: 「過去送信対象キャンセル(`cancel_recent_days`)」は `touches.sent_at`(=成功と記録

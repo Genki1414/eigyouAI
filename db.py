@@ -1023,6 +1023,34 @@ def request_stop_scheduled_send(con, tenant_id, scheduled_id, mode):
     return cur.rowcount > 0
 
 
+def clone_scheduled_send(con, src_id, cancel_recent_days=None, scheduled_at=None):
+    """過去の予約(件名・本文・送信元・各設定)を複製して、新しいPENDINGの予約を作る(T131)。
+
+    パソコンから離れていて本部画面を開けないとき、「前回と同じ内容で送り直す」を
+    GitHub Actions(ops-write の send-clone、要承認)から始められるようにするため。
+    任意の文面は受け付けない(過去に画面から入れたものの複製だけ)。
+    cancel_recent_days を渡せば上書き(送り直しでは30日を付けて、届いた可能性のある
+    会社を除外する。T130)。scheduled_at 未指定なら今すぐ。戻り値は新しい予約のid、
+    元が無ければNone。"""
+    src = con.execute("SELECT * FROM scheduled_sends WHERE id=?", (src_id,)).fetchone()
+    if not src:
+        return None
+    src = dict(src)
+    days = cancel_recent_days if cancel_recent_days is not None else src.get("cancel_recent_days")
+    cur = con.execute("""INSERT INTO scheduled_sends
+        (tenant_id, list_id, subject, body, dry_run, scheduled_at, track_clicks,
+         sender_template_id, allow_no_solicit, cancel_recent_days, sender_override_json,
+         status, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,'PENDING',?)""",
+        (src["tenant_id"], src["list_id"], src["subject"], src["body"], src["dry_run"],
+         scheduled_at or datetime.now().isoformat(timespec="seconds"),
+         src.get("track_clicks") or 0, src.get("sender_template_id"),
+         src.get("allow_no_solicit") or 0, days, src.get("sender_override_json"),
+         datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    return cur.lastrowid
+
+
 def cancel_scheduled_send(con, tenant_id, scheduled_id):
     """取り消し。PENDING/PAUSEDは即CANCELLED、RUNNINGはワーカーへ要求を残す
     (request_stop_scheduled_send参照)。2026-09-23までPENDING限定で、実行中の予約を

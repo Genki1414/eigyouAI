@@ -22,6 +22,9 @@ list_builder.htmlの「送信する」(T91以降は即時実行せずキュー�
   python3 scheduled_send_cli.py stop ID     # 予約を停止する(実行中でも可。あとで再開できる)
   python3 scheduled_send_cli.py cancel ID   # 予約を取り消す(実行中でも可)
   python3 scheduled_send_cli.py resume ID   # 停止した予約を順番待ちへ戻す
+  python3 scheduled_send_cli.py clone ID [--cancel-recent-days N] [--at 2026-09-24T09:00:00]
+      # 過去の予約を複製して新しい予約を作る(前回と同じ文面で送り直す。T131)。
+      # 何社に送るかを表示してから作る。本番送信なので ops-write では承認が要る
 
 停止・取り消し(T127): 実行中の予約は stop_requested に要求を書き、ワーカーが会社ごとに
 見て抜ける(進行中の数社は送り終える)。それまでは実行中の予約を止める正規の手段が無く、
@@ -264,6 +267,10 @@ if __name__ == "__main__":
     sub.add_parser("list")
     for name in ("stop", "cancel", "resume"):
         sub.add_parser(name).add_argument("scheduled_id", type=int)
+    cp = sub.add_parser("clone")
+    cp.add_argument("scheduled_id", type=int)
+    cp.add_argument("--cancel-recent-days", type=int, default=None)
+    cp.add_argument("--at", default=None, help="開始日時(ISO)。未指定なら今すぐ")
     lp = sub.add_parser("loop")
     lp.add_argument("--workers", type=int, default=int(os.environ.get("SENDER_WORKERS", "1")))
     lp.add_argument("--interval", type=int, default=int(os.environ.get("SENDER_POLL_INTERVAL", "15")))
@@ -282,6 +289,25 @@ if __name__ == "__main__":
             ok = db.request_stop_scheduled_send(con, None, args.scheduled_id, mode)
             print(f"予約{args.scheduled_id}: " + ("要求を受け付けました" if ok else
                   "対象がありません(PENDING/PAUSED/RUNNINGの予約だけ止められます)"))
+            list_pending(con)
+        elif args.cmd == "clone":
+            src = con.execute("SELECT id, tenant_id, list_id, subject, dry_run, cancel_recent_days "
+                              "FROM scheduled_sends WHERE id=?", (args.scheduled_id,)).fetchone()
+            if not src:
+                print(f"予約{args.scheduled_id}はありません")
+                raise SystemExit(1)
+            days = args.cancel_recent_days if args.cancel_recent_days is not None else src["cancel_recent_days"]
+            cnt = TL.count_send_targets(con, src["tenant_id"], src["list_id"], cancel_recent_days=days)
+            if not cnt:
+                print("元の予約のリストが見つかりません(削除された可能性)")
+                raise SystemExit(1)
+            print(f"元の予約 #{src['id']}: リスト{src['list_id']} 件名「{(src['subject'] or '')[:30]}」 "
+                  f"{'ドライラン' if src['dry_run'] else '本番送信'}")
+            print(f"過去送信対象キャンセル: {days if days else 'なし'}日 → 送る社数 {cnt['target_count']:,}社 "
+                  f"(除外 {cnt['cancelled_recent']:,}社、うち完了未確認 {cnt.get('cancelled_unconfirmed', 0):,}社)")
+            new_id = db.clone_scheduled_send(con, args.scheduled_id, cancel_recent_days=days,
+                                             scheduled_at=args.at)
+            print(f"予約 #{new_id} を作りました(開始: {args.at or '今すぐ'})")
             list_pending(con)
         elif args.cmd == "resume":
             ok = db.resume_scheduled_send(con, None, args.scheduled_id)

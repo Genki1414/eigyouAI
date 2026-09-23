@@ -36,6 +36,7 @@ on:
           - show-env         # 設定の表示(鍵・パスワードの値は伏せる)
           - set-env          # 許可した設定値の変更(変更後に再起動)
           - exec             # 任意コマンド(server-exec環境の承認が必要)
+          - send-clone       # 過去の予約(scheduled_id)を複製して本番送信を始める(承認が必要)
       key:
         description: "set-envのときの設定名(例: FORM_SEND_CONCURRENCY)"
         required: false
@@ -45,9 +46,14 @@ on:
         required: false
         type: string
       scheduled_id:
-        description: "send-stop / send-cancel / send-resume のときの予約番号(queueで見える #番号)"
+        description: "send-stop / send-cancel / send-resume / send-clone のときの予約番号(queueで見える #番号)"
         required: false
         type: string
+      cancel_recent_days:
+        description: "send-clone のときの「過去送信対象キャンセル」の日数(既定30。0で無効=全社に送る)"
+        required: false
+        type: string
+        default: "30"
       command:
         description: "execのときに実行するコマンド。承認するまで実行されません"
         required: false
@@ -60,7 +66,7 @@ on:
 jobs:
   # ── 決め打ちの操作(承認なしで実行。任意コマンドは含まない) ──
   change:
-    if: inputs.action != 'exec'
+    if: inputs.action != 'exec' && inputs.action != 'send-clone'
     runs-on: ubuntu-latest
     env:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -192,3 +198,64 @@ jobs:
         run: |
           [ -n "$COMMAND" ] || { echo "::error::commandが空です"; exit 1; }
           ssh -i ~/.ssh/id_ed25519 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$COMMAND"
+
+  # ── 送り直しの開始(T131。過去の予約を複製して本番送信を始める。承認が必要) ──
+  # パソコンから離れていて本部画面を開けないときのため。任意の文面は受け付けず、
+  # 過去に画面から入れた予約(件名・本文・送信元・設定)の複製だけ。
+  # 「過去送信対象キャンセル」の日数は上書きできる(既定30。届いた可能性のある会社を除外)。
+  # 何社に送るかは事前に ops-readonly の send-targets で確かめること。
+  send:
+    if: inputs.action == 'send-clone'
+    runs-on: ubuntu-latest
+    environment: server-exec        # ← exec と同じ承認ゲート(本番送信が始まるため)
+    permissions:
+      contents: read
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      SCHEDULED_ID: ${{ inputs.scheduled_id }}
+      CANCEL_DAYS: ${{ inputs.cancel_recent_days }}
+    steps:
+      - name: Verify approval gate is configured
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          RULES=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/environments/server-exec" \
+            | python3 -c "import sys,json; print(','.join(r.get('type','') for r in json.load(sys.stdin).get('protection_rules',[])))") \
+            || { echo "::error::server-exec 環境を確認できませんでした"; exit 1; }
+          case "$RULES" in
+            *required_reviewers*) echo "承認ゲートを確認しました: $RULES" ;;
+            *) echo "::error::server-exec に必須レビュアーがありません。設定するまで実行しません"; exit 1 ;;
+          esac
+
+      - name: Validate inputs
+        run: |
+          case "$SCHEDULED_ID" in
+            "") echo "::error::scheduled_id(複製元の予約番号)を指定してください"; exit 1 ;;
+            *[!0-9]*) echo "::error::scheduled_id は数字だけ"; exit 1 ;;
+          esac
+          case "$CANCEL_DAYS" in
+            "") echo "::error::cancel_recent_days を指定してください(既定30)"; exit 1 ;;
+            *[!0-9]*) echo "::error::cancel_recent_days は数字だけ"; exit 1 ;;
+          esac
+          echo "複製元の予約: #$SCHEDULED_ID / 過去送信対象キャンセル: ${CANCEL_DAYS}日"
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Start the resend over SSH
+        run: |
+          REMOTE="cd '$DEPLOY_PATH'
+            docker compose -f deploy/docker-compose.yml exec -T sender \
+              python3 scheduled_send_cli.py clone $SCHEDULED_ID --cancel-recent-days $CANCEL_DAYS"
+          ssh -i ~/.ssh/id_ed25519 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$REMOTE"

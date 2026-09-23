@@ -4825,6 +4825,25 @@ def self_test(port=8899):
     t("一覧に stop_requested が出る(画面の「停止処理中」表示用)",
       st == 200 and any(s["id"] == sid_p and "stop_requested" in s for s in r.get("scheduled", [])))
 
+    # 過去の予約の複製(T131。スマホからGitHub承認で送り直しを始めるため)
+    sid_src = db.create_scheduled_send(con, tid_a, list_a_id, "複製元の件名", "複製元の本文", False,
+                                       future_at, track_clicks=True, allow_no_solicit=True,
+                                       cancel_recent_days=7)
+    sid_new = db.clone_scheduled_send(con, sid_src, cancel_recent_days=30)
+    src_row = con.execute("SELECT * FROM scheduled_sends WHERE id=?", (sid_src,)).fetchone()
+    new_row = con.execute("SELECT * FROM scheduled_sends WHERE id=?", (sid_new,)).fetchone()
+    t("複製は件名・本文・リスト・設定を写し、cancel_recent_days だけ上書きされ、今すぐのPENDINGになる",
+      sid_new is not None and sid_new != sid_src
+      and new_row["subject"] == src_row["subject"] and new_row["body"] == src_row["body"]
+      and new_row["list_id"] == src_row["list_id"] and new_row["tenant_id"] == src_row["tenant_id"]
+      and new_row["track_clicks"] == 1 and new_row["allow_no_solicit"] == 1
+      and new_row["cancel_recent_days"] == 30 and new_row["status"] == "PENDING"
+      and new_row["scheduled_at"] <= datetime.now().isoformat(timespec="seconds")
+      and new_row["dry_run"] == 0)
+    t("複製元が無ければ None", db.clone_scheduled_send(con, 99999999) is None)
+    db.request_stop_scheduled_send(con, tid_a, sid_new, "CANCEL")
+    db.request_stop_scheduled_send(con, tid_a, sid_src, "CANCEL")
+
     # due_scheduled_sends()の期限判定を直接確認(cron側の抽出ロジック)
     due_at = (datetime.now() + timedelta(seconds=1)).isoformat(timespec="seconds")
     sid2 = db.create_scheduled_send(con, tid_a, list_a_id, "件名", "本文", True, due_at)

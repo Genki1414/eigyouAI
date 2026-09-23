@@ -3980,7 +3980,18 @@ async function renderSendForm(container, id) {
   }
 }
 
-const SCHEDULED_STATUS_LABELS = { PENDING: "順番待ち", RUNNING: "送信中", DONE: "完了", FAILED: "失敗", CANCELLED: "キャンセル済み" };
+const SCHEDULED_STATUS_LABELS = { PENDING: "順番待ち", RUNNING: "送信中", PAUSED: "停止中", DONE: "完了", FAILED: "失敗", CANCELLED: "取り消し済み" };
+// 予約の操作ボタン(T127)。送信中でも「停止」「取り消し」できる。送信中の予約は
+// 要求を残すだけで、送信ワーカーが会社ごとの区切りで抜ける(進行中の数社は送り終える)。
+// その間は「停止処理中」と出してボタンを消す
+function scheduledActionButtons(s) {
+  if (s.stop_requested) return `<span style="font-size:11px;color:var(--steel)">${s.stop_requested === "PAUSE" ? "停止" : "取り消し"}処理中…</span>`;
+  const b = (op, label, cls) => `<button class="ghost schedOpBtn${cls || ""}" data-op="${op}" data-id="${s.id}">${label}</button>`;
+  if (s.status === "PENDING") return b("stop", "停止") + " " + b("cancel", "取り消し");
+  if (s.status === "RUNNING") return b("stop", "停止") + " " + b("cancel", "取り消し");
+  if (s.status === "PAUSED") return b("resume", "再開") + " " + b("cancel", "取り消し");
+  return "—";
+}
 function scheduledResultSummary(s) {
   if (!s.result_json) return "";
   try {
@@ -4007,16 +4018,26 @@ async function refreshScheduledSends(listId) {
       r.scheduled.map(s => `<tr><td style="font-family:var(--mono);font-size:11px">${s.scheduled_at}</td>
         <td>${s.subject}</td><td>${s.dry_run ? "ドライラン" : "本番送信"}${s.track_clicks ? " · URL記録" : ""}</td>
         <td><span class="pill${s.status === "DONE" ? " ok" : (s.status === "FAILED" ? " err" : "")}">${SCHEDULED_STATUS_LABELS[s.status] || s.status}</span>${s.status === "RUNNING" ? `<span style="font-size:11px;color:var(--steel)"> 処理 ${(s.processed || 0).toLocaleString()}/${(s.list_count || 0).toLocaleString()}社</span>` : ""}${s.attempts ? `<span style="font-size:11px;color:var(--steel)"> (自動再試行${s.attempts}回目)</span>` : ""}<span style="font-size:11px;color:var(--steel)">${scheduledResultSummary(s)}</span></td>
-        <td>${s.status === "PENDING" ? `<button class="ghost cancelScheduledBtn" data-id="${s.id}">キャンセル</button>` : "—"}</td></tr>`).join("") +
+        <td>${scheduledActionButtons(s)}</td></tr>`).join("") +
       `</table>`;
-    el.querySelectorAll(".cancelScheduledBtn").forEach(btn => {
+    el.querySelectorAll(".schedOpBtn").forEach(btn => {
       btn.addEventListener("click", async () => {
+        const op = btn.dataset.op;
+        const row = r.scheduled.find(x => x.id === Number(btn.dataset.id)) || {};
+        const label = { stop: "停止", cancel: "取り消し", resume: "再開" }[op];
+        if (op !== "resume") {
+          const note = row.status === "RUNNING"
+            ? "\n\n送信中のため、進行中の数社は送り終えてから止まります。" +
+              (op === "stop" ? "あとで「再開」すると続きから送れます。" : "取り消すと続きは送れません(送った分はそのままです)。")
+            : "";
+          if (!confirm(`この予約を${label}しますか?${note}`)) return;
+        }
         try {
-          await call("/api/tenant/scheduled-sends/cancel",
+          await call(`/api/tenant/scheduled-sends/${op}`,
             { method: "POST", body: JSON.stringify({ scheduled_id: Number(btn.dataset.id) }) });
           await refreshScheduledSends(listId);
         } catch (e) {
-          alert("キャンセルに失敗しました: " + e.message);
+          alert(`${label}に失敗しました: ` + e.message);
         }
       });
     });

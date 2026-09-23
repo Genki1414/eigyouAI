@@ -4675,6 +4675,41 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T127. 実行中の送信を止める・取り消す・再開する(2026-09-23)
+
+**なぜ**: T126で2巡目を止める必要が出たとき、実行中(RUNNING)の予約を止める正規の手段が
+無かった。`cancel_scheduled_send()` はPENDING限定、ワーカーは会社ごとの合間に何も見ず、
+再起動すれば `requeue_all_running()` がRUNNING→PENDINGへ戻して数秒で再開する。結局
+`ops-write.yml` の `exec`(要承認)で `docker stop` → DBを直接UPDATE、で止めた。
+ユーザー要望「システムの操作画面にも必要。停止と取り消し」。
+
+**設計**: `scheduled_sends.stop_requested`('PAUSE' | 'CANCEL' | NULL)を足した。
+- **PENDING / PAUSED** の予約: その場で最終状態へ(PAUSE→`PAUSED`、CANCEL→`CANCELLED`)
+- **RUNNING** の予約: 要求を書くだけ。送信ワーカー(`senders.send_campaign()`)が会社を
+  1社取るたびに `stop_check(con_t)` で見て、要求があれば残りの会社を送らずに抜ける
+  (touchesに「未送信: 停止要求(...)」を注記)。進行中の数社は送り終える。
+  `scheduled_send_cli._execute()` が戻り値の `stopped_by` を見て `PAUSED` / `CANCELLED` に
+  する。`finish_scheduled_send()` は要求を消す
+- **再開**: `PAUSED` → `PENDING`(resumed=1 なので送信済みの会社は飛ばす)
+- 再起動でRUNNING→PENDINGへ戻っても要求は残るので、取り込み直した直後に抜ける
+  (テストで固定)
+- `stop_check` が例外を投げても送信は続ける(確認の失敗で数千社を巻き込まない)
+
+**入口**:
+- 画面(`list_builder.html` 予約一覧): 順番待ち・送信中 → 「停止」「取り消し」、
+  停止中 → 「再開」「取り消し」。送信中は確認ダイアログで「進行中の数社は送り終えて
+  から止まる」と出す。要求中は「停止処理中…」表示
+- API: `POST /api/tenant/scheduled-sends/stop|cancel|resume`(`cancel` はRUNNINGにも効く
+  ように変わった)
+- CLI: `scheduled_send_cli.py stop|cancel|resume ID`
+- `ops-write.yml`: `send-stop` / `send-cancel` / `send-resume` + `scheduled_id`(承認不要の
+  決め打ち操作。数字以外は弾く)。`set-env` の許可リストに `FORM_OUTCOME_WAIT_MS`(T126)も追加
+
+**テスト**: `api.py test` に状態遷移(PENDING→PAUSED→PENDING、RUNNING+要求、要求の
+切り替え、requeue後も要求が残る、`run_due` で PAUSED→再開→DONE)、`senders.py test` に
+`stop_check` の挙動(1社送れた時点で残り4社を送らずに抜ける / 要求なしなら全社 /
+例外でも続く)。CI相当6スイート ✗0。
+
 ### T126. 「完了を確認できない」の主因 — AJAXフォームで待たずに2回押していた(2026-09-23)
 
 **経緯**: T124(完了文言の判定漏れ3つ)をデプロイしても、前回「完了を確認できない」

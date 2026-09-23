@@ -766,7 +766,8 @@ def count_send_targets(con, tenant_id, list_id, cancel_recent_days=None):
 
 def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks=False,
               sender_template_id=None, staff_id=None, allow_no_solicit=False,
-              sender_override=None, cancel_recent_days=None, skip_already_sent=False):
+              sender_override=None, cancel_recent_days=None, skip_already_sent=False,
+              stop_check=None):
     """保存済みリストからフォーム自動送信キャンペーンを作り、既存のsenders.send_campaign()
     にそのまま委譲する。can_contact()・冪等性・FormSenderのペーシング上限はすべて
     send_campaign()側の仕組みがそのまま効く(ここで独自の送信経路は作らない)。
@@ -907,13 +908,17 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
                                    track_clicks=track_clicks, sender_template_id=sender_template_id,
                                    allow_no_solicit=allow_no_solicit, sender_override=sender_override,
                                    skip_already_sent=skip_already_sent,
-                                   company_ids=[m["id"] for m in members])
+                                   company_ids=[m["id"] for m in members],
+                                   stop_check=stop_check)
     if not dry_run:
         db.sync_target_list_member_status(con, list_id, campaign_id, step=1)
         _notify_completion(con, tenant_id, lst["name"], len(members), stats,
                            list_id=list_id, since=now2)
     return {"campaign_id": campaign_id, "target_count": len(members),
-            "dry_run": dry_run, "stats": stats, "cancelled_recent": cancelled_recent}
+            "dry_run": dry_run, "stats": stats, "cancelled_recent": cancelled_recent,
+            # 停止要求で途中で抜けたなら 'PAUSE' / 'CANCEL'(T127)。呼び出し側が予約の
+            # 最終状態を決めるのに使う
+            "stopped_by": stats.get("stopped_by_request")}
 
 
 # 送れなかった理由(form_navigator.pyのreason_code)の日本語訳。完了通知メール用

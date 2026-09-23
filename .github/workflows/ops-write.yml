@@ -29,6 +29,9 @@ on:
         type: choice
         options:
           - restart-sender   # 送信ワーカーの再起動
+          - send-stop        # 予約(scheduled_id)を停止する。送信中でも可、あとで再開できる
+          - send-cancel      # 予約(scheduled_id)を取り消す。送信中でも可
+          - send-resume      # 停止した予約(scheduled_id)を順番待ちへ戻す
           - restart-all      # 全サービスの再起動
           - show-env         # 設定の表示(鍵・パスワードの値は伏せる)
           - set-env          # 許可した設定値の変更(変更後に再起動)
@@ -39,6 +42,10 @@ on:
         type: string
       value:
         description: "set-envのときの値(空にすると既定値へ戻す)"
+        required: false
+        type: string
+      scheduled_id:
+        description: "send-stop / send-cancel / send-resume のときの予約番号(queueで見える #番号)"
         required: false
         type: string
       command:
@@ -63,6 +70,7 @@ jobs:
       ACTION: ${{ inputs.action }}
       ENV_KEY: ${{ inputs.key }}
       ENV_VALUE: ${{ inputs.value }}
+      SCHEDULED_ID: ${{ inputs.scheduled_id }}
     steps:
       - name: Validate inputs
         run: |
@@ -71,7 +79,7 @@ jobs:
           # (workflow_dispatchの入力値は実行履歴に残るため、秘密情報をここへ通さない)
           ALLOWED="TRACK_BASE_URL API_PUBLIC_URL FORM_SEND_CONCURRENCY SENDER_WORKERS \
             SENDER_POLL_INTERVAL SENDER_MAX_ATTEMPTS SENDER_STALL_MINUTES FORM_SETTLE_TIMEOUT_MS \
-            FORM_NAV_TIMEOUT_MS FORM_ACTION_TIMEOUT_MS FORM_POST_SUBMIT_WAIT_MS FORM_BROWSER_REUSE \
+            FORM_NAV_TIMEOUT_MS FORM_ACTION_TIMEOUT_MS FORM_POST_SUBMIT_WAIT_MS FORM_OUTCOME_WAIT_MS FORM_BROWSER_REUSE \
             FORM_BROWSER_MAX_USES FORM_MAX_PER_RUN FORM_MAX_PER_HOUR FORM_MAX_PER_DAY \
             FORM_MAX_PER_TENANT_PER_HOUR MAX_LIST_SIZE MAX_CSV_ROWS OPS_ALERT_EMAIL \
             FORM_PROXY_DISABLED"
@@ -104,6 +112,16 @@ jobs:
           case "$ACTION" in
             restart-sender)
               REMOTE="cd '$DEPLOY_PATH'; $C up -d sender; sleep 3; $C ps" ;;
+            # 予約の停止・取り消し・再開(T127)。実行中の予約はワーカーが会社ごとの
+            # 区切りで抜ける。SSHで止めてDBを書き換える(9/23にやった)代わりの正規の手段
+            send-stop|send-cancel|send-resume)
+              case "$SCHEDULED_ID" in
+                "") echo "::error::scheduled_id を指定してください"; exit 1 ;;
+                *[!0-9]*) echo "::error::scheduled_id は数字だけ"; exit 1 ;;
+              esac
+              SUB="${ACTION#send-}"
+              REMOTE="cd '$DEPLOY_PATH'
+                $C exec -T sender python3 scheduled_send_cli.py $SUB $SCHEDULED_ID" ;;
             restart-all)
               REMOTE="cd '$DEPLOY_PATH'; $C up -d; sleep 3; $C ps" ;;
             show-env)

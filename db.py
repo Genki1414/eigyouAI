@@ -204,7 +204,7 @@ CREATE TABLE IF NOT EXISTS scheduled_sends (
   body TEXT NOT NULL,
   dry_run INTEGER NOT NULL DEFAULT 0,
   scheduled_at TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING / DONE / FAILED / CANCELLED
+  status TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING / RUNNING / PAUSED(停止中。再開できる。T127) / DONE / FAILED / CANCELLED
   result_json TEXT,
   created_at TEXT NOT NULL,
   executed_at TEXT
@@ -557,6 +557,11 @@ def migrate(con):
         # 自動再開(デプロイ・ワーカー障害・自動再試行)で取り込み直した予約は1。
         # 再開時は既に届いた会社へ送らないための目印(T110)
         ("scheduled_sends", "resumed", "INTEGER DEFAULT 0"),
+        # 実行中の予約への「止めて」要求(T127。2026-09-23)。'PAUSE'=停止(あとで再開できる。
+        # 終了時にPAUSED)、'CANCEL'=取り消し(終了時にCANCELLED)。送信ワーカーが会社ごとに
+        # 見て、要求があればそれ以上の会社へ送らずに抜ける。それまでRUNNINGの予約を
+        # 止める正規の手段が無く、9/23はSSHでコンテナを止めてDBを直接書き換えた
+        ("scheduled_sends", "stop_requested", "TEXT"),
         # T29: フォーム送信のペーシングを「全テナント合算の単一プール」から
         # 「テナントごとの公平な取り分」へ再設計。NULL=config.pyの
         # FORM_MAX_PER_TENANT_PER_*_DEFAULTを使う(=契約プラン未設定の
@@ -965,7 +970,8 @@ def resolve_click_token(con, token, user_agent=None, method="GET"):
 def list_scheduled_sends(con, tenant_id, list_id=None):
     q = """SELECT s.id, s.list_id, tl.name list_name, s.subject, s.dry_run, s.scheduled_at,
             s.track_clicks, s.sender_template_id, s.status, s.created_at, s.executed_at,
-            s.claimed_at, s.result_json, s.attempts, s.tenant_id, tl.company_count AS list_count
+            s.claimed_at, s.result_json, s.attempts, s.tenant_id, tl.company_count AS list_count,
+            s.stop_requested
         FROM scheduled_sends s LEFT JOIN target_lists tl ON tl.id = s.list_id
         WHERE s.tenant_id=?"""
     params = [tenant_id]
@@ -984,10 +990,62 @@ def list_scheduled_sends(con, tenant_id, list_id=None):
     return rows
 
 
+STOP_MODES = ("PAUSE", "CANCEL")
+# 停止要求が終了時にどの状態になるか
+_STOP_FINAL_STATUS = {"PAUSE": "PAUSED", "CANCEL": "CANCELLED"}
+
+
+def request_stop_scheduled_send(con, tenant_id, scheduled_id, mode):
+    """予約を止める(T127)。mode は 'PAUSE'(停止。再開できる) か 'CANCEL'(取り消し)。
+
+    - PENDING / PAUSED: その場で最終状態(PAUSED / CANCELLED)にする
+    - RUNNING: stop_requested に要求を書く。送信ワーカーが会社ごとに見て抜け、
+      終了時に最終状態へ移す(scheduled_send_cli._execute)。押した瞬間には止まらない
+      (並列で進行中の数社は送り終える)ので、画面では「停止処理中」と出す
+    - それ以外(DONE / FAILED / CANCELLED): 今さら止められないので False
+
+    tenant_id=None は運用CLI用(テナントを問わない)。"""
+    if mode not in STOP_MODES:
+        raise ValueError(f"mode は {STOP_MODES} のいずれか: {mode!r}")
+    final = _STOP_FINAL_STATUS[mode]
+    tenant_clause = "" if tenant_id is None else " AND tenant_id=?"
+    tenant_params = () if tenant_id is None else (tenant_id,)
+    cur = con.execute(f"""UPDATE scheduled_sends SET status=?, stop_requested=NULL
+        WHERE id=?{tenant_clause} AND status IN ('PENDING','PAUSED')""",
+        (final, scheduled_id, *tenant_params))
+    if cur.rowcount:
+        con.commit()
+        return True
+    cur = con.execute(f"""UPDATE scheduled_sends SET stop_requested=?
+        WHERE id=?{tenant_clause} AND status='RUNNING'""",
+        (mode, scheduled_id, *tenant_params))
+    con.commit()
+    return cur.rowcount > 0
+
+
 def cancel_scheduled_send(con, tenant_id, scheduled_id):
-    """PENDINGのものだけキャンセルできる(既に実行済み・失敗済みは今さら止められない)。"""
-    cur = con.execute("""UPDATE scheduled_sends SET status='CANCELLED'
-        WHERE id=? AND tenant_id=? AND status='PENDING'""", (scheduled_id, tenant_id))
+    """取り消し。PENDING/PAUSEDは即CANCELLED、RUNNINGはワーカーへ要求を残す
+    (request_stop_scheduled_send参照)。2026-09-23までPENDING限定で、実行中の予約を
+    止める手段が無かった。"""
+    return request_stop_scheduled_send(con, tenant_id, scheduled_id, "CANCEL")
+
+
+def stop_requested_for(con, scheduled_id):
+    """送信ワーカーが会社ごとに呼ぶ。要求があれば 'PAUSE' / 'CANCEL'、無ければ None。"""
+    row = con.execute("SELECT stop_requested FROM scheduled_sends WHERE id=?",
+                      (scheduled_id,)).fetchone()
+    return (row["stop_requested"] or None) if row else None
+
+
+def resume_scheduled_send(con, tenant_id, scheduled_id):
+    """停止(PAUSED)した予約を順番待ちへ戻す。送信済みの会社は send_list() が飛ばす
+    (resumed=1)。"""
+    tenant_clause = "" if tenant_id is None else " AND tenant_id=?"
+    tenant_params = () if tenant_id is None else (tenant_id,)
+    cur = con.execute(f"""UPDATE scheduled_sends SET status='PENDING', resumed=1, stop_requested=NULL,
+        claimed_at=NULL, worker=NULL, scheduled_at=?
+        WHERE id=?{tenant_clause} AND status='PAUSED'""",
+        (datetime.now().isoformat(timespec="seconds"), scheduled_id, *tenant_params))
     con.commit()
     return cur.rowcount > 0
 
@@ -1090,8 +1148,9 @@ def running_sends_with_progress(con):
 
 
 def finish_scheduled_send(con, scheduled_id, status, result=None):
-    con.execute("""UPDATE scheduled_sends SET status=?, result_json=?, executed_at=?
-        WHERE id=?""",
+    """終了状態(DONE/FAILED/PAUSED/CANCELLED)にする。停止要求は役目を終えるので消す。"""
+    con.execute("""UPDATE scheduled_sends SET status=?, result_json=?, executed_at=?,
+        stop_requested=NULL WHERE id=?""",
         (status, json.dumps(result, ensure_ascii=False) if result is not None else None,
          datetime.now().isoformat(timespec="seconds"), scheduled_id))
     con.commit()

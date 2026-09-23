@@ -615,7 +615,8 @@ def _is_quota_error(error):
 
 def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clicks=False,
                    sender_template_id=None, allow_no_solicit=False, sender_override=None,
-                   skip_already_sent=False, company_ids=None):
+                   skip_already_sent=False, company_ids=None,
+                  stop_check=None):
     """キャンペーンの対象企業へ実際に送る。
     campaign.py simulate の本番版がこれ。接触ガードはここでも最終確認する。
 
@@ -678,7 +679,13 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
     最大で並列数-1件分だけ超過し得る。これは相手サイトへの負荷・bot判定回避が
     目的の緩やかなペーシングであり(グローバルなサーキットブレーカー自体は
     ゆとりを持たせた値なので実運用では到達しない)、厳密な排他制御を持ち込むより
-    実装のシンプルさを優先した。"""
+    実装のシンプルさを優先した。
+    stop_check: 呼び出し側が渡す「止めるべきか」を返す関数(T127)。ワーカースレッドが
+    会社を1社取るたびに自分のスレッド用DB接続を渡して呼ぶ。'PAUSE' / 'CANCEL' などの
+    真の値を返したら、それ以上の会社へは送らず、残りのtouchesに「未送信: 停止要求」を
+    書いて抜ける(進行中の数社は送り終える)。戻り値の stats["stopped_by_request"] に
+    その値、stats["unsent_by_stop"] に送らなかった社数が入る。
+    """
     import db
     import config as C
 
@@ -727,7 +734,8 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
     # したい、という指摘を受けて追加。以前はblockedの合計数しか分からず、
     # 配信停止によるものかテナント除外設定によるものか画面から区別できなかった。
     stats = {"sent": 0, "failed": 0, "blocked": 0, "suppressed": 0, "stopped": 0,
-              "blocked_by_reason": {}, "failed_by_reason": {}}
+              "blocked_by_reason": {}, "failed_by_reason": {},
+              "stopped_by_request": None, "unsent_by_stop": 0}
     if not rows:
         print("送信対象がありません（文面未生成）")
         return stats
@@ -910,6 +918,28 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
     for r in rows:
         work.put(r)
 
+    # 停止要求(T127)。どれか1本のスレッドが要求を見つけたらここに入れ、他のスレッドは
+    # DBを見ずにこれだけ見て抜ける。残りの会社は送らずに「未送信」の注記だけ付ける
+    stop_state = {"mode": None, "unsent": 0}
+    stop_lock = threading.Lock()
+
+    def _stop_requested(con_t):
+        if stop_state["mode"]:
+            return stop_state["mode"]
+        if stop_check is None:
+            return None
+        try:
+            mode = stop_check(con_t)
+        except Exception as e:  # noqa: BLE001
+            # 確認に失敗しても送信は続ける(止められないより、止め損ねる方がまし、
+            # ではない。だが確認エラーで数千社を止めるのも困るので、ログに残して続行)
+            print(f"  [send] 停止要求の確認に失敗: {str(e)[:120]}")
+            return None
+        if mode:
+            with stop_lock:
+                stop_state["mode"] = stop_state["mode"] or mode
+        return stop_state["mode"]
+
     def _worker_loop():
         done = []
         try:
@@ -918,6 +948,18 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
                     r = work.get_nowait()
                 except queue.Empty:
                     break
+                con_t = _con_for_thread()
+                mode = _stop_requested(con_t)
+                if mode:
+                    try:
+                        con_t.execute("UPDATE touches SET note=? WHERE id=? AND sent_at IS NULL",
+                                      (f"未送信: 停止要求({mode})", r["tid"]))
+                        con_t.commit()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    with stop_lock:
+                        stop_state["unsent"] += 1
+                    continue
                 done.append(_process_one(r))
         finally:
             try:
@@ -954,6 +996,10 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
     con.execute("UPDATE campaigns SET cost_yen = COALESCE(cost_yen,0) + ? WHERE id=?",
                 (cost, campaign_id))
     con.commit()
+    stats["stopped_by_request"] = stop_state["mode"]
+    stats["unsent_by_stop"] = stop_state["unsent"]
+    if stop_state["mode"]:
+        print(f"  停止要求({stop_state['mode']})により {stop_state['unsent']}社を送らずに抜けました")
     blocked_detail = "".join(f"・{reason}{n}" for reason, n in stats["blocked_by_reason"].items())
     print(f"  送信 {stats['sent']} / 失敗 {stats['failed']} / "
           f"ガードで中止 {stats['blocked']}{f'({blocked_detail[1:]})' if blocked_detail else ''} / "
@@ -1230,6 +1276,67 @@ if __name__ == "__main__":
             # 直近1時間・24時間の件数を実際にDBから数えるため、消さずに残すと
             # 繰り返しテスト実行した時に上限へ引っかかって誤って失敗する)
             con.execute("DELETE FROM form_send_log WHERE company_id=999998")
+            con.commit()
+
+        print("\n── 停止要求で途中で抜ける(T127。実行中の予約を止める手段が無かった) ──")
+        # 5社のドライランを、1社送れた時点で「取り消し」要求が入る想定で走らせる。
+        # 並列数1で決定的にする(並列だと要求を見る前に数社が進んでよい設計なので、
+        # 件数がぶれる)
+        stop_ids = list(range(999990, 999995))
+        con.execute("DELETE FROM companies WHERE id BETWEEN 999990 AND 999994")
+        con.executemany("INSERT INTO companies (id, name, contact_url) VALUES (?,?,?)",
+                        [(i, f"テスト_停止{i}", f"https://example{i}.co.jp/contact/") for i in stop_ids])
+        cur = con.execute("INSERT INTO campaigns (name, started_at, target_rule) VALUES (?,?,?)",
+                          ("test-stop-request", datetime.now().isoformat(timespec="seconds"), "ALL"))
+        stop_cid = cur.lastrowid
+        con.executemany("""INSERT INTO touches (campaign_id, company_id, channel, variant, step,
+            subject, body) VALUES (?,?,'フォーム','A',1,'件名','本文')""",
+            [(stop_cid, i) for i in stop_ids])
+        con.commit()
+        orig_conc = C.FORM_SEND_CONCURRENCY
+        orig_ks2, orig_ks2_reason = db.kill_switch_status(con)
+        db.set_global_kill_switch(con, False, updated_by="test")
+        try:
+            C.FORM_SEND_CONCURRENCY = 1
+
+            def _stop_after_first(con_t):
+                n = con_t.execute("SELECT COUNT(*) FROM touches WHERE campaign_id=? AND sent_at IS NOT NULL",
+                                  (stop_cid,)).fetchone()[0]
+                return "CANCEL" if n >= 1 else None
+
+            st = send_campaign(con, stop_cid, step=1, dry_run=True, stop_check=_stop_after_first)
+            unsent_notes = [r["note"] for r in con.execute(
+                "SELECT note FROM touches WHERE campaign_id=? AND sent_at IS NULL", (stop_cid,))]
+            ok_stop = (st["sent"] == 1 and st["unsent_by_stop"] == 4
+                       and st["stopped_by_request"] == "CANCEL"
+                       and len(unsent_notes) == 4 and all("停止要求" in (n or "") for n in unsent_notes))
+            print(f"  {'✓' if ok_stop else '✗'} 1社送れた時点で要求が入ると残り4社は送らずに抜ける "
+                  f"(sent={st['sent']} unsent_by_stop={st['unsent_by_stop']} "
+                  f"stopped_by_request={st['stopped_by_request']})")
+            # 要求が無ければ全社送る(stop_checkを渡しても止まらない)
+            con.execute("UPDATE touches SET sent_at=NULL, note=NULL WHERE campaign_id=?", (stop_cid,))
+            con.execute("DELETE FROM idempotency WHERE key LIKE '%:99999_:1'")
+            con.commit()
+            st2 = send_campaign(con, stop_cid, step=1, dry_run=True, stop_check=lambda con_t: None)
+            ok_nostop = st2["sent"] == 5 and st2["unsent_by_stop"] == 0 and st2["stopped_by_request"] is None
+            print(f"  {'✓' if ok_nostop else '✗'} 要求が無ければ全社送る (sent={st2['sent']})")
+            # 確認関数が例外を投げても送信は止めない(数千社を巻き込まない)
+            con.execute("UPDATE touches SET sent_at=NULL, note=NULL WHERE campaign_id=?", (stop_cid,))
+            con.execute("DELETE FROM idempotency WHERE key LIKE '%:99999_:1'")
+            con.commit()
+
+            def _broken(con_t):
+                raise RuntimeError("DB断の想定")
+            st3 = send_campaign(con, stop_cid, step=1, dry_run=True, stop_check=_broken)
+            print(f"  {'✓' if st3['sent'] == 5 else '✗'} 確認関数が例外を投げても送信は続く (sent={st3['sent']})")
+        finally:
+            C.FORM_SEND_CONCURRENCY = orig_conc
+            db.set_global_kill_switch(con, orig_ks2, reason=orig_ks2_reason, updated_by="test-restore")
+            con.execute("DELETE FROM touches WHERE campaign_id=?", (stop_cid,))
+            con.execute("DELETE FROM campaigns WHERE id=?", (stop_cid,))
+            con.execute("DELETE FROM companies WHERE id BETWEEN 999990 AND 999994")
+            con.execute("DELETE FROM idempotency WHERE key LIKE '%:99999_:1'")
+            con.execute("DELETE FROM form_send_log WHERE company_id BETWEEN 999990 AND 999994")
             con.commit()
 
         print("\n── 送信元の姓・名・フリガナ・郵便番号(未設定/設定済みの両方) ──")

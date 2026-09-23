@@ -19,6 +19,13 @@ list_builder.htmlの「送信する」(T91以降は即時実行せずキュー�
       # (deploy/docker-compose.ymlのsenderサービスがこれ。Nは環境変数SENDER_WORKERS)
   python3 scheduled_send_cli.py run-due     # 期限到来分を1回だけ実行して終了(手動・保険用)
   python3 scheduled_send_cli.py list        # PENDING/RUNNINGの予約一覧を表示
+  python3 scheduled_send_cli.py stop ID     # 予約を停止する(実行中でも可。あとで再開できる)
+  python3 scheduled_send_cli.py cancel ID   # 予約を取り消す(実行中でも可)
+  python3 scheduled_send_cli.py resume ID   # 停止した予約を順番待ちへ戻す
+
+停止・取り消し(T127): 実行中の予約は stop_requested に要求を書き、ワーカーが会社ごとに
+見て抜ける(進行中の数社は送り終える)。それまでは実行中の予約を止める正規の手段が無く、
+2026-09-23はSSHでコンテナを止めてDBを直接書き換えるしかなかった。
 """
 import argparse
 import json
@@ -48,13 +55,22 @@ def _execute(con, s, worker):
                            allow_no_solicit=bool(s.get("allow_no_solicit")),
                            cancel_recent_days=s.get("cancel_recent_days"),
                            sender_override=override,
-                           skip_already_sent=bool(s.get("resumed")))
+                           skip_already_sent=bool(s.get("resumed")),
+                           # ワーカースレッドが会社ごとに呼ぶ。渡される接続はそのスレッド専用
+                           stop_check=lambda con_t: db.stop_requested_for(con_t, s["id"]))
         if res is None:
             db.finish_scheduled_send(con, s["id"], "FAILED",
                                      {"error": "リストが見つかりません(削除された可能性)"})
             print(f"  [{worker}] 予約{s['id']}: 失敗(リストが見つかりません)")
         elif "error" in res:
             _fail_or_retry(con, s, worker, res["error"])
+        elif res.get("stopped_by"):
+            # 停止要求で途中で抜けた(T127)。PAUSE→PAUSED(再開できる)、CANCEL→CANCELLED
+            final = "PAUSED" if res["stopped_by"] == "PAUSE" else "CANCELLED"
+            db.finish_scheduled_send(con, s["id"], final, res)
+            stats = res.get("stats") or {}
+            print(f"  [{worker}] 予約{s['id']}: {final}(停止要求。送信{stats.get('sent', 0)} "
+                  f"未送信{stats.get('unsent_by_stop', 0)} 対象{res.get('target_count', 0)})")
         else:
             db.finish_scheduled_send(con, s["id"], "DONE", res)
             stats = res.get("stats") or {}
@@ -223,17 +239,19 @@ def loop(workers, interval):
 
 def list_pending(con):
     rows = con.execute("""SELECT s.id, s.tenant_id, tn.name tenant_name, s.list_id, tl.name list_name,
-            s.scheduled_at, s.dry_run, s.status, s.worker, s.claimed_at
+            s.scheduled_at, s.dry_run, s.status, s.worker, s.claimed_at, s.stop_requested
         FROM scheduled_sends s
         LEFT JOIN tenants tn ON tn.id = s.tenant_id
         LEFT JOIN target_lists tl ON tl.id = s.list_id
-        WHERE s.status IN ('PENDING','RUNNING') ORDER BY s.scheduled_at""").fetchall()
+        WHERE s.status IN ('PENDING','RUNNING','PAUSED') ORDER BY s.scheduled_at""").fetchall()
     if not rows:
-        print("PENDING/RUNNINGの予約はありません")
+        print("PENDING/RUNNING/PAUSEDの予約はありません")
         return
     for r in rows:
         mode = "ドライラン" if r["dry_run"] else "本番送信"
         extra = f" 実行中: {r['worker']}({r['claimed_at']})" if r["status"] == "RUNNING" else ""
+        if r["stop_requested"]:
+            extra += f" ← 停止要求({r['stop_requested']})を受けて抜けるところ"
         print(f"  #{r['id']} {r['scheduled_at']} {mode} [{r['status']}] "
               f"テナント={r['tenant_name'] or r['tenant_id']} "
               f"リスト={r['list_name'] or r['list_id']}{extra}")
@@ -244,6 +262,8 @@ if __name__ == "__main__":
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("run-due")
     sub.add_parser("list")
+    for name in ("stop", "cancel", "resume"):
+        sub.add_parser(name).add_argument("scheduled_id", type=int)
     lp = sub.add_parser("loop")
     lp.add_argument("--workers", type=int, default=int(os.environ.get("SENDER_WORKERS", "1")))
     lp.add_argument("--interval", type=int, default=int(os.environ.get("SENDER_POLL_INTERVAL", "15")))
@@ -256,4 +276,15 @@ if __name__ == "__main__":
         if args.cmd == "run-due":
             run_due(con)
         elif args.cmd == "list":
+            list_pending(con)
+        elif args.cmd in ("stop", "cancel"):
+            mode = "PAUSE" if args.cmd == "stop" else "CANCEL"
+            ok = db.request_stop_scheduled_send(con, None, args.scheduled_id, mode)
+            print(f"予約{args.scheduled_id}: " + ("要求を受け付けました" if ok else
+                  "対象がありません(PENDING/PAUSED/RUNNINGの予約だけ止められます)"))
+            list_pending(con)
+        elif args.cmd == "resume":
+            ok = db.resume_scheduled_send(con, None, args.scheduled_id)
+            print(f"予約{args.scheduled_id}: " + ("順番待ちへ戻しました" if ok else
+                  "対象がありません(PAUSEDの予約だけ再開できます)"))
             list_pending(con)

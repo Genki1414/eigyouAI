@@ -182,8 +182,13 @@ CACもチャネル別成績も出せない = 売り物にならない。
                            部署/役職/氏名/カナ/メール/電話のうち指定したものだけ、
                            この送信に限りその場で上書きする(保存はしない)
   GET  /api/tenant/scheduled-sends?list_id=  予約送信の一覧(自テナント分のみ)
-  POST /api/tenant/scheduled-sends/cancel  {"scheduled_id"} → PENDINGの予約を
-                           キャンセル(実行済み・キャンセル済みは404)
+  POST /api/tenant/scheduled-sends/cancel  {"scheduled_id"} → 予約を取り消す。順番待ち・
+                           停止中は即CANCELLED、送信中はワーカーへ要求を残して会社ごとの
+                           区切りで抜ける(T127)。完了・失敗・取り消し済みは404
+  POST /api/tenant/scheduled-sends/stop    {"scheduled_id"} → 予約を停止する(PAUSED)。
+                           送信中でも可。あとで resume で続きから再開できる
+  POST /api/tenant/scheduled-sends/resume  {"scheduled_id"} → 停止中(PAUSED)の予約を
+                           順番待ちへ戻す(送信済みの会社は飛ばす)
   GET  /api/tenant/lists/<id>/target-count  いま送信を押すと何件に送るか(送信はしない)。
                                   ?cancel_recent_days=30 で「過去送信対象キャンセル」を反映
   GET  /api/tenant/send-log       自テナントのフォーム自動送信履歴(form_send_log)。
@@ -2190,12 +2195,34 @@ def h_tenant_scheduled_sends_list(con, tenant_id, qs):
 
 
 def h_tenant_scheduled_send_cancel(con, tenant_id, data):
+    return _h_tenant_scheduled_send_stop(con, tenant_id, data, "CANCEL")
+
+
+def h_tenant_scheduled_send_stop(con, tenant_id, data):
+    return _h_tenant_scheduled_send_stop(con, tenant_id, data, "PAUSE")
+
+
+def _h_tenant_scheduled_send_stop(con, tenant_id, data, mode):
+    """停止(PAUSE)・取り消し(CANCEL)。送信中の予約は要求を残すだけで、ワーカーが
+    会社ごとの区切りで抜ける(T127)。requested=True はその「要求を残した」状態。"""
     sid = data.get("scheduled_id")
-    if not isinstance(sid, int):
+    if not isinstance(sid, int) or isinstance(sid, bool):
         return 400, {"error": "scheduled_idは必須です"}
-    if not db.cancel_scheduled_send(con, tenant_id, sid):
-        return 404, {"error": "予約が見つからないか、既に実行済み/キャンセル済みです"}
-    return 200, {"ok": True}
+    if not db.request_stop_scheduled_send(con, tenant_id, sid, mode):
+        return 404, {"error": "予約が見つからないか、既に完了/失敗/取り消し済みです"}
+    row = con.execute("SELECT status, stop_requested FROM scheduled_sends WHERE id=?",
+                      (sid,)).fetchone()
+    return 200, {"ok": True, "status": row["status"],
+                 "requested": bool(row["stop_requested"])}
+
+
+def h_tenant_scheduled_send_resume(con, tenant_id, data):
+    sid = data.get("scheduled_id")
+    if not isinstance(sid, int) or isinstance(sid, bool):
+        return 400, {"error": "scheduled_idは必須です"}
+    if not db.resume_scheduled_send(con, tenant_id, sid):
+        return 404, {"error": "予約が見つからないか、停止中(PAUSED)ではありません"}
+    return 200, {"ok": True, "status": "PENDING"}
 
 
 def h_ops_diagnostics(con):
@@ -3072,13 +3099,17 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 con.close()
 
-        if path == "/api/tenant/scheduled-sends/cancel":
+        if path in ("/api/tenant/scheduled-sends/cancel", "/api/tenant/scheduled-sends/stop",
+                    "/api/tenant/scheduled-sends/resume"):
             con = self._con()
             try:
                 tenant = verify_tenant_bearer(con, self.headers.get("Authorization"))
                 if not tenant:
                     return self._json(401, {"error": "unauthorized"})
-                st, res = h_tenant_scheduled_send_cancel(con, tenant["id"], data)
+                handler = {"cancel": h_tenant_scheduled_send_cancel,
+                           "stop": h_tenant_scheduled_send_stop,
+                           "resume": h_tenant_scheduled_send_resume}[path.rsplit("/", 1)[1]]
+                st, res = handler(con, tenant["id"], data)
                 return self._json(st, res)
             except Exception as e:  # noqa: BLE001
                 return self._json(500, {"error": str(e)[:200]})
@@ -4469,6 +4500,29 @@ def self_test(port=8899):
     t("送信ワーカー(run_due)がキューを取り込んで実行しDONEになる(Kill Switch停止中のため実送信はされない)",
       n_run >= 1 and row["status"] == "DONE" and row["worker"] == "test-worker"
       and "stats" in (row["result_json"] or ""))
+    # T127: 停止要求を持ったまま取り込まれた予約(=送信中に「停止」を押した、または
+    # 再起動で取り込み直した直後)は、ワーカーが会社を送らずに抜けて PAUSED になる。
+    # 再開すると続きから送って DONE になる
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    q_stop = db.create_scheduled_send(con, tid_a, list_a_id, "件名", "本文", True, now_iso)
+    con.execute("UPDATE scheduled_sends SET stop_requested='PAUSE' WHERE id=?", (q_stop,))
+    con.commit()
+    n_run = SSC_test.run_due(con, worker="test-worker", quiet=True)
+    row = con.execute("SELECT status, stop_requested, result_json FROM scheduled_sends WHERE id=?",
+                      (q_stop,)).fetchone()
+    res_stop = json.loads(row["result_json"] or "{}")
+    t("停止要求つきで取り込まれた予約は送らずに抜けてPAUSEDになる(要求は消える)",
+      n_run >= 1 and row["status"] == "PAUSED" and row["stop_requested"] is None
+      and res_stop.get("stopped_by") == "PAUSE"
+      and (res_stop.get("stats") or {}).get("sent", -1) == 0
+      and (res_stop.get("stats") or {}).get("unsent_by_stop", 0) >= 1)
+    st, r = post_auth("/api/tenant/scheduled-sends/resume", {"scheduled_id": q_stop}, token=key_a)
+    t("PAUSEDの予約を画面から再開できる", st == 200 and r.get("status") == "PENDING")
+    n_run = SSC_test.run_due(con, worker="test-worker", quiet=True)
+    row = con.execute("SELECT status, result_json FROM scheduled_sends WHERE id=?", (q_stop,)).fetchone()
+    res_done = json.loads(row["result_json"] or "{}")
+    t("再開した予約はワーカーが実行してDONEになる(送信済みは飛ばす経路)",
+      n_run >= 1 and row["status"] == "DONE" and res_done.get("stopped_by") is None)
     st, r = get_auth(f"/api/tenant/scheduled-sends?list_id={list_a_id}", token=key_a)
     t("予約一覧のDONE行に結果(result_json)が付く",
       st == 200 and any(s["id"] == q_id and s["status"] == "DONE" and s.get("result_json") for s in r["scheduled"]))
@@ -4706,6 +4760,41 @@ def self_test(port=8899):
     t("キャンセルできる", st == 200 and r.get("ok"))
     st, r = post_auth("/api/tenant/scheduled-sends/cancel", {"scheduled_id": scheduled_id}, token=key_a)
     t("既にキャンセル済みの予約を再キャンセルしようとすると404", st == 404)
+
+    # 停止・取り消し・再開(T127)。送信中(RUNNING)の予約も止められること
+    sid_p = db.create_scheduled_send(con, tid_a, list_a_id, "件名", "本文", True, future_at)
+    st, r = post_auth("/api/tenant/scheduled-sends/stop", {"scheduled_id": sid_p}, token=key_b)
+    t("他テナントの予約は停止できない(404)", st == 404)
+    st, r = post_auth("/api/tenant/scheduled-sends/stop", {"scheduled_id": sid_p}, token=key_a)
+    t("順番待ちの予約を停止すると即PAUSED", st == 200 and r.get("status") == "PAUSED"
+      and r.get("requested") is False)
+    st, r = post_auth("/api/tenant/scheduled-sends/resume", {"scheduled_id": sid_p}, token=key_a)
+    t("停止中の予約を再開すると順番待ちへ戻る", st == 200 and r.get("status") == "PENDING")
+    row = con.execute("SELECT status, resumed, stop_requested FROM scheduled_sends WHERE id=?",
+                      (sid_p,)).fetchone()
+    t("再開した予約は resumed=1(送信済みの会社を飛ばす目印)で要求は消えている",
+      row["status"] == "PENDING" and row["resumed"] == 1 and row["stop_requested"] is None)
+    st, r = post_auth("/api/tenant/scheduled-sends/resume", {"scheduled_id": sid_p}, token=key_a)
+    t("停止中でない予約は再開できない(404)", st == 404)
+    # 送信中の予約: 要求を残すだけで状態は RUNNING のまま
+    t("送信ワーカーが取り込める(PENDING→RUNNING)", db.claim_scheduled_send(con, sid_p, "test-worker"))
+    st, r = post_auth("/api/tenant/scheduled-sends/stop", {"scheduled_id": sid_p}, token=key_a)
+    t("送信中の予約を停止すると要求だけ残り状態はRUNNINGのまま",
+      st == 200 and r.get("status") == "RUNNING" and r.get("requested") is True)
+    t("ワーカーが会社ごとに見る stop_requested_for() が 'PAUSE' を返す",
+      db.stop_requested_for(con, sid_p) == "PAUSE")
+    st, r = post_auth("/api/tenant/scheduled-sends/cancel", {"scheduled_id": sid_p}, token=key_a)
+    t("停止要求中に取り消しへ切り替えられる", st == 200 and db.stop_requested_for(con, sid_p) == "CANCEL")
+    t("再起動時の requeue_all_running() は要求を消さない(取り込み直した直後に抜ける)",
+      db.requeue_all_running(con) >= 1 and db.stop_requested_for(con, sid_p) == "CANCEL")
+    db.finish_scheduled_send(con, sid_p, "CANCELLED", {"stopped_by": "CANCEL"})
+    row = con.execute("SELECT status, stop_requested FROM scheduled_sends WHERE id=?", (sid_p,)).fetchone()
+    t("ワーカーが終了状態にすると要求は消える", row["status"] == "CANCELLED" and row["stop_requested"] is None)
+    st, r = post_auth("/api/tenant/scheduled-sends/stop", {"scheduled_id": sid_p}, token=key_a)
+    t("取り消し済みの予約は停止できない(404)", st == 404)
+    st, r = get_auth("/api/tenant/scheduled-sends", token=key_a)
+    t("一覧に stop_requested が出る(画面の「停止処理中」表示用)",
+      st == 200 and any(s["id"] == sid_p and "stop_requested" in s for s in r.get("scheduled", [])))
 
     # due_scheduled_sends()の期限判定を直接確認(cron側の抽出ロジック)
     due_at = (datetime.now() + timedelta(seconds=1)).isoformat(timespec="seconds")

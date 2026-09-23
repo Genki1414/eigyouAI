@@ -30,6 +30,7 @@ on:
           - send-delivery-today  # 同上を「今日ぶん」だけで(実行中の成績を見る)
           - send-delivery-since  # 同上を since 以降で(改修の効果を測る)
           - send-reasons-since   # 理由別の件数を since 以降で
+          - send-before-after    # since を境に、同じ会社の結果がどう変わったか
           - dup-check      # 既に成功済みの会社へ再送していないか(件数のみ)
           - proxy-check    # プロキシが今使えるか(認証情報は出さない)
           - send-reasons-today   # 結果・理由別の件数と成功率を「今日ぶん」だけで
@@ -106,6 +107,19 @@ jobs:
             # --days は現在時刻からのスライド窓なので、時間をおいて2回実行すると
             # 母集団が変わり、改修の前後を比べても意味のない数字になる(実際にやった:
             # 2時間後に測り直したら前半が窓から外れて件数が減っただけだった)。
+            # 改修の効果は「全体の成功率」では測れない。送信し直す対象は
+            # 前回うまくいかなかった会社に偏っているので、母集団が違う
+            # 数字を並べても比べたことにならない。**同じ会社**が境界の
+            # 前後でどう変わったかを見る(完了未確認→成功 が救えた分)。
+            send-before-after)
+              case "$SINCE" in
+                "") echo "::error::since を指定してください"; exit 1 ;;
+                *[!0-9T:-]*) echo "::error::sinceは日時のみ(例 2026-09-23T15:05:00)"; exit 1 ;;
+              esac
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T \
+                  -e SINCE_AT='$SINCE' sender \
+                  python3 -c 'import os,db; b=os.environ[\"SINCE_AT\"]; S=\"SUCCESS\"; U=\"success_not_confirmed\"; L={0:\"送信なし\",1:\"その他(失敗)\",2:\"完了を確認できない\",3:\"成功\"}; rows=db.connect().execute(\"WITH a AS (SELECT company_id, MAX(CASE WHEN started_at<? THEN (CASE WHEN status=? THEN 3 WHEN reason_code=? THEN 2 ELSE 1 END) ELSE 0 END) bef, MAX(CASE WHEN started_at>=? THEN (CASE WHEN status=? THEN 3 WHEN reason_code=? THEN 2 ELSE 1 END) ELSE 0 END) aft FROM form_send_log GROUP BY company_id) SELECT bef,aft,COUNT(*) n FROM a WHERE aft>0 GROUP BY bef,aft ORDER BY bef,aft\",(b,S,U,b,S,U)).fetchall(); print(\"境界 \"+b+\" の前後で、同じ会社の結果がどう変わったか\"); print(\"  ※境界より後に1回でも送信した会社だけを数えています\"); print(\"  %-22s %-22s %7s\" % (\"境界より前\",\"境界より後\",\"会社数\")); [print(\"  %-22s %-22s %7d\" % (L[r[0]],L[r[1]],r[2])) for r in rows]'" ;;
             send-delivery-since)
               case "$SINCE" in
                 "") echo "::error::since を指定してください"; exit 1 ;;

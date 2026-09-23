@@ -41,7 +41,8 @@ on:
           - send-urls-weak # 送信ログ: 「URLが変わっただけ」で成功にした分のURLと押した要素
           - send-urls-noform   # 送信ログ: 問い合わせフォームが見つからなかったURL
           - send-urls-nosubmit # 送信ログ: 送信ボタンが見つからなかったURL
-          - send-error-hints   # 送信ログ: 検知したエラー文言の内訳(誤検出の確認)
+          - send-error-hints   # 送信ログ: 検知したエラー文言の内訳(誤検出の確認)+弾かれた欄と文言
+          - sender-fields      # 送信元テンプレートのどの欄が空か(値は出さない。弾かれる原因の切り分け)
           - send-urls-error    # 送信ログ: 送信後にエラー表示が出たURL(必須欄の取りこぼし調査)
           - send-urls-nofield  # 送信ログ: 入力できる欄が見つからなかったURL
 
@@ -203,6 +204,10 @@ jobs:
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \
                   python3 send_log_report_cli.py error-hints --days 30 --limit 30" ;;
+            sender-fields)
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T sender \
+                  python3 send_log_report_cli.py sender-fields" ;;
             send-urls-error)
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \

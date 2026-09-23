@@ -1168,6 +1168,40 @@ def _silent_submit_hints(scope):
         return []
 
 
+# 送信後に「どの欄がどう弾かれたか」を拾う(2026-09-23)。error_message_detected は
+# 「入力内容に問題」のような総括文言しか残しておらず、443社ぶんの原因が追えなかった。
+# Contact Form 7 は弾いた欄に aria-invalid="true" を付け、隣に .wpcf7-not-valid-tip
+# (「必須項目に入力してください。」等)を出す。他のフォームも aria-invalid / .error /
+# .is-invalid の類でおおむね拾える。欄の名前(name)と文言だけを残し、入力値は残さない
+_INVALID_FIELD_DETAILS_JS = """() => {
+  const q = s => Array.from(document.querySelectorAll(s));
+  const seen = new Set(), out = [], usedTips = new Set();
+  const push = (k, v) => { const key = k + '=' + v; if (v && !seen.has(key)) { seen.add(key); out.push(key); } };
+  const tipOf = el => {
+    const wrap = el.closest('.wpcf7-form-control-wrap, .form-group, .field, li, p, td, div') || el.parentElement;
+    const tip = wrap && wrap.querySelector('.wpcf7-not-valid-tip, .error, .error-message, .invalid-feedback, .help-block, .form-error, .validation-message, [role=alert]');
+    if (tip) usedTips.add(tip);
+    return tip ? (tip.innerText || '').trim().slice(0, 40) : '';
+  };
+  for (const el of q('input, textarea, select')) {
+    const bad = el.getAttribute('aria-invalid') === 'true' || /not-valid|is-invalid|\\berror\\b|invalid/.test(el.className);
+    if (!bad) continue;
+    const name = el.name || el.id || el.tagName.toLowerCase();
+    push(name.slice(0, 30), tipOf(el) || '(文言なし)');
+  }
+  // 欄に紐付かないヒント(CF7が欄の外に出すことがある)
+  for (const t of q('.wpcf7-not-valid-tip')) if (!usedTips.has(t)) push('?', (t.innerText || '').trim().slice(0, 40));
+  return out.slice(0, 8);
+}"""
+
+
+def _invalid_field_details(scope):
+    try:
+        return list(scope.evaluate(_INVALID_FIELD_DETAILS_JS) or [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _same_element(a, b):
     """2つのElementHandleが同じDOM要素か。フレームが違う等で比べられなければFalse。"""
     if a is None or b is None:
@@ -1804,6 +1838,12 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 result.status = "FAILED_UNSUPPORTED"
                 result.reason_code = "error_message_detected"
                 result.error_message = f"送信後ページにエラー文言を検知: {error_hit}"
+                # どの欄がどう弾かれたかを添える(_INVALID_FIELD_DETAILS_JS のコメント参照)。
+                # 総括文言だけでは原因が追えない。report側は「: 」の前で集計するので
+                # 既存の内訳(error-hints)は崩れない
+                details = _invalid_field_details(scope)
+                if details:
+                    result.error_message += " [欄: " + " / ".join(details) + "]"
                 return result
             url_changed = page.url != contact_url
             # フォームがDOM上から消えている(=AJAXで完了画面に差し替わった)ことも
@@ -2668,9 +2708,34 @@ document.getElementById('f').addEventListener('submit', function (e) {
 });
 </script></body></html>"""
 
+            # CF7 の validation_error と同じ形で弾くページ(電話欄を必須扱いで弾き、
+            # aria-invalid と .wpcf7-not-valid-tip を出す)
+            _CF7_INVALID = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>お問い合わせ</title></head>
+<body><h1>お問い合わせ</h1>
+<form id="f" action="/contact/#wpcf7-f2-o1" method="post">
+  <p>お名前 <span class="wpcf7-form-control-wrap"><input type="text" name="your-name"></span></p>
+  <p>メール <span class="wpcf7-form-control-wrap"><input type="email" name="your-email"></span></p>
+  <p>電話 <span class="wpcf7-form-control-wrap"><input type="tel" name="your-tel"></span></p>
+  <p>本文 <span class="wpcf7-form-control-wrap"><textarea name="your-message"></textarea></span></p>
+  <p><input type="submit" value="送信"></p>
+  <div class="wpcf7-response-output" id="out"></div>
+</form>
+<script>
+document.getElementById('f').addEventListener('submit', function (e) {
+  e.preventDefault();
+  setTimeout(function () {
+    const tel = document.querySelector('[name=your-tel]');
+    tel.setAttribute('aria-invalid', 'true');
+    const tip = document.createElement('span'); tip.className = 'wpcf7-not-valid-tip';
+    tip.textContent = '電話番号の形式が正しくありません。'; tel.parentElement.appendChild(tip);
+    document.getElementById('out').textContent = '入力内容に問題があります。確認してもう一度送信してみてください。';
+  }, 300);
+});
+</script></body></html>"""
+
             class _PagesHandler(_hs.BaseHTTPRequestHandler):
                 pages = {"/cf7.html": _CF7, "/twostep.html": _TWOSTEP, "/mailto.html": _MAILTO,
-                         "/silent_v3.html": _SILENT_V3}
+                         "/silent_v3.html": _SILENT_V3, "/cf7_invalid.html": _CF7_INVALID}
 
                 def do_GET(self):
                     path = _us2(self.path).path
@@ -2736,6 +2801,13 @@ document.getElementById('f').addEventListener('submit', function (e) {
                       and "reCAPTCHA v3あり" in msg and "入力値が残ったまま" in msg and "押した:" in msg)
                 print(f"  {'✓' if ok else '✗'} 押しても何も起きないフォーム(reCAPTCHA v3): "
                       f"未確認のまま2回は押さず、手がかりを残す → {r.reason_code} / {c} / {msg[:90]}")
+                # 弾かれたときは「どの欄がどう弾かれたか」を残す
+                r = _go(f"http://127.0.0.1:{pages_port}/cf7_invalid.html")
+                msg = r.error_message or ""
+                ok = (r.reason_code == "error_message_detected"
+                      and "your-tel=電話番号の形式が正しくありません" in msg and "?=" not in msg)
+                print(f"  {'✓' if ok else '✗'} 弾かれたら欄ごとの文言を残す(CF7の validation_error) "
+                      f"→ {r.reason_code} / {msg[:110]}")
             finally:
                 pages_srv.shutdown()
                 _ex.submit(close_thread_browser).result()

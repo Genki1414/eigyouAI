@@ -4675,6 +4675,50 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T129. 「入力内容に問題があります」の原因調査 — 欄の分類ではなく値/サイト側の判定(2026-09-23)
+
+**調査**: `send-urls-error` で `error_message_detected` の40件を取り出し、HTMLを検証済み
+HTTPSで取得して**本番と同じ `_classify_field`** で必須欄を分類した(解析できた33件、
+うち Contact Form 7 が23件)。
+
+**結果**: CF7 の大半で**必須欄はすべて分類できていた**(your-name→name、your-email→email、
+your-tel→phone、your-message→message)。欄の種類を見落として空のまま送っているのでは
+ない。分類できない必須欄は6件だけ(`your-corp`、`text-563`、`forms[namae]` 等)。
+
+**注意(自分の解析ミス)**: 最初の集計は `page.query_selector("form:has(textarea), form:has(...), form")`
+がコンマ区切りで**文書順の最初の要素**(ヘッダーの検索フォーム)を返していたため、
+CF7の欄が全部「分類できない」に見えた。JS側と同じ基準(textarea/emailを持つフォーム)で
+選び直して正した。
+
+**残る仮説**(静的解析では決められない):
+1. **送信元の値が空**: `senders.py` は `phone=sender.phone or ""`、`furigana` は姓カナ+名カナ、
+   `postal_code=sender.postal_code or ""`。相手フォームでこれらが必須なら、分類できていても
+   空のまま送って弾かれる。**ローカルのデモDBでは全テナントで電話・姓カナ・郵便番号が空**
+   だった。本番は `sender-fields`(新設)で確かめる
+2. **CF7 の spam 判定**: CF7 は reCAPTCHA v3 のスコアが低い / Akismet / honeypot で spam と
+   判定すると「送信に失敗しました」系の文言を出す(**1,484件**の「送信に失敗しました」は
+   これの可能性が高い。T128 の reCAPTCHA v3 の件と同根)
+3. 電話番号の形式など値のバリデーション
+
+**直した点**(次の送信から原因がDBだけで分かるように):
+- `form_navigator.py`: エラー文言を検知したとき、`aria-invalid="true"` の欄と隣の
+  `.wpcf7-not-valid-tip` / `.error` 等の文言を `error_message` の末尾に
+  「[欄: your-tel=電話番号の形式が正しくありません。 / ...]」の形で残す
+  (`_invalid_field_details()`。欄の名前と文言だけ。入力値は残さない)
+- `send_log_report_cli.py error-hints`: 総括文言は「[欄:」の前で切って集計し、
+  欄ごとの文言を別表で出す(既存の内訳は崩れない)
+- `send_log_report_cli.py sender-fields` / `ops-readonly.yml` の `sender-fields`:
+  テナントの送信元(`tenants.sender_*`。有効化済みの値)と送信元テンプレートについて、
+  どの欄が空かを あり/なし だけで出す(値は出さない)。電話・姓カナ・郵便番号が空なら警告
+
+**テスト**: CF7 の validation_error と同じ形で弾くページ(電話欄に aria-invalid と
+.wpcf7-not-valid-tip) → `error_message` に「your-tel=電話番号の形式が正しくありません」が
+残り、欄に紐付いた文言が「?=」として重複しない。
+
+**次にやること**: 本番で `sender-fields` を実行し、電話・姓カナ・郵便番号が空なら
+送信元テンプレートを埋めてもらう(それだけで「入力内容に問題」の一部は消える見込み)。
+次の送信後に `send-error-hints` の「弾かれた欄と文言」で残りの原因を確定する。
+
 ### T128. 「押しても何も起きない」の手がかりを記録する。mailto:フォームは押さない(2026-09-23)
 
 **なぜ**: T126の調査で、`success_not_confirmed` の行にはURLしか残っておらず(本番は

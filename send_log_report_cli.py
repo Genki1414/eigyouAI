@@ -171,24 +171,82 @@ def cmd_error_hints(con, args):
     form_navigator._ERROR_HINTS には「再度お試しください」「確認して再度」のように
     **完了ページにも出うる文言**が入っている。そこに引っかかっていると、実際には
     送信できているのに失敗として記録していることになる。件数の多い文言から順に、
-    それが本当にエラーなのかを人が判断するための出力。"""
+    それが本当にエラーなのかを人が判断するための出力。
+
+    2026-09-23から error_message の末尾に「[欄: name=文言 / ...]」(どの欄がどう弾かれたか)
+    が付く。総括文言はその前で切って集計し、欄ごとの文言は別に数える。"""
     reason = getattr(args, "reason", None) or "error_message_detected"
     rows = con.execute("""SELECT error_message, COUNT(*) n FROM form_send_log
         WHERE reason_code = ? AND started_at >= ?
-        GROUP BY error_message ORDER BY n DESC LIMIT ?""",
-        (reason, _window(args), args.limit)).fetchall()
+        GROUP BY error_message ORDER BY n DESC""",
+        (reason, _window(args))).fetchall()
     if not rows:
         print(f"{reason} の行はありません")
         return
-    total = sum(r["n"] for r in rows)
-    print(f"検知した文言の内訳(上位{len(rows)}種 / 合計{total:,}件)")
-    print("※「再度お試しください」等が上位にある場合、完了ページを失敗と誤判定している"
-          "可能性があります(form_navigator._ERROR_HINTS を見直す)")
-    print("-" * 92)
+    summary, fields = {}, {}
     for r in rows:
         msg = (r["error_message"] or "").replace("送信後ページにエラー文言を検知: ", "")
-        print(f"  {r['n']:6,d}件  {msg[:70]}")
+        head, _, tail = msg.partition(" [欄: ")
+        summary[head] = summary.get(head, 0) + r["n"]
+        if tail:
+            for item in tail.rstrip("]").split(" / "):
+                fields[item] = fields.get(item, 0) + r["n"]
+    total = sum(summary.values())
+    top = sorted(summary.items(), key=lambda kv: -kv[1])[:args.limit]
+    print(f"検知した文言の内訳(上位{len(top)}種 / 合計{total:,}件)")
+    if reason == "error_message_detected":
+        print("※「再度お試しください」等が上位にある場合、完了ページを失敗と誤判定している"
+              "可能性があります(form_navigator._ERROR_HINTS を見直す)")
+    print("-" * 92)
+    for head, n in top:
+        print(f"  {n:6,d}件  {head[:70]}")
+    if fields:
+        top_f = sorted(fields.items(), key=lambda kv: -kv[1])[:args.limit]
+        print()
+        print(f"弾かれた欄と文言(上位{len(top_f)}種。欄の名前=相手サイトの文言。入力値は含まない)")
+        print("-" * 92)
+        for item, n in top_f:
+            print(f"  {n:6,d}件  {item[:80]}")
+    elif reason == "error_message_detected":
+        print()
+        print("※ 欄ごとの文言はまだありません(2026-09-23のデプロイ以降の送信から残ります)")
 
+
+def cmd_sender_fields(con, args):
+    """送信元テンプレートのどの欄が埋まっているか(あり/なし だけ。値は出さない)。
+
+    弾かれる原因の切り分け用(2026-09-23)。相手フォームの必須欄(電話・フリガナ・
+    郵便番号など)は分類できているのに「入力内容に問題があります」になる場合、
+    送信元テンプレート側が空で、空のまま送っていることがある。"""
+    cols = [("sender_name", "会社名/氏名"), ("sender_email", "メール"), ("sender_phone", "電話"),
+            ("sender_last_name", "姓"), ("sender_first_name", "名"),
+            ("sender_last_name_kana", "姓カナ"), ("sender_first_name_kana", "名カナ"),
+            ("sender_postal_code", "郵便番号"), ("sender_prefecture", "都道府県"),
+            ("sender_city", "市区町村"), ("sender_block", "丁目番地"), ("sender_building", "建物"),
+            ("sender_address", "住所(単一)"), ("sender_department", "部署"), ("sender_position", "役職")]
+    sel = ", ".join(c for c, _ in cols)
+
+    def _report(label, r):
+        missing = [lab for c, lab in cols if not (r[c] or "").strip()]
+        print(f"  {label} 空の欄: {'・'.join(missing) if missing else 'なし(全部埋まっている)'}")
+        # 相手フォームで必須になりやすい欄が空なら、はっきり言う
+        risky = [lab for c, lab in cols if c in ("sender_phone", "sender_last_name_kana",
+                                                   "sender_postal_code") and not (r[c] or "").strip()]
+        if risky:
+            print(f"      ⚠ {'・'.join(risky)} が空。これらを必須にしているフォームでは空のまま送って弾かれます")
+
+    # 実際に送信で使われるのは tenants.sender_*(「有効化」でテンプレートから写した値)。
+    # 送信時にテンプレートを指定した場合だけ sender_templates の値が使われる
+    print("■ テナントの送信元(有効化済み。通常の送信で使われる値。値は出しません)")
+    for r in con.execute(f"SELECT id, {sel} FROM tenants ORDER BY id").fetchall():
+        _report(f"テナント{r['id']}", r)
+    print()
+    print("■ 送信元テンプレート(送信時に指定したときだけ使われる)")
+    rows = con.execute(f"SELECT id, tenant_id, {sel} FROM sender_templates ORDER BY tenant_id, id").fetchall()
+    if not rows:
+        print("  なし")
+    for r in rows:
+        _report(f"#{r['id']} (テナント{r['tenant_id']})", r)
 
 def cmd_runs(con, args):
     """実行(リスト)単位の成績。どの送信がいつ、どれだけ通ったか。"""
@@ -237,6 +295,8 @@ def main():
     p4.add_argument("--since", help="開始時刻(例 2026-09-23T15:05:00)。--daysより優先")
     p4.add_argument("--limit", type=int, default=30)
 
+    p6 = sub.add_parser("sender-fields", help="送信元テンプレートのどの欄が埋まっているか(値は出さない)")
+
     p3 = sub.add_parser("runs", help="実行(リスト)単位の成績")
     p3.add_argument("--days", type=int, default=30)
     p3.add_argument("--since", help="開始時刻(例 2026-09-23T15:05:00)。--daysより優先")
@@ -246,7 +306,8 @@ def main():
     con = db.connect()
     try:
         {"reasons": cmd_reasons, "urls": cmd_urls, "runs": cmd_runs,
-         "error-hints": cmd_error_hints, "delivery": cmd_delivery}[args.cmd](con, args)
+         "error-hints": cmd_error_hints,
+         "sender-fields": cmd_sender_fields, "delivery": cmd_delivery}[args.cmd](con, args)
     finally:
         try:
             con.close()

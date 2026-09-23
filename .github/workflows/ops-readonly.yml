@@ -32,6 +32,7 @@ on:
           - send-reasons-since   # 理由別の件数を since 以降で
           - send-before-after    # since を境に、同じ会社の結果がどう変わったか
           - send-urls-unconfirmed # since 以降で「完了を確認できない」になったURL
+          - send-unconfirmed-hints # since 以降の「完了を確認できない」の手がかり内訳(reCAPTCHA v3等)
           - dup-check      # 既に成功済みの会社へ再送していないか(件数のみ)
           - proxy-check    # プロキシが今使えるか(認証情報は出さない)
           - send-reasons-today   # 結果・理由別の件数と成功率を「今日ぶん」だけで
@@ -121,6 +122,17 @@ jobs:
                 docker compose -f deploy/docker-compose.yml exec -T \
                   -e SINCE_AT='$SINCE' sender \
                   python3 -c 'import os,argparse,db,send_log_report_cli as R; from datetime import datetime; s=os.environ[\"SINCE_AT\"]; d=round((datetime.now()-datetime.fromisoformat(s)).total_seconds()/86400,6); k=dict(days=d,reason=\"success_not_confirmed\",status=None,limit=60); ns=argparse.Namespace(since=s,**k) if hasattr(R,\"_window\") else argparse.Namespace(**k); print(\"集計開始: \"+s); R.cmd_urls(db.connect(),ns)'" ;;
+            # 「完了を確認できない」の手がかり(T126以降、error_message に残る)の内訳。
+            # reCAPTCHA v3 の有無・押した要素・入力値が残ったか、を件数で見る
+            send-unconfirmed-hints)
+              case "$SINCE" in
+                "") echo "::error::since を指定してください"; exit 1 ;;
+                *[!0-9T:-]*) echo "::error::sinceは日時のみ(例 2026-09-23T15:05:00)"; exit 1 ;;
+              esac
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T \
+                  -e SINCE_AT='$SINCE' sender \
+                  python3 -c 'import os,argparse,db,send_log_report_cli as R; from datetime import datetime; s=os.environ[\"SINCE_AT\"]; d=round((datetime.now()-datetime.fromisoformat(s)).total_seconds()/86400,6); k=dict(days=d,reason=\"success_not_confirmed\",limit=40); ns=argparse.Namespace(since=s,**k) if hasattr(R,\"_window\") else argparse.Namespace(**k); print(\"集計開始: \"+s); R.cmd_error_hints(db.connect(),ns)'" ;;
             # 改修の効果は「全体の成功率」では測れない。送信し直す対象は
             # 前回うまくいかなかった会社に偏っているので、母集団が違う
             # 数字を並べても比べたことにならない。**同じ会社**が境界の

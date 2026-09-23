@@ -925,6 +925,7 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
 # (画面側はlist_builder.htmlのREASON_LABELSに同じ対応表がある。増やすときは両方直すこと)
 REASON_LABELS_JA = {
     "success_not_confirmed": "送信したが完了を確認できない",
+    "mailto_form": "送信先がmailto:のフォーム(自動送信できない)",
     "form_not_found": "問い合わせフォームが見つからない",
     "no_fields_filled": "入力できる欄が見つからない",
     "submit_button_not_found": "送信ボタンが見つからない",

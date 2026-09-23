@@ -172,12 +172,13 @@ def cmd_error_hints(con, args):
     **完了ページにも出うる文言**が入っている。そこに引っかかっていると、実際には
     送信できているのに失敗として記録していることになる。件数の多い文言から順に、
     それが本当にエラーなのかを人が判断するための出力。"""
+    reason = getattr(args, "reason", None) or "error_message_detected"
     rows = con.execute("""SELECT error_message, COUNT(*) n FROM form_send_log
-        WHERE reason_code = 'error_message_detected' AND started_at >= ?
+        WHERE reason_code = ? AND started_at >= ?
         GROUP BY error_message ORDER BY n DESC LIMIT ?""",
-        (_window(args), args.limit)).fetchall()
+        (reason, _window(args), args.limit)).fetchall()
     if not rows:
-        print("error_message_detected の行はありません")
+        print(f"{reason} の行はありません")
         return
     total = sum(r["n"] for r in rows)
     print(f"検知した文言の内訳(上位{len(rows)}種 / 合計{total:,}件)")
@@ -229,6 +230,9 @@ def main():
     p5.add_argument("--since", help="開始時刻(例 2026-09-23T15:05:00)。--daysより優先")
 
     p4 = sub.add_parser("error-hints", help="エラー文言の内訳(誤検出の確認)")
+    p4.add_argument("--reason", default="error_message_detected",
+                    help="集計する reason_code。success_not_confirmed にすると「押しても何も"
+                         "起きない」の手がかり(reCAPTCHA v3の有無など)の内訳が出る(2026-09-23)")
     p4.add_argument("--days", type=int, default=30)
     p4.add_argument("--since", help="開始時刻(例 2026-09-23T15:05:00)。--daysより優先")
     p4.add_argument("--limit", type=int, default=30)

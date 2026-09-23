@@ -4675,6 +4675,32 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T128. 「押しても何も起きない」の手がかりを記録する。mailto:フォームは押さない(2026-09-23)
+
+**なぜ**: T126の調査で、`success_not_confirmed` の行にはURLしか残っておらず(本番は
+`keep_debug_fields=False`、この経路は `error_message` も空)、原因を追うには実ページを
+見に行くしかなかった。次からはDBだけで内訳が出るようにする。
+
+**やったこと**(`form_navigator.py`):
+- `success_not_confirmed` のとき `error_message` に「完了を確認できない: 押した: <要素> /
+  入力値が残ったまま|消えた / reCAPTCHA v3あり / hCaptchaあり / Turnstileあり /
+  form onsubmitあり」を残す(`_silent_submit_hints()`)。**判定には使わない**(reCAPTCHA v3は
+  `_detect_captcha` が意図的に弾かない設計のまま。バッジだけのサイトまで捨てると送れる
+  サイトを失う)。スコアが低いとサーバー側が黙って捨てるので、未確認の説明になりうる
+- `action="mailto:"` のフォームは押さずに `mailto_form`(FAILED_UNSUPPORTED)で記録する
+  (押してもメールソフトを開こうとするだけで送られない。60件中1件)。ラベルは
+  `target_lists.REASON_LABELS_JA` と `list_builder.html` の `REASON_LABELS` に追加
+- 報告: `send_log_report_cli.py error-hints --reason success_not_confirmed` で手がかりの
+  内訳。`ops-readonly.yml` に `send-unconfirmed-hints`(since指定)
+
+**テスト**: mailto: ページ → 押さずに `mailto_form`(押された回数0)。reCAPTCHA v3を読み込み
+押しても何も起きないページ → `success_not_confirmed` のまま1回しか押さず、
+`error_message` に「reCAPTCHA v3あり」「入力値が残ったまま」「押した:」が入る。全138件通過。
+
+**まだやっていない**: reCAPTCHA v3 のサイトへの対処そのもの(60件中17件)。v3はスコア次第で
+黙って捨てられるため、送れているかどうかは相手にしか分からない。次の送信で
+`send-unconfirmed-hints` を見て「未確認のうち v3 が何割か」を数えてから決める。
+
 ### T127. 実行中の送信を止める・取り消す・再開する(2026-09-23)
 
 **なぜ**: T126で2巡目を止める必要が出たとき、実行中(RUNNING)の予約を止める正規の手段が

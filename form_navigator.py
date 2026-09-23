@@ -1132,6 +1132,42 @@ def _owning_form(el):
         return None
 
 
+def _form_action_of(el):
+    """要素が属する<form>のaction属性(無ければ空文字)。"""
+    try:
+        return (el.evaluate("e => { const f = e.closest('form'); return f ? (f.getAttribute('action') || '') : ''; }")
+                or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+# 「押したのに何も起きない」の手がかり(2026-09-23)。success_not_confirmed 679社の調査で、
+# DBに問い合わせ先URLしか残っておらず原因が追えなかった反省。error_message に残す
+# (本番は keep_debug_fields=False なので page_text_snippet は残らない)。
+# reCAPTCHA v3 / invisible は _detect_captcha が**意図的に**弾かない(バッジだけの
+# サイトまで捨てると送れるサイトを失う)が、スコアが低いとサーバー側が黙って捨てる
+# ので、未確認の有力な説明になる。ここでは判定に使わず、記録だけする
+_SILENT_SUBMIT_PROBE_JS = """() => {
+  const q = s => Array.from(document.querySelectorAll(s));
+  const srcs = q('script[src]').map(e => e.getAttribute('src') || '').join(' ');
+  const html = document.documentElement.outerHTML;
+  const out = [];
+  if (/recaptcha\\/api\\.js\\?render=/.test(srcs) || q('.grecaptcha-badge').length) out.push('reCAPTCHA v3あり');
+  else if (/recaptcha/.test(srcs)) out.push('reCAPTCHA(v2系)あり');
+  if (/hcaptcha\\.com/.test(srcs)) out.push('hCaptchaあり');
+  if (/challenges\\.cloudflare\\.com/.test(srcs)) out.push('Turnstileあり');
+  if (q('form[onsubmit]').length) out.push('form onsubmitあり');
+  return out;
+}"""
+
+
+def _silent_submit_hints(scope):
+    try:
+        return list(scope.evaluate(_SILENT_SUBMIT_PROBE_JS) or [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _same_element(a, b):
     """2つのElementHandleが同じDOM要素か。フレームが違う等で比べられなければFalse。"""
     if a is None or b is None:
@@ -1656,6 +1692,19 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 except Exception:  # noqa: BLE001
                     pass
                 submit_btn = _find_button(scope, _SUBMIT_TEXT_RE, form_el=form_el)
+            # 送信先が mailto: のフォームは、押してもメールソフトを開こうとするだけで
+            # 何も送られない(ヘッドレスでは何も起きない)。押さずに記録する(2026-09-23、
+            # 未確認679社の調査で実例)
+            mailto_action = _form_action_of(submit_btn) if submit_btn else (
+                _form_action_of(first_filled_el) if first_filled_el is not None else "")
+            if mailto_action.lower().startswith("mailto:"):
+                result.status = "FAILED_UNSUPPORTED"
+                result.reason_code = "mailto_form"
+                result.error_message = ("フォームの送信先が mailto:(メールソフトを開くだけで"
+                                        "サーバーへは送られない)のため送信していません")
+                result.page_text_snippet = _page_text(page)[:400]
+                return result
+
             # 何を押したかを残す。url_changed_after_submitでSUCCESSにした分が
             # 本当に送信できていたのかを、あとからCSVで判断するために使う
             clicked_desc = ""
@@ -1782,6 +1831,13 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
 
             result.status = "FAILED_UNSUPPORTED"
             result.reason_code = "success_not_confirmed"
+            # 何が起きなかったかの手がかりを残す(2026-09-23)。以前はここで何も残さず、
+            # 679社の原因を追うのに実ページを見に行くしかなかった
+            parts = [f"押した: {clicked_desc or '(ボタン無し)'}",
+                     "入力値が残ったまま" if _input_form_still_editable(scope, values)
+                     else "入力値は消えた"]
+            parts += _silent_submit_hints(scope)
+            result.error_message = "完了を確認できない: " + " / ".join(parts)
             return result
         finally:
             try:
@@ -2592,8 +2648,29 @@ document.getElementById('f').addEventListener('submit', function (e) {
   <div id="cnt">押された回数: 0</div>
 </form></body></html>"""
 
+            # reCAPTCHA v3 を読み込み、押しても何も起きないページ。scriptのsrcは外部へ
+            # 出ないようローカルの(404になる)パスにしてある。検知は src の文字列で行う
+            _SILENT_V3 = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>お問い合わせ</title>
+<script src="/recaptcha/api.js?render=6LdummySiteKey"></script></head>
+<body><h1>お問い合わせ</h1>
+<form id="f" action="/contact/" method="post">
+  <p>お名前 <input type="text" name="name"></p>
+  <p>メール <input type="email" name="email"></p>
+  <p>本文 <textarea name="message"></textarea></p>
+  <p><input type="submit" value="送信する"></p>
+  <div id="cnt">押された回数: 0</div>
+</form>
+<script>
+let n = 0;
+document.getElementById('f').addEventListener('submit', function (e) {
+  e.preventDefault(); n++;
+  document.getElementById('cnt').textContent = '押された回数: ' + n;
+});
+</script></body></html>"""
+
             class _PagesHandler(_hs.BaseHTTPRequestHandler):
-                pages = {"/cf7.html": _CF7, "/twostep.html": _TWOSTEP, "/mailto.html": _MAILTO}
+                pages = {"/cf7.html": _CF7, "/twostep.html": _TWOSTEP, "/mailto.html": _MAILTO,
+                         "/silent_v3.html": _SILENT_V3}
 
                 def do_GET(self):
                     path = _us2(self.path).path
@@ -2644,12 +2721,21 @@ document.getElementById('f').addEventListener('submit', function (e) {
                 ok = r.reason_code == "success_text_matched" and c == "押された回数: 2 / 送信回数: 1"
                 print(f"  {'✓' if ok else '✗'} その場で確認画面へ切り替わる2段階フォーム: "
                       f"確認画面の「送信する」も押して完了まで進む → {r.reason_code} / {c}")
-                # 押しても何も起きないフォーム。未確認のままでよいが、2回押してはいけない
+                # mailto: フォームは押しても何も送られないので、押さずに専用の理由で記録する
                 r = _go(f"http://127.0.0.1:{pages_port}/mailto.html")
                 c = _count(r)
-                ok = r.reason_code == "success_not_confirmed" and c == "押された回数: 1"
-                print(f"  {'✓' if ok else '✗'} mailto:フォーム(押しても何も起きない): "
-                      f"未確認のまま、ただし2回は押さない → {r.reason_code} / {c}")
+                ok = r.reason_code == "mailto_form" and c == "押された回数: 0" and not r.submit_attempted
+                print(f"  {'✓' if ok else '✗'} mailto:フォーム: 押さずに mailto_form で記録する "
+                      f"→ {r.reason_code} / {c}")
+                # 押しても何も起きない(reCAPTCHA v3 で黙って捨てられる想定)フォーム。
+                # 未確認のままでよいが、2回押してはいけないし、手がかりを残すこと
+                r = _go(f"http://127.0.0.1:{pages_port}/silent_v3.html")
+                c = _count(r)
+                msg = r.error_message or ""
+                ok = (r.reason_code == "success_not_confirmed" and c == "押された回数: 1"
+                      and "reCAPTCHA v3あり" in msg and "入力値が残ったまま" in msg and "押した:" in msg)
+                print(f"  {'✓' if ok else '✗'} 押しても何も起きないフォーム(reCAPTCHA v3): "
+                      f"未確認のまま2回は押さず、手がかりを残す → {r.reason_code} / {c} / {msg[:90]}")
             finally:
                 pages_srv.shutdown()
                 _ex.submit(close_thread_browser).result()

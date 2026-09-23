@@ -90,7 +90,7 @@ jobs:
             proxy-check)
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \
-                  python3 proxy_check_cli.py" ;;
+                  python3 proxy_check_cli.py --concurrency 3" ;;
             dup-check)
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \

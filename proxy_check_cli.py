@@ -100,6 +100,10 @@ def main():
     ap.add_argument("--timeout", type=int, default=TIMEOUT_SECONDS)
     ap.add_argument("--no-browser", action="store_true",
                     help="Playwrightでの確認を省く(速いが、送信の実経路は確かめられない)")
+    ap.add_argument("--concurrency", type=int, default=0,
+                    help="同時接続を試す本数(既定0=試さない)。"
+                          "送信はFORM_SEND_CONCURRENCY本の並列で動くため、"
+                          "単発で通っても同時接続で弾かれることがある")
     args = ap.parse_args()
 
     socket.setdefaulttimeout(args.timeout)
@@ -153,6 +157,26 @@ def main():
     if not args.no_browser:
         print(f"ブラウザで通った : {ok_browser} / {n}件")
     print()
+    if args.concurrency > 0 and pool and not args.no_browser:
+        print("-" * 62)
+        print(f"[3] 同時接続{args.concurrency}本で確認"
+              f"(送信は並列で動くため、単発で通っても弾かれることがある)")
+        import concurrent.futures as _cf
+        target = args.url or OUTSIDE_TEST_URL
+        with _cf.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
+            futs = [ex.submit(check_one_browser, pool[i % len(pool)], target, args.timeout)
+                    for i in range(args.concurrency)]
+            results = [f.result() for f in futs]
+        for i, (good, line) in enumerate(results, 1):
+            print(f"  #{i}{line[3:]}")
+        ok_c = sum(1 for good, _ in results if good)
+        print(f"  → 同時{args.concurrency}本中 {ok_c}本が成功")
+        if ok_c < args.concurrency:
+            print("  ※ 単発では通るのに同時接続で落ちています。契約の同時セッション上限が")
+            print("    原因の可能性が高い。有効化するならFORM_SEND_CONCURRENCYを"
+                  f"{max(1, ok_c)}以下にするか、契約を見直してください")
+        print()
+
     if args.no_browser:
         print("※ 判断を保留してください(ブラウザでの確認を省いたため)")
     elif ok_browser == 0:

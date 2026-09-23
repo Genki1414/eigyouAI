@@ -17,6 +17,10 @@ on:
         description: "集計の開始時刻(任意。例 2026-09-23T15:05:00)。send-*-since で使う"
         required: false
         type: string
+      reason:
+        description: "send-hints-since / send-urls-since で見る reason_code(例 error_message_detected, goto_failed)"
+        required: false
+        type: string
       action:
         description: "確認したい内容"
         required: true
@@ -33,6 +37,8 @@ on:
           - send-before-after    # since を境に、同じ会社の結果がどう変わったか
           - send-urls-unconfirmed # since 以降で「完了を確認できない」になったURL
           - send-unconfirmed-hints # since 以降の「完了を確認できない」の手がかり内訳(reCAPTCHA v3等)
+          - send-hints-since   # since 以降・reason 指定で error_message の内訳(弾かれた欄と文言も)
+          - send-urls-since    # since 以降・reason 指定でURLとエラー文言(40件)
           - dup-check      # 既に成功済みの会社へ再送していないか(件数のみ)
           - proxy-check    # プロキシが今使えるか(認証情報は出さない)
           - send-reasons-today   # 結果・理由別の件数と成功率を「今日ぶん」だけで
@@ -58,6 +64,7 @@ jobs:
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
       ACTION: ${{ inputs.action }}
       SINCE: ${{ inputs.since }}
+      REASON: ${{ inputs.reason }}
     steps:
       - name: Configure SSH
         env:
@@ -136,6 +143,34 @@ jobs:
                 docker compose -f deploy/docker-compose.yml exec -T \
                   -e SINCE_AT='$SINCE' sender \
                   python3 -c 'import os,argparse,db,send_log_report_cli as R; from datetime import datetime; s=os.environ[\"SINCE_AT\"]; d=round((datetime.now()-datetime.fromisoformat(s)).total_seconds()/86400,6); k=dict(days=d,reason=\"success_not_confirmed\",limit=40); ns=argparse.Namespace(since=s,**k) if hasattr(R,\"_window\") else argparse.Namespace(**k); print(\"集計開始: \"+s); R.cmd_error_hints(db.connect(),ns)'" ;;
+            # since と reason を指定して内訳/URLを見る(2026-09-24)。理由ごとに
+            # アクションを増やさずに済むようにした。reason は小文字と_だけ通す
+            send-hints-since)
+              case "$SINCE" in
+                "") echo "::error::since を指定してください"; exit 1 ;;
+                *[!0-9T:-]*) echo "::error::sinceは日時のみ(例 2026-09-23T15:05:00)"; exit 1 ;;
+              esac
+              case "$REASON" in
+                "") echo "::error::reason を指定してください(例 error_message_detected)"; exit 1 ;;
+                *[!a-z_]*) echo "::error::reason は小文字と_だけ"; exit 1 ;;
+              esac
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T \
+                  -e SINCE_AT='$SINCE' -e REASON_AT='$REASON' sender \
+                  python3 -c 'import os,argparse,db,send_log_report_cli as R; from datetime import datetime; s=os.environ[\"SINCE_AT\"]; r=os.environ[\"REASON_AT\"]; d=round((datetime.now()-datetime.fromisoformat(s)).total_seconds()/86400,6); k=dict(days=d,reason=r,limit=40); ns=argparse.Namespace(since=s,**k) if hasattr(R,\"_window\") else argparse.Namespace(**k); print(\"集計開始: \"+s+\" / reason: \"+r); R.cmd_error_hints(db.connect(),ns)'" ;;
+            send-urls-since)
+              case "$SINCE" in
+                "") echo "::error::since を指定してください"; exit 1 ;;
+                *[!0-9T:-]*) echo "::error::sinceは日時のみ(例 2026-09-23T15:05:00)"; exit 1 ;;
+              esac
+              case "$REASON" in
+                "") echo "::error::reason を指定してください(例 error_message_detected)"; exit 1 ;;
+                *[!a-z_]*) echo "::error::reason は小文字と_だけ"; exit 1 ;;
+              esac
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T \
+                  -e SINCE_AT='$SINCE' -e REASON_AT='$REASON' sender \
+                  python3 -c 'import os,argparse,db,send_log_report_cli as R; from datetime import datetime; s=os.environ[\"SINCE_AT\"]; r=os.environ[\"REASON_AT\"]; d=round((datetime.now()-datetime.fromisoformat(s)).total_seconds()/86400,6); k=dict(days=d,reason=r,status=None,limit=40); ns=argparse.Namespace(since=s,**k) if hasattr(R,\"_window\") else argparse.Namespace(**k); print(\"集計開始: \"+s+\" / reason: \"+r); R.cmd_urls(db.connect(),ns)'" ;;
             # 改修の効果は「全体の成功率」では測れない。送信し直す対象は
             # 前回うまくいかなかった会社に偏っているので、母集団が違う
             # 数字を並べても比べたことにならない。**同じ会社**が境界の

@@ -24,6 +24,7 @@ import random
 import re
 import threading
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -307,12 +308,12 @@ _FIELD_HINTS = {
     "email": ["メールアドレス", "メール", "eメール", "e-mail", "email", "mail"],
     "email_confirm": ["メール確認", "メールアドレス（確認", "確認用メール", "email confirm", "re-enter"],
     "phone": ["電話番号", "電話", "tel", "phone", "fax番号", "ご連絡先", "連絡先電話", "連絡先"],
-    "postal_code": ["郵便番号", "〒", "zip", "postal"],
+    "postal_code": ["郵便番号", "〒", "zip", "postal", "yuubin", "yubin"],
     "prefecture": ["都道府県", "都道府県名", "prefecture", "pref"],
-    "city": ["市区町村", "市町村", "city"],
+    "city": ["市区町村", "市町村", "市区郡町村", "city", "sikutyouson", "shikuchoson", "shikuchouson"],
     "block": ["丁目番地", "丁目・番地", "町名・番地", "丁目", "番地"],
     "building": ["ビル名", "建物名", "マンション名", "部屋番号", "building"],
-    "address": ["住所", "所在地", "address"],
+    "address": ["住所", "所在地", "address", "adress", "jusho", "jyusho"],
     "message": ["お問い合わせ内容", "ご質問内容", "ご相談内容", "ご要望", "メッセージ", "本文",
                 "お問い合わせ詳細", "詳細", "message", "inquiry", "comment"],
     "company": ["会社名", "法人名", "貴社名", "御社名", "団体名", "company", "organization"],
@@ -321,17 +322,27 @@ _FIELD_HINTS = {
                       "inquiry type", "category"],
     "last_name": ["姓", "苗字", "last name", "family name"],
     "first_name": ["名", "first name", "given name"],
-    "name": ["お名前", "氏名", "担当者名", "ご担当者", "ご担当者名", "your name", "name"],
+    "name": ["お名前", "氏名", "担当者名", "ご担当者", "ご担当者名", "your name", "name", "namae"],
     # "furi"(白石建設のname="furi")・"yomi"はふりがな欄の実在する命名。
     # 2026-09-21の本番URL調査で、分類できなかった唯一の欄がこれだった
     "furigana": ["フリガナ", "ふりがな", "カナ", "かな", "kana", "furi", "yomi"],
+    # 姓・名を分けたカナ欄(「セイ」「メイ」。実測: kd-heart-to-heart.com)。furigana より先に見る。
+    # ローマ字(sei/mei)は "message" 等に紛れるので入れない
+    "last_name_kana": ["セイ", "せい", "姓（カナ", "姓(カナ", "姓カナ", "姓（フリガナ", "姓(フリガナ", "姓フリガナ",
+                       "lastname_kana", "last_name_kana", "sei_kana", "kana_sei"],
+    "first_name_kana": ["メイ", "めい", "名（カナ", "名(カナ", "名カナ", "名（フリガナ", "名(フリガナ", "名フリガナ",
+                        "firstname_kana", "first_name_kana", "mei_kana", "kana_mei"],
     "department": ["部署", "部署名", "所属", "department", "division"],
     "position": ["役職", "役職名", "position", "job title"],
 }
+# _text_blob() が NFKC で全角→半角に寄せるので、語彙側も同じ正規化をかけておく
+# (「メールアドレス（確認用）」の全角括弧が半角になって一致しなくなった。2026-09-24)
+_FIELD_HINTS = {k: [unicodedata.normalize("NFKC", h).lower() for h in v] for k, v in _FIELD_HINTS.items()}
 
 # "name"という汎用語を除いた、氏名(フルネーム)固有のフレーズ手がかりのみ。
 # 汎用"name"はname="last-name"のようなHTML属性にも紛れ込むため_classify_fieldで別扱いする。
 _NAME_HINTS_STRONG = [h for h in _FIELD_HINTS["name"] if h != "name"]
+_NAME_HINTS_STRONG = [unicodedata.normalize("NFKC", h).lower() for h in _NAME_HINTS_STRONG]
 
 # 送信前にチェックが要る「同意」系のチェックボックス。ラベルだけでなく
 # name/id/value/aria-label も見る(ラベルを持たない実装が珍しくないため)。
@@ -532,7 +543,9 @@ def _text_blob(page, el):
             el.get_attribute("placeholder") or "", el.get_attribute("aria-label") or "",
             el.get_attribute("autocomplete") or "", _label_for(page, el) or "",
         ]
-        return " ".join(parts).lower()
+        # 全角英数字を半角に寄せる(NFKC)。「ＴＥＬ *」のような全角表記が "tel" に
+        # 一致せず required_field_unfilled になっていた(2026-09-24、四国の送り直しで発見)
+        return unicodedata.normalize("NFKC", " ".join(parts)).lower()
     except Exception:  # noqa: BLE001
         return ""
 
@@ -608,6 +621,12 @@ def _classify_field(page, el):
         return "position"
     if any(h in text for h in _FIELD_HINTS["subject"]):
         return "subject"
+    # 「セイ」「メイ」(姓・名を分けたカナ欄)は「フリガナ（セイ）」のように両方の語を含むので
+    # furigana より先に判定する
+    if any(h in text for h in _FIELD_HINTS["last_name_kana"]):
+        return "last_name_kana"
+    if any(h in text for h in _FIELD_HINTS["first_name_kana"]):
+        return "first_name_kana"
     if any(h in text for h in _FIELD_HINTS["furigana"]):
         return "furigana"
     # 「名」は先頭一致でfirst_nameの短い手がかりだが、「お名前」等の氏名フルネーム表記に
@@ -1190,7 +1209,15 @@ _INVALID_FIELD_DETAILS_JS = """() => {
     push(name.slice(0, 30), tipOf(el) || '(文言なし)');
   }
   // 欄に紐付かないヒント(CF7が欄の外に出すことがある)
-  for (const t of q('.wpcf7-not-valid-tip')) if (!usedTips.has(t)) push('?', (t.innerText || '').trim().slice(0, 40));
+  for (const t of q('.wpcf7-not-valid-tip')) {
+    if (usedTips.has(t)) continue;
+    // 入力欄側に aria-invalid が付かない版のCF7でも、包み(.wpcf7-form-control-wrap)の
+    // data-name か中の欄の name で「どの欄か」は分かる(2026-09-24。11件が '?' になっていた)
+    const wrap = t.closest('.wpcf7-form-control-wrap');
+    const inner = wrap && wrap.querySelector('input, textarea, select');
+    const name = (wrap && wrap.getAttribute('data-name')) || (inner && (inner.name || inner.id)) || '?';
+    push(String(name).slice(0, 30), (t.innerText || '').trim().slice(0, 40));
+  }
   return out.slice(0, 8);
 }"""
 
@@ -1946,6 +1973,18 @@ if __name__ == "__main__":
                   <textarea name="field3" placeholder="ご相談内容をご記入ください"></textarea>
                   <input type="submit" value="確認する">
                 </form>""", {"company", "email", "message"}),
+            ("全角ＴＥＬ・namae・adress・yuubin・sikutyouson(2026-09-24の送り直しで埋められなかった実例)", """
+                <form>
+                  <p><input name="namae"></p><p><input name="adress"></p>
+                  <p><input name="your-yuubin"></p><p><input name="your-sikutyouson"></p>
+                  <p><label for="t">ＴＥＬ *</label><input id="t" name="f1"></p>
+                </form>""", {"phone", "name", "address", "postal_code", "city"}),
+            ("姓・名を分けたカナ欄(セイ/メイ)は furigana ではなく last_name_kana/first_name_kana", """
+                <form>
+                  <label for="s">セイ</label><input id="s" name="k1">
+                  <label for="m">メイ</label><input id="m" name="k2">
+                  <label for="f">フリガナ（セイ）</label><input id="f" name="k3">
+                </form>""", {"last_name_kana", "first_name_kana"}),
             ("ふりがな欄の別名(name=furi / yomi。実測: 白石建設)", """
                 <form>
                   <input name="furi" placeholder="">
@@ -2728,6 +2767,11 @@ document.getElementById('f').addEventListener('submit', function (e) {
     tel.setAttribute('aria-invalid', 'true');
     const tip = document.createElement('span'); tip.className = 'wpcf7-not-valid-tip';
     tip.textContent = '電話番号の形式が正しくありません。'; tel.parentElement.appendChild(tip);
+    // 欄側に aria-invalid が付かない版のCF7(包みの data-name だけが手がかり)
+    const wrap2 = document.querySelector('[name=your-message]').parentElement;
+    wrap2.setAttribute('data-name', 'your-message');
+    const tip2 = document.createElement('span'); tip2.className = 'wpcf7-not-valid-tip';
+    tip2.textContent = '必須項目に入力してください。'; wrap2.appendChild(tip2);
     document.getElementById('out').textContent = '入力内容に問題があります。確認してもう一度送信してみてください。';
   }, 300);
 });
@@ -2805,7 +2849,8 @@ document.getElementById('f').addEventListener('submit', function (e) {
                 r = _go(f"http://127.0.0.1:{pages_port}/cf7_invalid.html")
                 msg = r.error_message or ""
                 ok = (r.reason_code == "error_message_detected"
-                      and "your-tel=電話番号の形式が正しくありません" in msg and "?=" not in msg)
+                      and "your-tel=電話番号の形式が正しくありません" in msg
+                      and "your-message=必須項目に入力してください" in msg and "?=" not in msg)
                 print(f"  {'✓' if ok else '✗'} 弾かれたら欄ごとの文言を残す(CF7の validation_error) "
                       f"→ {r.reason_code} / {msg[:110]}")
             finally:

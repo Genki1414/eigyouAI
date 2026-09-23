@@ -532,7 +532,10 @@ class FormSender(BaseSender):
                   "block": sender.block or "", "building": sender.building or "",
                   "department": sender.department or "", "position": sender.position or "",
                   "last_name": sender.last_name or sender.name, "first_name": sender.first_name or "",
-                  "subject": subject or "", "message": body, "furigana": furigana}
+                  "subject": subject or "", "message": body, "furigana": furigana,
+                  # 姓・名を分けたカナ欄(セイ/メイ)向け(2026-09-24)。無ければ空=埋めない
+                  "last_name_kana": sender.last_name_kana or "",
+                  "first_name_kana": sender.first_name_kana or ""}
         result = FN.navigate_and_submit(to.contact_url, values,
                                          screenshot_dir=C.OUT_DIR / "form_screenshots",
                                          allow_no_solicit=self.allow_no_solicit)

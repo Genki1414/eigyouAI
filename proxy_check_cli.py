@@ -168,7 +168,8 @@ def main():
                     for i in range(args.concurrency)]
             results = [f.result() for f in futs]
         for i, (good, line) in enumerate(results, 1):
-            print(f"  #{i}{line[3:]}")
+            # lineは "  OK   host:port  ..." 形式。先頭2つの空白だけ削って番号を付ける
+            print(f"  #{i} {line.lstrip()}")
         ok_c = sum(1 for good, _ in results if good)
         print(f"  → 同時{args.concurrency}本中 {ok_c}本が成功")
         if ok_c < args.concurrency:

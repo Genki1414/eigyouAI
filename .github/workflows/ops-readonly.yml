@@ -210,11 +210,12 @@ jobs:
                 docker compose -f deploy/docker-compose.yml exec -T sender \
                   python3 send_log_report_cli.py sender-fields" ;;
             # どのテナントが実在するか(2026-09-23、「テナント2・3・4は誰?」に答えるため)。
-            # 名前・種別・作成日と、リスト数・送信ログ数だけ。APIキーやメールは出さない
+            # 名前・種別・作成日と、リスト数・送信ログ数だけ。APIキーは出さない。デモ利用の
+            # テナント名にはメールアドレスが入るので伏せる(初回実行で1度出てしまった)
             tenants)
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \
-                  python3 -c 'import db; c=db.connect(); rows=c.execute(\"SELECT t.id, t.name, t.kind, t.created_at, (SELECT COUNT(*) FROM target_lists l WHERE l.tenant_id=t.id) lists, (SELECT COUNT(*) FROM form_send_log f WHERE f.tenant_id=t.id) sends, (SELECT COUNT(*) FROM staff s WHERE s.tenant_id=t.id) staff FROM tenants t ORDER BY t.id\").fetchall(); print(\"%3s  %-28s %-10s %-19s %5s %7s %5s\" % (\"id\",\"name\",\"kind\",\"created_at\",\"lists\",\"sends\",\"staff\")); [print(\"%3d  %-28s %-10s %-19s %5d %7d %5d\" % (r[0], (r[1] or \"\")[:28], (r[2] or \"\")[:10], (r[3] or \"\")[:19], r[4], r[5], r[6])) for r in rows]'" ;;
+                  python3 -c 'import db, re; c=db.connect(); rows=c.execute(\"SELECT t.id, t.name, t.kind, t.created_at, (SELECT COUNT(*) FROM target_lists l WHERE l.tenant_id=t.id) lists, (SELECT COUNT(*) FROM form_send_log f WHERE f.tenant_id=t.id) sends, (SELECT COUNT(*) FROM staff s WHERE s.tenant_id=t.id) staff FROM tenants t ORDER BY t.id\").fetchall(); print(\"%3s  %-28s %-10s %-19s %5s %7s %5s\" % (\"id\",\"name\",\"kind\",\"created_at\",\"lists\",\"sends\",\"staff\")); [print(\"%3d  %-28s %-10s %-19s %5d %7d %5d\" % (r[0], re.sub(r\"[^\\s()]+@[^\\s()]+\", \"(メール伏せ)\", r[1] or \"\")[:28], (r[2] or \"\")[:10], (r[3] or \"\")[:19], r[4], r[5], r[6])) for r in rows]'" ;;
             send-urls-error)
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \

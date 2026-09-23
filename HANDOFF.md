@@ -4751,6 +4751,29 @@ invalid")。値は入っていたので9/17の`test -n`確認では検出でき�
 workflow_dispatchの入力値は実行履歴に残るため。プロキシが復活したら
 `FORM_PROXY_DISABLED` を空にするだけで元に戻る。
 
+**プロキシの運用手順(2026-09-23に整備)**:
+
+```
+1. 使えるか確かめる    ops-readonly.yml → proxy-check
+2. 通っていれば有効化  ops-write.yml → set-env FORM_PROXY_DISABLED=(空)
+3. 通らなければ無効化  ops-write.yml → set-env FORM_PROXY_DISABLED=1
+```
+
+`proxy_check_cli.py` は参照専用で、**認証情報を出力しない**(host:portと成否のみ)。
+`FORM_PROXY_DISABLED` で無効化中でも生の環境変数を読んで試せる——「直す前に
+通るか確かめてから戻す」ができないと意味がないため。**必ず proxy-check で
+通ることを確認してから有効化すること。** 確かめずに戻すと、今回と同じく
+全社がERR_TUNNEL_CONNECTION_FAILEDで失敗する。
+
+**そもそもプロキシが要るのかの判断材料(2026-09-23)**: 買った目的は
+地域制限(「日本国内からのみ」)の回避だったが、直近30日でこの文言に当たったのは
+**1社だけ**。一方、プロキシ障害で失ったのは**約480社**。BrightDataの使用量
+グラフを見ると8/28に7リクエスト(動作確認)を通しただけで、**本番では一度も
+使われていない**。もう1つの目的だった送信元IPの分散も、bot判定
+(`bot_challenge_detected`)が全試行の0.1%(6件)に留まっており現時点では
+問題になっていない。**当面は無効のままでよい**。将来 bot_challenge_detected が
+増えたら再検討する。
+
 **未解決**: プロキシ自体がなぜ落ちたかは不明。`FORM_PROXY_POOL` の値は
 運用ワークフローの `show-env` で見られるはずだが、この作業環境からは権限
 (Credential Materialization)で拒否された。契約状態・認証情報・残量の確認が要る。

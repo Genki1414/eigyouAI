@@ -25,6 +25,7 @@ on:
           - send-delivery  # 送信ログ: どこまで進めたかを会社数で(他社との比較用)
           - send-delivery-today  # 同上を「今日ぶん」だけで(実行中の成績を見る)
           - dup-check      # 既に成功済みの会社へ再送していないか(件数のみ)
+          - proxy-check    # プロキシが今使えるか(認証情報は出さない)
           - send-reasons-today   # 結果・理由別の件数と成功率を「今日ぶん」だけで
           - send-reasons   # 送信ログ: 結果・理由別の件数と成功率(直近30日)
           - send-runs      # 送信ログ: 実行(リスト)単位の成績(直近30日)
@@ -82,6 +83,14 @@ jobs:
             # 二重送信の実数を件数だけで確認する(会社名・本文は出さない)。
             # form_send_logは追記のみなので、実行開始時刻を境にすれば過去の状態を
             # そのまま再現できる(touches.sent_atは再送信で上書きされるため使えない)。
+            # プロキシが「今」使える状態かを本番から確かめる(2026-09-23)。
+            # 2026-09-22の事故では確かめる手段が無く、8時間気づけないまま
+            # 約480社をERR_TUNNEL_CONNECTION_FAILEDで失った。
+            # 出力はhost:portと成否のみ(認証情報は出さない)。DBには触れない。
+            proxy-check)
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T sender \
+                  python3 proxy_check_cli.py" ;;
             dup-check)
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \

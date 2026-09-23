@@ -325,7 +325,7 @@ _FIELD_HINTS = {
     "name": ["お名前", "氏名", "担当者名", "ご担当者", "ご担当者名", "your name", "name", "namae"],
     # "furi"(白石建設のname="furi")・"yomi"はふりがな欄の実在する命名。
     # 2026-09-21の本番URL調査で、分類できなかった唯一の欄がこれだった
-    "furigana": ["フリガナ", "ふりがな", "カナ", "かな", "kana", "furi", "yomi"],
+    "furigana": ["フリガナ", "ふりがな", "カナ", "かな", "kana", "furi", "yomi", "ruby"],
     # 姓・名を分けたカナ欄(「セイ」「メイ」。実測: kd-heart-to-heart.com)。furigana より先に見る。
     # ローマ字(sei/mei)は "message" 等に紛れるので入れない
     "last_name_kana": ["セイ", "せい", "姓（カナ", "姓(カナ", "姓カナ", "姓（フリガナ", "姓(フリガナ", "姓フリガナ",
@@ -1196,6 +1196,17 @@ _INVALID_FIELD_DETAILS_JS = """() => {
   const q = s => Array.from(document.querySelectorAll(s));
   const seen = new Set(), out = [], usedTips = new Set();
   const push = (k, v) => { const key = k + '=' + v; if (v && !seen.has(key)) { seen.add(key); out.push(key); } };
+  // 欄名にラベル文言を添える(「text-563」だけでは何の欄か分からない。2026-09-24)
+  const labelled = (el, name) => {
+    let t = '';
+    try {
+      const l = el.labels && el.labels[0];
+      if (l) t = l.textContent;
+      if (!t) { const th = el.closest('td, dd'); const h = th && th.previousElementSibling; if (h) t = h.textContent; }
+    } catch (e) {}
+    t = (t || '').replace(/\\s+/g, ' ').trim().slice(0, 12);
+    return String(name).slice(0, 30) + (t ? '(' + t + ')' : '');
+  };
   const tipOf = el => {
     const wrap = el.closest('.wpcf7-form-control-wrap, .form-group, .field, li, p, td, div') || el.parentElement;
     const tip = wrap && wrap.querySelector('.wpcf7-not-valid-tip, .error, .error-message, .invalid-feedback, .help-block, .form-error, .validation-message, [role=alert]');
@@ -1206,7 +1217,7 @@ _INVALID_FIELD_DETAILS_JS = """() => {
     const bad = el.getAttribute('aria-invalid') === 'true' || /not-valid|is-invalid|\\berror\\b|invalid/.test(el.className);
     if (!bad) continue;
     const name = el.name || el.id || el.tagName.toLowerCase();
-    push(name.slice(0, 30), tipOf(el) || '(文言なし)');
+    push(labelled(el, name), tipOf(el) || '(文言なし)');
   }
   // 欄に紐付かないヒント(CF7が欄の外に出すことがある)
   for (const t of q('.wpcf7-not-valid-tip')) {
@@ -1216,7 +1227,7 @@ _INVALID_FIELD_DETAILS_JS = """() => {
     const wrap = t.closest('.wpcf7-form-control-wrap');
     const inner = wrap && wrap.querySelector('input, textarea, select');
     const name = (wrap && wrap.getAttribute('data-name')) || (inner && (inner.name || inner.id)) || '?';
-    push(String(name).slice(0, 30), (t.innerText || '').trim().slice(0, 40));
+    push(inner ? labelled(inner, name) : String(name).slice(0, 30), (t.innerText || '').trim().slice(0, 40));
   }
   return out.slice(0, 8);
 }"""
@@ -1406,6 +1417,66 @@ def _check_required_radios(page):
             const els = groups[name].filter(e => !e.disabled && e.getClientRects().length);
             if (!els.length || groups[name].some(e => e.checked)) continue;
             const pick = els.find(e => prefer.test(labelOf(e))) || els[0];
+            pick.checked = true;
+            pick.dispatchEvent(new Event('input', { bubbles: true }));
+            pick.dispatchEvent(new Event('change', { bubbles: true }));
+            n++;
+          }
+          return n;
+        }""") or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _check_required_checkboxes(page):
+    """必須のチェックボックス群(お問い合わせ項目・確認など)で1つも入っていないものに1つ入れる。
+
+    Contact Form 7 の必須チェックボックス群は個々の <input> に required が付かず
+    (包みの .wpcf7-validates-as-required だけ)、ブラウザ検証もこちらの必須欄チェックも
+    すり抜けて、サーバー側で「必須項目に入力してください」と弾かれていた
+    (2026-09-24の四国送り直しで、弾かれた欄の最多が checkbox-NNN だった。T133)。
+
+    「必須」の判断: required / aria-required / 包みや親の class に required / 近くに
+    「必須」「*」「required」の印。ラジオと違い、必須でない群には触らない(任意の
+    チェック=メルマガ登録などを勝手に入れない)。同意系は先に _is_consent_checkbox が
+    入れている。選ぶ候補からメルマガ・案内希望の類は除く。"""
+    try:
+        return int(page.evaluate("""() => {
+          let n = 0;
+          const groups = {};
+          for (const el of document.querySelectorAll('input[type=checkbox]')) {
+            const key = el.name || el.id;
+            if (!key) continue;
+            (groups[key] = groups[key] || []).push(el);
+          }
+          const textOf = (el) => {
+            let t = '';
+            try {
+              if (el.id) { const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) t = l.textContent; }
+              if (!t && el.closest('label')) t = el.closest('label').textContent;
+              if (!t && el.parentElement) t = el.parentElement.textContent;
+            } catch (e) {}
+            return (t || el.value || '').trim();
+          };
+          const isRequiredGroup = (els) => {
+            if (els.some(e => e.required || e.getAttribute('aria-required') === 'true')) return true;
+            const wrap = els[0].closest('.wpcf7-form-control-wrap, .wpcf7-checkbox, [class*=required], [class*=Required]');
+            if (wrap && /required/i.test(wrap.className)) return true;
+            // 近くの見出し(th/dt/label/前の要素)に「必須」印があるか
+            const box = els[0].closest('td, dd, li, p, div, fieldset');
+            const head = box && (box.previousElementSibling || box.parentElement);
+            const hint = ((box ? box.className : '') + ' ' + (head ? (head.textContent || '').slice(0, 80) : ''));
+            return /必須|required|\\*/.test(hint) && !/任意/.test(hint);
+          };
+          const avoid = /メルマガ|メールマガジン|ニュースレター|配信を希望|案内を希望|受け取る|購読/;
+          const prefer = /お問い合わせ|お問合せ|その他|ご相談|general|other/i;
+          for (const name of Object.keys(groups)) {
+            const els = groups[name].filter(e => !e.disabled && e.getClientRects().length);
+            if (!els.length || groups[name].some(e => e.checked)) continue;
+            if (!isRequiredGroup(els)) continue;
+            const cands = els.filter(e => !avoid.test(textOf(e)));
+            if (!cands.length) continue;
+            const pick = cands.find(e => prefer.test(textOf(e))) || cands[0];
             pick.checked = true;
             pick.dispatchEvent(new Event('input', { bubbles: true }));
             pick.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1712,6 +1783,11 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             n_radios = _check_required_radios(scope)
             if n_radios:
                 filled.append(f"radio×{n_radios}")
+                result.filled_fields = filled
+            # 必須のチェックボックス群が未選択なら1つ入れる(2026-09-24、T133)
+            n_checks = _check_required_checkboxes(scope)
+            if n_checks:
+                filled.append(f"checkbox×{n_checks}")
                 result.filled_fields = filled
 
             # 送信前検証(2026-09-19): 埋められなかった必須欄(ふりがな等)や形式不一致が
@@ -2633,6 +2709,31 @@ if __name__ == "__main__":
             n_r2 = _check_required_radios(page)
             picked = page.evaluate("() => (document.querySelector('input[type=radio]:checked') || {}).value")
             print(f"  {'✓' if n_r2 == 1 and picked == 'other' else '✗'} 必須指定の無い未選択ラジオ群も「その他」を選ぶ: {picked}")
+
+            print("\n── 必須のチェックボックス群(CF7は required 属性が付かない。2026-09-24、T133) ──")
+            page.set_content("""
+                <form>
+                  <table><tr><th>お問い合わせ項目<span class="req">必須</span></th><td>
+                    <span class="wpcf7-form-control-wrap" data-name="checkbox-414">
+                      <span class="wpcf7-form-control wpcf7-checkbox wpcf7-validates-as-required">
+                        <label><input type="checkbox" name="checkbox-414[]" value="新築"> 新築</label>
+                        <label><input type="checkbox" name="checkbox-414[]" value="リフォーム"> リフォーム</label>
+                        <label><input type="checkbox" name="checkbox-414[]" value="その他"> その他</label>
+                      </span></span></td></tr>
+                  <tr><th>ご希望(任意)</th><td>
+                    <label><input type="checkbox" name="opt[]" value="mm"> メールマガジンを希望する</label>
+                    <label><input type="checkbox" name="opt[]" value="cat"> カタログを希望する</label></td></tr>
+                  <tr><th>確認 *</th><td>
+                    <label><input type="checkbox" name="kakunin" value="1"> 入力内容を確認しました</label></td></tr>
+                </form>""")
+            n_cb = _check_required_checkboxes(page)
+            picked_414 = page.evaluate("() => Array.from(document.querySelectorAll('[name=\"checkbox-414[]\"]:checked')).map(e => e.value)")
+            picked_opt = page.evaluate("() => document.querySelectorAll('[name=\"opt[]\"]:checked').length")
+            picked_kakunin = page.evaluate("() => document.querySelector('[name=kakunin]').checked")
+            print(f"  {'✓' if picked_414 == ['その他'] else '✗'} CF7の必須チェック群(required属性なし)に「その他」を1つ入れる: {picked_414}")
+            print(f"  {'✓' if picked_opt == 0 else '✗'} 任意の群(メルマガ・カタログ)には触らない: {picked_opt}")
+            print(f"  {'✓' if picked_kakunin else '✗'} 見出しに * がある単独の確認チェックにも入れる")
+            print(f"  {'✓' if n_cb == 2 else '✗'} 入れた群の数を返す: {n_cb}")
 
             print("\n── 必須欄の未入力を成功と誤判定しない(2026-09-19、実インシデントで発見) ──")
             page.set_content("""

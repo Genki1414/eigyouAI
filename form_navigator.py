@@ -154,10 +154,23 @@ def _parse_proxy(proxy_url):
 # 送信全体が無価値になる**。IPを分散できないことより、1社も送れないことの方が
 # はるかに重い損失なので、続けて失敗したら自動で直接接続へ落とす。
 _PROXY_LOCK = threading.Lock()
-_PROXY_FAILS = 0
+# 「このスレッドのブラウザが掴んでいるプロキシ」の連続失敗数。**スレッド単位**で
+# 持つのが要点。プロキシはブラウザ起動時にプールからランダムに選ぶので、
+# 死んでいるのはプール全体とは限らず「このブラウザのぶんだけ」のことがある。
+# 2026-09-23: 最初の実装はカウンタをグローバルに1つだけ持っていたため、
+# 死んだプロキシのスレッドが失敗を重ねても、生きたプロキシのスレッドが成功する
+# たびに0へ戻され、**本番で一度も閾値に届かなかった**(15回以上連続で
+# ERR_TUNNEL_CONNECTION_FAILEDが出ているのに切り替わらなかった)。
+_PROXY_TLS = threading.local()
+# プール全体が死んでいると判断して直接接続へ落としたか(プロセス全体で共有)
 _PROXY_DISABLED = False
-# 何回続けてプロキシ由来の失敗が出たら直接接続へ切り替えるか
+# ブラウザを作り直した回数。作り直して別のプロキシを引いてもなお駄目なら、
+# プールごと駄目とみなす
+_PROXY_RELAUNCHES = 0
+# 何回続けてプロキシ由来の失敗が出たらブラウザを作り直すか
 PROXY_FAILURE_THRESHOLD = int(os.environ.get("PROXY_FAILURE_THRESHOLD", "5"))
+# 何回作り直しても駄目なら直接接続へ落とすか
+PROXY_RELAUNCH_LIMIT = int(os.environ.get("PROXY_RELAUNCH_LIMIT", "3"))
 # プロキシ自体に到達できない/認証が通らないときにChromiumが返すエラー。
 # 相手サイト都合のエラー(ERR_CONNECTION_REFUSED等)を混ぜないこと——混ぜると
 # 相手が落ちているだけでプロキシを捨ててしまう
@@ -165,6 +178,10 @@ _PROXY_ERROR_RE = re.compile(
     r"ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|"
     r"ERR_PROXY_AUTH_(REQUESTED|UNSUPPORTED)|ERR_NO_SUPPORTED_PROXIES|"
     r"ERR_SOCKS_CONNECTION_FAILED|ERR_UNEXPECTED_PROXY_AUTH")
+
+PROXY_ACTION_NONE = None
+PROXY_ACTION_RELAUNCH = "relaunch"   # このスレッドのブラウザを作り直す
+PROXY_ACTION_DIRECT = "direct"       # プール全体を諦めて直接接続にする
 
 
 def proxy_disabled():
@@ -174,44 +191,60 @@ def proxy_disabled():
 
 
 def note_proxy_result(error_message):
-    """1回のページ遷移の結果をプロキシの健全性として記録する。
+    """1回のページ遷移の結果をプロキシの健全性として記録し、取るべき対処を返す。
 
-    プロキシ由来のエラーが PROXY_FAILURE_THRESHOLD 回続いたら、以後この
-    プロセスでは直接接続に切り替える(Trueを返す)。成功が1回でも挟まれば
+    戻り値:
+      None        … 何もしない
+      "relaunch"  … このスレッドのブラウザを捨てて作り直す(別のプロキシを引く)
+      "direct"    … プール全体を諦めて直接接続へ切り替える
+
+    プロキシ由来のエラーが同一スレッドで PROXY_FAILURE_THRESHOLD 回**続いたら**
+    そのブラウザを作り直す。作り直しが PROXY_RELAUNCH_LIMIT 回に達したら、
+    プールごと駄目とみなして直接接続へ落とす。成功が1回でも挟まればそのスレッドの
     カウンタは戻る——たまたま1社が開けなかっただけでプロキシを捨てないため。
-
-    プロセスが再起動すれば設定は読み直されるので、プロキシを直した後は
-    デプロイやワーカー再起動でそのまま元に戻る(恒久的に無効化はしない)。
 
     FORM_PROXY_POOLの有無に関わらず判定する。プロキシはコンテナの
     HTTP_PROXY / HTTPS_PROXY 経由でも効く(Chromiumが環境変数を自動で拾う)ため。
-    2026-09-23: 最初の実装はここで `if not FORM_PROXY_POOL: return False` と
-    していたため、本番でフォールバックが一切発動しなかった。
+
+    プロセスが再起動すれば設定は読み直されるので、プロキシを直した後は
+    デプロイやワーカー再起動でそのまま元に戻る(恒久的に無効化はしない)。
     """
-    global _PROXY_FAILS, _PROXY_DISABLED
+    global _PROXY_DISABLED, _PROXY_RELAUNCHES
+    if proxy_disabled():
+        return PROXY_ACTION_NONE
+    if not (error_message and _PROXY_ERROR_RE.search(error_message)):
+        _PROXY_TLS.fails = 0
+        return PROXY_ACTION_NONE
+    fails = getattr(_PROXY_TLS, "fails", 0) + 1
+    _PROXY_TLS.fails = fails
+    if fails < PROXY_FAILURE_THRESHOLD:
+        return PROXY_ACTION_NONE
+    _PROXY_TLS.fails = 0
     with _PROXY_LOCK:
-        if _PROXY_DISABLED:
-            return False
-        if error_message and _PROXY_ERROR_RE.search(error_message):
-            _PROXY_FAILS += 1
-            if _PROXY_FAILS >= PROXY_FAILURE_THRESHOLD:
-                _PROXY_DISABLED = True
-                print(f"  [proxy] プロキシ由来の失敗が{_PROXY_FAILS}回続いたため、"
-                      f"以後は直接接続に切り替えます(送信を止めないための緊急回避。"
-                      f"FORM_PROXY_POOL と HTTP(S)_PROXY の状態を確認してください)",
-                      flush=True)
-                return True
-        else:
-            _PROXY_FAILS = 0
-    return False
+        _PROXY_RELAUNCHES += 1
+        n = _PROXY_RELAUNCHES
+        if n >= PROXY_RELAUNCH_LIMIT:
+            if _PROXY_DISABLED:
+                return PROXY_ACTION_NONE
+            _PROXY_DISABLED = True
+            print(f"  [proxy] ブラウザを{n}回作り直してもプロキシ由来の失敗が続くため、"
+                  f"以後は直接接続に切り替えます(送信を止めないための緊急回避。"
+                  f"FORM_PROXY_POOL と HTTP(S)_PROXY の状態を確認してください)",
+                  flush=True)
+            return PROXY_ACTION_DIRECT
+    print(f"  [proxy] プロキシ由来の失敗が{PROXY_FAILURE_THRESHOLD}回続いたため、"
+          f"ブラウザを作り直します(プールから別のプロキシを引き直す。"
+          f"作り直し{n}回目 / 上限{PROXY_RELAUNCH_LIMIT})", flush=True)
+    return PROXY_ACTION_RELAUNCH
 
 
 def _reset_proxy_state():
     """テスト用。プロセス内の状態を初期化する。"""
-    global _PROXY_FAILS, _PROXY_DISABLED
+    global _PROXY_DISABLED, _PROXY_RELAUNCHES
     with _PROXY_LOCK:
-        _PROXY_FAILS = 0
         _PROXY_DISABLED = False
+        _PROXY_RELAUNCHES = 0
+    _PROXY_TLS.fails = 0
 
 
 def _pick_proxy():
@@ -1339,10 +1372,11 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                     result.status = "FAILED_RETRYABLE"
                     result.reason_code = "goto_failed"
                 result.error_message = f"{type(e).__name__}: {e}"
-                if note_proxy_result(msg):
-                    # 直接接続へ切り替わった。いま掴んでいるブラウザはプロキシ設定の
-                    # ままなので捨てる(次の_acquire_browser()が直接接続で開き直す)。
-                    # この会社自体はFAILED_RETRYABLEなので呼び出し側が再試行する
+                if note_proxy_result(msg) is not None:
+                    # ブラウザを作り直す(別のプロキシを引く)か、直接接続へ落ちた。
+                    # どちらの場合もいま掴んでいるブラウザは捨てる——次の
+                    # _acquire_browser()が新しい設定で開き直す。この会社自体は
+                    # FAILED_RETRYABLEなので呼び出し側が再試行する
                     try:
                         close_thread_browser()
                     except Exception:  # noqa: BLE001
@@ -1742,47 +1776,74 @@ if __name__ == "__main__":
                 "お問い合わせいただきありがとうございます。担当者より追ってご連絡いたします。")
             print(f"  {'✓' if e2 is None else '✗'} 通常の完了ページはエラー扱いにしない")
 
-            print("\n── プロキシ障害時の直接接続フォールバック(2026-09-23) ──")
+            print("\n── プロキシ障害時のフォールバック(2026-09-23) ──")
             print("  9/22の送信でプロキシが8時間以上落ち、goto_failedが試行の19.4%になった")
             import config as C_px
+            import threading as _th
             orig_px = C_px.FORM_PROXY_POOL
+            tunnel = "Error: Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://x.jp/"
             try:
                 C_px.FORM_PROXY_POOL = ["http://dead.example.com:8080"]
-                _reset_proxy_state()
-                tunnel = "Error: Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://x.jp/"
-                switched = [note_proxy_result(tunnel) for _ in range(PROXY_FAILURE_THRESHOLD)]
-                print(f"  {'✓' if not any(switched[:-1]) else '✗'} "
-                      f"{PROXY_FAILURE_THRESHOLD - 1}回までは切り替えない(たまたまの失敗で捨てない)")
-                print(f"  {'✓' if switched[-1] else '✗'} "
-                      f"{PROXY_FAILURE_THRESHOLD}回続いたら直接接続へ切り替える")
-                print(f"  {'✓' if proxy_disabled() else '✗'} 切り替え後はproxy_disabled()がTrue")
-                print(f"  {'✓' if _pick_proxy() is None else '✗'} "
-                      f"切り替え後は_pick_proxy()がNone(直接接続)を返す")
 
-                # 成功が挟まればカウンタは戻る
+                _reset_proxy_state()
+                acts = [note_proxy_result(tunnel) for _ in range(PROXY_FAILURE_THRESHOLD)]
+                print(f"  {'✓' if all(a is None for a in acts[:-1]) else '✗'} "
+                      f"{PROXY_FAILURE_THRESHOLD - 1}回までは何もしない(たまたまの失敗で捨てない)")
+                print(f"  {'✓' if acts[-1] == PROXY_ACTION_RELAUNCH else '✗'} "
+                      f"{PROXY_FAILURE_THRESHOLD}回続いたらブラウザを作り直す(別のプロキシを引く)")
+
+                # 作り直しても駄目なら直接接続へ落ちる
+                for _ in range((PROXY_RELAUNCH_LIMIT - 1) * PROXY_FAILURE_THRESHOLD - 1):
+                    note_proxy_result(tunnel)
+                last = note_proxy_result(tunnel)
+                print(f"  {'✓' if last == PROXY_ACTION_DIRECT and proxy_disabled() else '✗'} "
+                      f"作り直しが{PROXY_RELAUNCH_LIMIT}回に達したら直接接続へ落とす")
+                print(f"  {'✓' if _pick_proxy() is None else '✗'} "
+                      f"直接接続へ落ちた後は_pick_proxy()がNoneを返す")
+
+                # ★本番で起きた事象の再現: 死んだプロキシのスレッドと
+                #   生きたプロキシのスレッドが混在すると、グローバルな
+                #   カウンタでは永久に閾値へ届かない
+                _reset_proxy_state()
+                dead_result = {}
+
+                def _dead_worker():
+                    acts2 = []
+                    for _ in range(PROXY_FAILURE_THRESHOLD):
+                        acts2.append(note_proxy_result(tunnel))
+                    dead_result["acts"] = acts2
+
+                def _live_worker():
+                    for _ in range(PROXY_FAILURE_THRESHOLD * 3):
+                        note_proxy_result(None)   # このスレッドは成功し続ける
+
+                t_live = _th.Thread(target=_live_worker)
+                t_dead = _th.Thread(target=_dead_worker)
+                t_live.start(); t_dead.start()
+                t_live.join(); t_dead.join()
+                print(f"  {'✓' if dead_result['acts'][-1] == PROXY_ACTION_RELAUNCH else '✗'} "
+                      f"★他スレッドが成功していても、失敗中のスレッドは切り替わる"
+                      f"(カウンタがスレッド単位。本番で発動しなかった原因)")
+
                 _reset_proxy_state()
                 for _ in range(PROXY_FAILURE_THRESHOLD - 1):
                     note_proxy_result(tunnel)
                 note_proxy_result(None)
                 more = [note_proxy_result(tunnel) for _ in range(PROXY_FAILURE_THRESHOLD - 1)]
-                print(f"  {'✓' if not any(more) and not proxy_disabled() else '✗'} "
-                      f"間に成功が挟まればカウンタが戻る(断続的な失敗で捨てない)")
+                print(f"  {'✓' if all(a is None for a in more) else '✗'} "
+                      f"同じスレッドで成功が挟まればカウンタが戻る")
 
-                # 相手サイト都合のエラーはプロキシのせいにしない
                 _reset_proxy_state()
                 site_err = "Error: Page.goto: net::ERR_CONNECTION_REFUSED at https://x.jp/"
                 site = [note_proxy_result(site_err) for _ in range(PROXY_FAILURE_THRESHOLD * 2)]
-                print(f"  {'✓' if not any(site) and not proxy_disabled() else '✗'} "
+                print(f"  {'✓' if all(a is None for a in site) and not proxy_disabled() else '✗'} "
                       f"相手サイト都合のエラー(ERR_CONNECTION_REFUSED)では切り替えない")
 
-                # FORM_PROXY_POOLが空でも切り替える。プロキシはコンテナの
-                # HTTP_PROXY / HTTPS_PROXY 経由でも効くため(Chromiumが自動で拾う)。
-                # 最初の実装はここでreturnしており、本番で一切発動しなかった
                 _reset_proxy_state()
                 C_px.FORM_PROXY_POOL = []
                 none_px = [note_proxy_result(tunnel) for _ in range(PROXY_FAILURE_THRESHOLD)]
-                print(f"  {'✓' if none_px[-1] and proxy_disabled() else '✗'} "
-                      f"FORM_PROXY_POOL未設定でも切り替える(環境変数のプロキシ対策)")
+                print(f"  {'✓' if none_px[-1] is not None else '✗'} "
+                      f"FORM_PROXY_POOL未設定でも判定する(環境変数のプロキシ対策)")
             finally:
                 C_px.FORM_PROXY_POOL = orig_px
                 _reset_proxy_state()

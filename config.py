@@ -1038,7 +1038,20 @@ FORM_SEND_CONCURRENCY = int(os.environ.get("FORM_SEND_CONCURRENCY", "3"))
 #   FORM_PROXY_POOL="http://user1:pass1@proxy1.example.com:8080,http://proxy2.example.com:8080"
 # 未設定(既定=空リスト)ならプロキシを使わず直接アクセスする(現状と同じ挙動、
 # 後方互換)。
-FORM_PROXY_POOL = [p.strip() for p in os.environ.get("FORM_PROXY_POOL", "").split(",") if p.strip()]
+#
+# FORM_PROXY_DISABLED=1 を立てると、FORM_PROXY_POOLに値が入っていても使わない
+# (2026-09-23)。プロキシ契約が切れた・ゾーンが消えた等で**全社が接続段階で失敗する**
+# ようになったとき、運用ワークフロー(ops-write の set-env)からすぐ直接接続へ
+# 逃がすためのスイッチ。FORM_PROXY_POOL自体は認証情報を含むので set-env の
+# 許可リストには入れられない——値はサーバーの.envに残したまま、使うかどうかだけを
+# 切り替えられるようにしてある(プロキシが復活したらこの値を消すだけで戻る)。
+# 実際に2026-09-22の四国送信で、プロキシ障害により約480社が
+# ERR_TUNNEL_CONNECTION_FAILEDでページを開けなかった。
+FORM_PROXY_DISABLED = (os.environ.get("FORM_PROXY_DISABLED", "").strip().lower()
+                        in ("1", "true", "yes", "on"))
+FORM_PROXY_POOL = ([] if FORM_PROXY_DISABLED else
+                    [p.strip() for p in os.environ.get("FORM_PROXY_POOL", "").split(",")
+                     if p.strip()])
 
 # ── 原価計測(1送信あたりのコスト把握。β版・概算値) ──
 # 厳密なクラウド原価配賦ではなく、事業判断に使える推定値を出すのが目的。

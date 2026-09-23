@@ -4743,6 +4743,14 @@ invalid")。値は入っていたので9/17の`test -n`確認では検出でき�
   - 切り替えメッセージは `flush=True` で出す(Dockerのstdoutバッファで
     ログに出てこず、発動の有無を確認できなかったため)
 
+**運用スイッチ `FORM_PROXY_DISABLED` を追加(2026-09-23)**: プロキシが落ちたときに
+**コード変更なしで直接接続へ逃がす**ための切替。`FORM_PROXY_DISABLED=1` なら
+`config.FORM_PROXY_POOL` を空リストにする(値はサーバーの.envに残したまま)。
+`ops-write` の `set-env` 許可リストにもこのキーだけを足した。
+**`FORM_PROXY_POOL` 自体は許可リストに入れないこと** —— 認証情報を含み、
+workflow_dispatchの入力値は実行履歴に残るため。プロキシが復活したら
+`FORM_PROXY_DISABLED` を空にするだけで元に戻る。
+
 **未解決**: プロキシ自体がなぜ落ちたかは不明。`FORM_PROXY_POOL` の値は
 運用ワークフローの `show-env` で見られるはずだが、この作業環境からは権限
 (Credential Materialization)で拒否された。契約状態・認証情報・残量の確認が要る。

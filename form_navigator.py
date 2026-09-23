@@ -403,13 +403,31 @@ _CONTACT_TEXT_NEGATIVE = ("採用", "求人", "エントリー", "recruit", "応
                           "マイページ", "会員", "伝票番号", "追跡", "検索", "よくあるご質問",
                           "faq", "サイトマップ", "個人情報", "プライバシー")
 
+# 送信後ページが「完了」を示す文言。部分一致で見るので、助詞の有無で取りこぼさない
+# ように**両方の形**を持つこと。2026-09-23: 「送信が完了」はあったのに
+# **「送信完了」(助詞なし)が無く**、日本語フォームで最も多い表現のひとつを
+# 取りこぼしていた(success_not_confirmed 679社の調査で発見)。
 _SUCCESS_HINTS = (
-    "ありがとうございます", "ありがとうございました", "送信が完了", "送信しました",
-    "送信いたしました", "送信されました", "受け付け", "受付ました", "受付いたしました",
-    "受け付けました", "承りました", "お問い合わせいただき", "ご連絡いたします",
-    "担当者より", "追ってご連絡", "確認の上", "確認次第", "折り返しご連絡",
-    "thank you", "thanks for", "successfully",
+    "ありがとうございます", "ありがとうございました", "ありがとうございまし",
+    "送信が完了", "送信完了", "送信しました", "送信いたしました", "送信されました",
+    "送信済み", "正常に送信", "無事送信",
+    "受け付け", "受付ました", "受付いたしました", "受け付けました", "受付完了",
+    "受信しました", "承りました", "お問い合わせいただき", "お問合せいただき",
+    "ご連絡いたします", "担当者より", "追ってご連絡", "確認の上", "確認次第",
+    "折り返しご連絡", "完了しました", "完了いたしました",
+    "thank you", "thanks for", "successfully", "message sent", "has been sent",
 )
+
+
+def _match_success_text(text):
+    """完了文言に一致すればその語を返す。**大文字小文字を区別しない**。
+
+    2026-09-23: 以前は `k in text` の素の部分一致で、英語のヒントを小文字で
+    持っていたため "Thank you for contacting us" のような**ごく普通の完了ページ**に
+    一致しなかった(success_not_confirmed 679社の調査で発見)。日本語は
+    lower()で変わらないので、そのまま小文字化して比べてよい。"""
+    low = (text or "").lower()
+    return next((k for k in _SUCCESS_HINTS if k in low), None)
 
 # 旧CAPTCHA判定のセレクタ。広すぎて誤検出が多かったためT109で使用をやめた
 # (判定本体は _BLOCKING_CAPTCHA_JS / _detect_captcha)。復活させないこと。
@@ -1574,10 +1592,29 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             except Exception:  # noqa: BLE001
                 pass
 
-            # 入力→確認→送信の2段階フォーム対応。確認画面が残っていればもう一度押す
-            confirm_btn = (_find_button(scope, _CONFIRM_TEXT_RE)
-                           or _find_button(scope, _SUBMIT_TEXT_RE))
+            # 入力→確認→送信の2段階フォーム対応。確認画面が残っていればもう一度押す。
+            #
+            # **1回目で既に完了していたら押さない**(2026-09-23)。以前は無条件に
+            # 2つ目のボタンを探していたため、完了ページのフッターにある別フォーム
+            # (メルマガ登録等)の「送信」を拾って遷移し、**完了文言を見失って
+            # success_not_confirmed になる**経路があった。679社の調査で発見。
+            settled_text = _page_text(page)
+            if scope is not page:
+                try:
+                    settled_text += "\n" + _page_text(scope)
+                except Exception:  # noqa: BLE001
+                    pass
+            already_done = _match_success_text(settled_text) is not None
+            confirm_btn = None
+            if not already_done:
+                # 「確認画面」系を優先する。送信ボタン一般(_SUBMIT_TEXT_RE)まで
+                # 広げるのは、確認系が見つからなかったときだけにする
+                confirm_btn = (_find_button(scope, _CONFIRM_TEXT_RE)
+                               or _find_button(scope, _SUBMIT_TEXT_RE))
             if confirm_btn:
+                # 2回目に何を押したかも残す。1回目しか記録していなかったため、
+                # 「余計なボタンを押して離脱した」のかどうかを後から追えなかった
+                clicked_desc = f"{clicked_desc} → {_describe_element(confirm_btn)}"
                 _click(confirm_btn)
                 try:
                     page.wait_for_load_state("networkidle", timeout=SETTLE_TIMEOUT_MS)
@@ -1622,7 +1659,7 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             # フォームがDOM上から消えている(=AJAXで完了画面に差し替わった)ことも
             # 成功の傍証として見る。文言・URLどちらも一致しないAJAX系フォーム向けの保険
             form_gone = not _form_scopes(page)
-            hit = next((k for k in _SUCCESS_HINTS if k in final_text), None)
+            hit = _match_success_text(final_text)
             if hit:
                 result.status = "SUCCESS"
                 result.reason_code = "success_text_matched"
@@ -1775,6 +1812,30 @@ if __name__ == "__main__":
             e2 = _detect_submission_error(
                 "お問い合わせいただきありがとうございます。担当者より追ってご連絡いたします。")
             print(f"  {'✓' if e2 is None else '✗'} 通常の完了ページはエラー扱いにしない")
+
+            print("\n── 完了文言の判定(success_not_confirmed 679社の調査。2026-09-23) ──")
+            done_cases = [
+                # (文言, 完了とみなすべきか)
+                ("送信完了しました", True),          # 助詞なし。以前は取りこぼしていた
+                ("お問い合わせの送信が完了しました", True),
+                ("受付完了", True),
+                ("正常に送信されました", True),
+                ("お問い合わせを受け付けました", True),
+                ("担当者より折り返しご連絡いたします", True),
+                ("Your message has been sent.", True),
+                ("Thank you for contacting us", True),
+                # 完了とみなしてはいけないもの
+                ("お問い合わせはこちらのフォームから送信してください", False),
+                ("送信ボタンを押してください", False),
+                ("入力内容に問題があります", False),
+                ("お問い合わせ内容を入力してください", False),
+            ]
+            for text, want in done_cases:
+                hit = _match_success_text(text)
+                got = hit is not None
+                mark = "✓" if got == want else "✗"
+                detail = f"「{hit}」に一致" if hit else "一致なし"
+                print(f"  {mark} {text[:34]} → {detail}")
 
             print("\n── プロキシ障害時のフォールバック(2026-09-23) ──")
             print("  9/22の送信でプロキシが8時間以上落ち、goto_failedが試行の19.4%になった")

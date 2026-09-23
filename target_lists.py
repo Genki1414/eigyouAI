@@ -728,13 +728,15 @@ def _sendable_member_ids(con, list_id, cancel_recent_days=None):
     なるよう、絞り込みはここ1箇所にまとめる(2026-09-22。送信ボタンの隣に
     「何件に送るか」を出すにあたって、表示と実際がずれると事故のもとになる)。
 
-    戻り値: {"ids": [...], "with_contact_url": n, "cancelled_recent": n}
+    戻り値: {"ids": [...], "with_contact_url": n, "cancelled_recent": n,
+             "cancelled_unconfirmed": n(cancelled_recentのうち「完了を確認できない」だけが理由の社数)}
     """
     members = con.execute("""SELECT c.id FROM target_list_members m
         JOIN companies c ON c.id = m.company_id
         WHERE m.list_id=? AND c.contact_url IS NOT NULL""", (list_id,)).fetchall()
     ids = [m["id"] for m in members]
-    out = {"ids": ids, "with_contact_url": len(ids), "cancelled_recent": 0}
+    out = {"ids": ids, "with_contact_url": len(ids), "cancelled_recent": 0,
+           "cancelled_unconfirmed": 0}
     if not ids or not cancel_recent_days:
         return out
     cutoff = (datetime.now() - timedelta(days=cancel_recent_days)).isoformat(timespec="seconds")
@@ -744,9 +746,22 @@ def _sendable_member_ids(con, list_id, cancel_recent_days=None):
             WHERE company_id IN ({placeholders}) AND sent_at IS NOT NULL AND sent_at>=?
               AND COALESCE(note,'') NOT LIKE '%provider_id=mock_%'""",
         ids + [cutoff]).fetchall()}
-    if recently_sent:
-        out["cancelled_recent"] = len(recently_sent)
-        out["ids"] = [i for i in ids if i not in recently_sent]
+    # 「送信ボタンは押せたが完了を確認できない」(success_not_confirmed)も除外する(2026-09-23)。
+    # touches.sent_at は成功と記録できた会社にしか立たないため、以前はこの層が除外されず、
+    # 送り直すたびに同じ会社へもう1通行っていた。T126の調査で、この層の多く
+    # (Contact Form 7 等のAJAXフォーム)は**実際には届いている**ことが分かった。
+    # 届いた可能性がある会社は「送信済み」と同じ扱いにする。除外したくなければ
+    # 「過去送信対象キャンセル」を外せば従来どおり全社に送る
+    maybe_delivered = {row["company_id"] for row in con.execute(
+        f"""SELECT DISTINCT company_id FROM form_send_log
+            WHERE company_id IN ({placeholders}) AND started_at>=?
+              AND (status='SUCCESS' OR reason_code='success_not_confirmed')""",
+        ids + [cutoff]).fetchall()}
+    excluded = recently_sent | maybe_delivered
+    if excluded:
+        out["cancelled_recent"] = len(excluded)
+        out["cancelled_unconfirmed"] = len(maybe_delivered - recently_sent)
+        out["ids"] = [i for i in ids if i not in excluded]
     return out
 
 
@@ -761,6 +776,7 @@ def count_send_targets(con, tenant_id, list_id, cancel_recent_days=None):
     return {"list_total": lst["company_count"] or 0,
             "with_contact_url": r["with_contact_url"],
             "cancelled_recent": r["cancelled_recent"],
+            "cancelled_unconfirmed": r.get("cancelled_unconfirmed", 0),
             "target_count": len(r["ids"])}
 
 

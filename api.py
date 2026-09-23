@@ -4683,6 +4683,35 @@ def self_test(port=8899):
       res_cr_off is not None and "error" not in res_cr_off
       and res_cr_off.get("target_count") == 2 and res_cr_off.get("cancelled_recent") == 0)
 
+    # 「送信ボタンは押せたが完了を確認できない」会社も除外する(2026-09-23)。touches.sent_at
+    # は立たないが、form_send_log に success_not_confirmed が残る。この層は実際には
+    # 届いていることが多い(T126)ので、送り直しでもう1通行かないようにする
+    con.execute("DELETE FROM form_send_log WHERE company_id=999994")
+    con.execute("DELETE FROM companies WHERE id=999994")
+    con.execute("""INSERT INTO companies (id, name, contact_url) VALUES
+        (999994, 'テスト_cancel_recent_days_C', 'https://example.co.jp/contact/')""")
+    con.execute("""INSERT INTO target_list_members (list_id, company_id, send_status,
+        created_at, updated_at) VALUES (?,?,'PENDING',?,?)""", (cr_list_id, 999994, now_cr, now_cr))
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, started_at, status, reason_code,
+        submit_attempted) VALUES (999994, ?, ?, 'FAILED_UNSUPPORTED', 'success_not_confirmed', 1)""",
+        (tid_a, now_cr))
+    con.commit()
+    res_cr2 = TL.send_list(con, tid_a, cr_list_id, "件名", "本文", dry_run=True, cancel_recent_days=30)
+    t("「完了を確認できない」だった会社も過去送信対象キャンセルで除外される(届いている可能性があるため)",
+      res_cr2 is not None and "error" not in res_cr2
+      and res_cr2.get("target_count") == 1 and res_cr2.get("cancelled_recent") == 2)
+    cnt2 = TL.count_send_targets(con, tid_a, cr_list_id, cancel_recent_days=30)
+    t("画面の件数表示も同じ数になり、内訳に「完了を確認できない」の社数が出る",
+      cnt2.get("target_count") == 1 and cnt2.get("cancelled_recent") == 2
+      and cnt2.get("cancelled_unconfirmed") == 1)
+    res_cr2_off = TL.send_list(con, tid_a, cr_list_id, "件名", "本文", dry_run=True)
+    t("過去送信対象キャンセルを外せば「完了を確認できない」会社にも送る(3社とも対象)",
+      res_cr2_off is not None and res_cr2_off.get("target_count") == 3)
+    # 以降の既存テスト(A除外・Bだけ対象=1社)を崩さないよう、Cはここでリストから外す
+    con.execute("DELETE FROM form_send_log WHERE company_id=999994")
+    con.execute("DELETE FROM target_list_members WHERE list_id=? AND company_id=999994", (cr_list_id,))
+    con.commit()
+
     # 上の2件はtarget_count(=画面に出る件数)しか見ていなかったため、
     # 「表示は正しいのに実際には全社へ送っている」というバグを通してしまった
     # (2026-09-22、既に成功済みの460社へ二重送信。send_campaign()のdocstring参照)。
@@ -4715,8 +4744,8 @@ def self_test(port=8899):
     con.execute("DELETE FROM campaigns WHERE id IN (?,?)", (prior_campaign_id, res_cr["campaign_id"]))
     con.execute("DELETE FROM target_list_members WHERE list_id=?", (cr_list_id,))
     con.execute("DELETE FROM target_lists WHERE id=?", (cr_list_id,))
-    con.execute("DELETE FROM touches WHERE company_id IN (999995, 999996)")
-    con.execute("DELETE FROM companies WHERE id IN (999995, 999996)")
+    con.execute("DELETE FROM touches WHERE company_id IN (999994, 999995, 999996)")
+    con.execute("DELETE FROM companies WHERE id IN (999994, 999995, 999996)")
     con.commit()
 
     print("\n── 予約送信(MIKOMERUの「送信開始日時を指定する」相当) ──")

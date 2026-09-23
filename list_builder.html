@@ -3586,7 +3586,7 @@ async function refreshSendTargetCount() {
     if (seq !== _countSeq) return;   // 古い応答で上書きしない
     const n = r.target_count || 0;
     const parts = [`${n.toLocaleString()}件に送信`];
-    if (r.cancelled_recent) parts.push(`(送信済み${r.cancelled_recent.toLocaleString()}件を除外)`);
+    if (r.cancelled_recent) parts.push(`(送信済み${r.cancelled_recent.toLocaleString()}件を除外${r.cancelled_unconfirmed ? `。うち完了未確認${r.cancelled_unconfirmed.toLocaleString()}件` : ""})`);
     const noUrl = (r.list_total || 0) - (r.with_contact_url || 0);
     if (noUrl > 0) parts.push(`(問い合わせURL未確認${noUrl.toLocaleString()}件は対象外)`);
     el.style.color = n > 0 ? "var(--warn)" : "var(--steel)";
@@ -3734,7 +3734,8 @@ async function renderSendForm(container, id) {
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:8px">
           <input type="checkbox" id="sendCancelRecentToggle" style="width:auto">
           <span>過去送信対象キャンセル(過去の送信処理実行済み会社に対しての送信をキャンセルする
-            機能です。期間は設定可能です)</span>
+            機能です。期間は設定可能です。「送信したが完了を確認できない」会社も届いている
+            可能性があるため除外します)</span>
         </label>
         <div id="sendCancelRecentWrap" style="display:none;margin-top:8px;max-width:200px">
           <label>直近何日以内に送信済みの会社を除外するか</label>

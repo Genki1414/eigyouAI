@@ -28,8 +28,15 @@ import socket
 import urllib.request
 from urllib.parse import urlsplit
 
-# BrightDataが用意している疎通確認用エンドポイント(到達すると経路情報を返す)
-DEFAULT_TEST_URL = "https://geo.brdtest.com/welcome.txt?product=dc&method=native"
+# BrightDataが用意している疎通確認用エンドポイント(到達すると経路情報を返す)。
+# **これだけでは足りない**: ベンダー自身のドメインは通るのに、ゾーンの宛先制限や
+# 課金状態のせいで任意のサイトへは出られない、という状態があり得る。2026-09-23に
+# まさにそれを疑う状況になった(brdtest.comは200なのに送信は全社失敗)。
+VENDOR_TEST_URL = "https://geo.brdtest.com/welcome.txt?product=dc&method=native"
+# ベンダー外の任意ドメイン。出口IPを返すので「本当に外へ出られたか」と
+# 「どの国のIPか」を同時に確かめられる(地域制限対策で買ったので国も見たい)
+OUTSIDE_TEST_URL = "https://api.ipify.org?format=json"
+DEFAULT_TEST_URL = VENDOR_TEST_URL
 TIMEOUT_SECONDS = 20
 
 _TRUTHY = ("1", "true", "yes", "on")
@@ -88,7 +95,8 @@ def check_one_browser(proxy_url, url, timeout=TIMEOUT_SECONDS):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default=DEFAULT_TEST_URL, help="疎通確認に使う宛先")
+    ap.add_argument("--url", default=None,
+                    help="疎通確認に使う宛先(既定: ベンダー用と外部ドメインの2つ)")
     ap.add_argument("--timeout", type=int, default=TIMEOUT_SECONDS)
     ap.add_argument("--no-browser", action="store_true",
                     help="Playwrightでの確認を省く(速いが、送信の実経路は確かめられない)")
@@ -101,8 +109,13 @@ def main():
 
     print("FORM_PROXY_DISABLED : "
           + ("1 → 無効化中(送信は直接接続)" if disabled else "未設定 → 送信はプロキシ経由"))
+    # 既定では2箇所を試す。ベンダー自身のドメインだけ通って任意のサイトへ出られない
+    # 状態を見逃さないため(2026-09-23の実例)
+    targets = ([("指定", args.url)] if args.url
+               else [("ベンダー", VENDOR_TEST_URL), ("外部ドメイン", OUTSIDE_TEST_URL)])
     print(f"FORM_PROXY_POOL     : {len(pool)}件")
-    print(f"疎通確認の宛先      : {args.url}")
+    for tag, u in targets:
+        print(f"疎通確認の宛先({tag}) : {u}")
     print("-" * 62)
 
     if not pool:
@@ -111,12 +124,14 @@ def main():
 
     print("[1] urllibで確認(参考)")
     ok_plain = 0
-    for proxy_url in pool:
-        good, line = check_one(proxy_url, args.url, args.timeout)
-        print(line)
-        ok_plain += 1 if good else 0
+    for tag, u in targets:
+        for proxy_url in pool:
+            good, line = check_one(proxy_url, u, args.timeout)
+            print(f"  [{tag}]{line[2:]}")
+            ok_plain += 1 if good else 0
 
     ok_browser = 0
+    outside_ok = 0
     if args.no_browser:
         print()
         print("[2] ブラウザでの確認は --no-browser のため省略しました")
@@ -124,15 +139,19 @@ def main():
     else:
         print()
         print("[2] 送信と同じ経路(Playwright/Chromium)で確認 ← **判断に使うのはこちら**")
-        for proxy_url in pool:
-            good, line = check_one_browser(proxy_url, args.url, args.timeout)
-            print(line)
-            ok_browser += 1 if good else 0
+        for tag, u in targets:
+            for proxy_url in pool:
+                good, line = check_one_browser(proxy_url, u, args.timeout)
+                print(f"  [{tag}]{line[2:]}")
+                ok_browser += 1 if good else 0
+                if good and tag != "ベンダー":
+                    outside_ok += 1
 
+    n = len(pool) * len(targets)
     print("-" * 62)
-    print(f"urllibで通った   : {ok_plain} / {len(pool)}件")
+    print(f"urllibで通った   : {ok_plain} / {n}件")
     if not args.no_browser:
-        print(f"ブラウザで通った : {ok_browser} / {len(pool)}件")
+        print(f"ブラウザで通った : {ok_browser} / {n}件")
     print()
     if args.no_browser:
         print("※ 判断を保留してください(ブラウザでの確認を省いたため)")
@@ -141,6 +160,11 @@ def main():
         if ok_plain:
             print("  urllibでは通るのにブラウザで落ちています。2026-09-22と同じ状態で、")
             print("  有効化すると全社がERR_TUNNEL_CONNECTION_FAILEDで失敗します")
+    elif not args.url and outside_ok == 0:
+        print("※ 有効化してはいけません。FORM_PROXY_DISABLED=1 のままにしてください")
+        print("  ベンダー自身のドメインは通るのに、外部ドメインへ出られていません。")
+        print("  ゾーンの宛先制限か課金状態が原因の可能性があります(送信先は実企業の")
+        print("  サイトなので、外部へ出られなければ意味がありません)")
     elif disabled:
         print("※ ブラウザでも通っています。FORM_PROXY_DISABLED を空にすれば")
         print("  送信がプロキシ経由に戻ります")

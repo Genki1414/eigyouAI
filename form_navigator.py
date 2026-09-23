@@ -37,6 +37,19 @@ NAV_TIMEOUT_MS = int(os.environ.get("FORM_NAV_TIMEOUT_MS", "30000"))
 ACTION_TIMEOUT_MS = int(os.environ.get("FORM_ACTION_TIMEOUT_MS", "10000"))
 SETTLE_TIMEOUT_MS = int(os.environ.get("FORM_SETTLE_TIMEOUT_MS", "6000"))
 POST_SUBMIT_WAIT_MS = int(os.environ.get("FORM_POST_SUBMIT_WAIT_MS", "1200"))
+# 送信ボタンを押したあと「何かが起きる」まで待つ上限(2026-09-23)。
+# Contact Form 7 等の「その場でAJAX送信し、URLもフォームもそのままで結果文言だけ出す」
+# フォームは、networkidle(通信が無いので約0.5秒で抜ける)では応答を捕まえられない。
+# 旧実装はその直後に「もう完了したか」を判定していたため、相手サイトの応答が
+# 約1.7秒より遅いと(1)完了文言を見る前に判定が終わって success_not_confirmed になり、
+# (2)「確認画面のボタン」探しが**さっき押した送信ボタンをもう一度**拾って二重送信
+# していた。9/22の送信で「完了を確認できない」679社を調べ、60件中31件が
+# Contact Form 7 だったことから再現して発見した。
+# 完了文言・エラー文言・URL変化・フォーム消失のどれかが出た時点で即座に抜けるので、
+# 普通のフォームでの所要時間はほとんど増えない。増えるのは「押しても何も起きない」
+# サイト(mailto:フォーム、reCAPTCHA v3にサーバー側で黙って捨てられた等)だけ。
+OUTCOME_WAIT_MS = int(os.environ.get("FORM_OUTCOME_WAIT_MS", "5000"))
+OUTCOME_POLL_MS = 250
 # ページを開いてから入力欄が描画されるまでの待ち上限(2026-09-20)。入力欄が現れた
 # 時点で即座に抜けるため、フォームがあるサイトでの所要時間はほとんど増えない。
 # 逆に「そもそもフォームが無いページ」ではこの秒数だけ待つことになるので、
@@ -1119,6 +1132,82 @@ def _owning_form(el):
         return None
 
 
+def _same_element(a, b):
+    """2つのElementHandleが同じDOM要素か。フレームが違う等で比べられなければFalse。"""
+    if a is None or b is None:
+        return False
+    try:
+        return bool(a.evaluate("(x, y) => x === y", b))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _input_form_still_editable(scope, values):
+    """まだ「入力画面」に居るか。自分たちが入れた値が**見えていて編集できる欄**に
+    残っていればTrue。
+
+    2回目のボタンを押してよいのは、確認画面へ進んだとき(入力欄が消えた・readonlyに
+    なった・hiddenに移った)だけ。入力画面のままなら、押せるボタンは1回目と同じ
+    送信ボタンしか無く、押せば二重送信になる(2026-09-23、Contact Form 7で再現)。
+    _form_keeps_our_values() は hidden も見るので確認画面(値をhiddenで持ち回る)でも
+    Trueになってしまい、この用途には使えない。"""
+    markers = [v for v in (values.get("email"), (values.get("message") or "")[:30]) if v]
+    if not markers:
+        return False
+    try:
+        return bool(scope.evaluate("""(markers) => {
+          for (const el of document.querySelectorAll('input, textarea')) {
+            if (el.type === 'hidden' || el.readOnly || el.disabled) continue;
+            if (!el.offsetParent) continue;  // 非表示(確認画面で入力欄を隠すサイト)
+            const v = (el.value || '');
+            if (v && markers.some(m => v.includes(m))) return true;
+          }
+          return false;
+        }""", markers))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wait_for_outcome(page, scope, before_url, values=None, budget_ms=None):
+    """送信ボタンを押したあと、「何かが起きる」まで待って最後に読んだ文言を返す。
+
+    起きたと見なすもの: 完了文言 / エラー文言 / URL変化 / フォーム消失 /
+    入力欄が編集できなくなった(その場で確認画面へ切り替わる2段階フォーム。valuesを
+    渡したときだけ見る)。どれも起きなければ budget_ms(既定 OUTCOME_WAIT_MS)まで待つ。
+    networkidle と違い、AJAX応答が遅れて描画されるサイトを捕まえられる
+    (OUTCOME_WAIT_MS のコメント参照)。"""
+    deadline = time.monotonic() + (budget_ms if budget_ms is not None else OUTCOME_WAIT_MS) / 1000.0
+    # 「編集できる→できなくなった」という**変化**だけを見る。確認画面で2回目を押した
+    # あとは最初から編集できないので、状態そのものを条件にすると即座に抜けてしまい、
+    # 遅れて出る完了文言を見逃す(2026-09-23、2段階フォームのテストで発覚)
+    was_editable = values is not None and _input_form_still_editable(scope, values)
+    text = ""
+    while True:
+        text = _page_text(page)
+        if scope is not page:
+            try:
+                text += "\n" + _page_text(scope)
+            except Exception:  # noqa: BLE001
+                pass
+        if _match_success_text(text) or _detect_submission_error(text):
+            return text
+        try:
+            if page.url != before_url:
+                return text
+        except Exception:  # noqa: BLE001
+            pass
+        if not _form_scopes(page):
+            return text
+        if was_editable and not _input_form_still_editable(scope, values):
+            return text
+        if time.monotonic() >= deadline:
+            return text
+        try:
+            page.wait_for_timeout(OUTCOME_POLL_MS)
+        except Exception:  # noqa: BLE001
+            return text
+
+
 def _click(el):
     """通常クリックを試し、失敗したらJS経由のクリックにフォールバックする。
     Cookie同意バナーやチャットウィジェットがボタンに重なっていて通常クリックが
@@ -1591,35 +1680,47 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 page.wait_for_load_state("networkidle", timeout=SETTLE_TIMEOUT_MS)
             except Exception:  # noqa: BLE001
                 pass
+            # **2回目を押すか決める前に**、AJAXの応答が描画されるまで待つ(2026-09-23)。
+            # 旧実装はこの待ちを最後(final_textを読む直前)にしか置いておらず、
+            # 応答の遅いサイトでは「まだ完了していない」と誤って2回目を押していた
+            # (OUTCOME_WAIT_MS のコメント参照)
+            settled_text = _wait_for_outcome(page, scope, contact_url, values)
 
             # 入力→確認→送信の2段階フォーム対応。確認画面が残っていればもう一度押す。
             #
-            # **1回目で既に完了していたら押さない**(2026-09-23)。以前は無条件に
-            # 2つ目のボタンを探していたため、完了ページのフッターにある別フォーム
+            # **1回目で既に完了(またはエラー)していたら押さない**(2026-09-23)。以前は
+            # 無条件に2つ目のボタンを探していたため、完了ページのフッターにある別フォーム
             # (メルマガ登録等)の「送信」を拾って遷移し、**完了文言を見失って
             # success_not_confirmed になる**経路があった。679社の調査で発見。
-            settled_text = _page_text(page)
-            if scope is not page:
-                try:
-                    settled_text += "\n" + _page_text(scope)
-                except Exception:  # noqa: BLE001
-                    pass
-            already_done = _match_success_text(settled_text) is not None
+            # エラー文言が出ているときも押さない(もう一度押しても通らないし、
+            # 通ってしまえば二重送信になる)。
+            already_done = (_match_success_text(settled_text) is not None
+                            or _detect_submission_error(settled_text) is not None)
             confirm_btn = None
             if not already_done:
                 # 「確認画面」系を優先する。送信ボタン一般(_SUBMIT_TEXT_RE)まで
                 # 広げるのは、確認系が見つからなかったときだけにする
                 confirm_btn = (_find_button(scope, _CONFIRM_TEXT_RE)
                                or _find_button(scope, _SUBMIT_TEXT_RE))
+            if confirm_btn and _same_element(confirm_btn, submit_btn):
+                # **さっき押したのと同じボタン**。これを押すと同じフォームを二重送信する
+                # (Contact Form 7 で実際に2回送っていた。2026-09-23)
+                confirm_btn = None
+            if confirm_btn and _input_form_still_editable(scope, values):
+                # まだ入力画面のまま(=確認画面へ進んでいない)。ここで見つかるボタンは
+                # 同じフォームを送るものでしかないので押さない
+                confirm_btn = None
             if confirm_btn:
                 # 2回目に何を押したかも残す。1回目しか記録していなかったため、
                 # 「余計なボタンを押して離脱した」のかどうかを後から追えなかった
                 clicked_desc = f"{clicked_desc} → {_describe_element(confirm_btn)}"
+                url_before_second = page.url
                 _click(confirm_btn)
                 try:
                     page.wait_for_load_state("networkidle", timeout=SETTLE_TIMEOUT_MS)
                 except Exception:  # noqa: BLE001
                     pass
+                _wait_for_outcome(page, scope, url_before_second, values)
 
             # AJAX送信の完了メッセージが非同期で少し遅れて描画されるサイトがあるため、
             # networkidleの後にもう少しだけ待つ
@@ -2422,6 +2523,137 @@ if __name__ == "__main__":
             page.fill("#m", "")
             keeps2 = _form_keeps_our_values(page, {"email": "a@example.co.jp", "message": "こんにちは。本文です。"})
             print(f"  {'✓' if not keeps2 else '✗'} 送信成功後にリセットされたフォーム(値が消えた)は失敗にしない")
+
+            print("\n── 送信後の待ちと2回目のボタン(2026-09-23。Contact Form 7 で二重送信していた) ──")
+            # 3種類のページをローカルHTTPで配り、navigate_and_submit() を実際に走らせる。
+            # ページ側で「押された回数」を本文に出し、二重送信していないことを本文から読む。
+            import http.server as _hs
+            import threading as _th
+            from urllib.parse import urlsplit as _us2, parse_qs as _pq
+
+            _CF7 = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>お問い合わせ</title></head>
+<body><h1>お問い合わせ</h1>
+<form id="f" action="/contact/#wpcf7-f1-o1" method="post">
+  <p>お名前 <input type="text" name="your-name" required></p>
+  <p>メール <input type="email" name="your-email" required></p>
+  <p>本文 <textarea name="your-message" required></textarea></p>
+  <p><input type="submit" value="送信"></p>
+  <div id="out"></div><div id="cnt">押された回数: 0</div>
+</form>
+<script>
+let n = 0;
+document.getElementById('f').addEventListener('submit', function (e) {
+  e.preventDefault(); n++;
+  document.getElementById('cnt').textContent = '押された回数: ' + n;
+  const f = e.target, ms = parseInt(new URLSearchParams(location.search).get('ms') || '1800', 10);
+  setTimeout(function () {
+    document.getElementById('out').textContent = 'ありがとうございます。メッセージは送信されました。';
+    f.reset();
+  }, ms);
+});
+</script></body></html>"""
+            _TWOSTEP = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>お問い合わせ</title></head>
+<body><h1>お問い合わせ</h1>
+<form id="f" action="/contact/" method="post">
+  <div id="inputs">
+    <p>お名前 <input type="text" name="name" required></p>
+    <p>メール <input type="email" name="email" required></p>
+    <p>本文 <textarea name="message" required></textarea></p>
+    <p><button type="submit">確認画面へ</button></p>
+  </div>
+  <div id="confirm" style="display:none">
+    <p>以下の内容でよろしいですか</p>
+    <p><button type="button">戻る</button> <button type="submit">送信する</button></p>
+  </div>
+  <div id="out"></div><div id="cnt">押された回数: 0 / 送信回数: 0</div>
+</form>
+<script>
+let presses = 0, sends = 0, step = 1;
+document.getElementById('f').addEventListener('submit', function (e) {
+  e.preventDefault(); presses++;
+  if (step === 1) {
+    document.getElementById('inputs').style.display = 'none';
+    document.getElementById('confirm').style.display = '';
+    step = 2;
+  } else {
+    sends++;
+    setTimeout(function(){ document.getElementById('out').textContent = '送信が完了しました。'; }, 1500);
+  }
+  document.getElementById('cnt').textContent = '押された回数: ' + presses + ' / 送信回数: ' + sends;
+});
+</script></body></html>"""
+            _MAILTO = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>お問い合わせ</title></head>
+<body><h1>お問い合わせ</h1>
+<form action="mailto:info@example.com" method="post" enctype="text/plain">
+  <p>お名前 <input type="text" name="name"></p>
+  <p>メール <input type="email" name="email"></p>
+  <p>本文 <textarea name="message"></textarea></p>
+  <p><input type="submit" value="送信する" onclick="window.n=(window.n||0)+1;document.getElementById('cnt').textContent='押された回数: '+window.n"></p>
+  <div id="cnt">押された回数: 0</div>
+</form></body></html>"""
+
+            class _PagesHandler(_hs.BaseHTTPRequestHandler):
+                pages = {"/cf7.html": _CF7, "/twostep.html": _TWOSTEP, "/mailto.html": _MAILTO}
+
+                def do_GET(self):
+                    path = _us2(self.path).path
+                    html = self.pages.get(path)
+                    body = (html or "not found").encode("utf-8")
+                    self.send_response(200 if html else 404)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, *a):
+                    pass
+
+            pages_srv = _hs.HTTPServer(("127.0.0.1", 0), _PagesHandler)
+            pages_port = pages_srv.server_address[1]
+            _th.Thread(target=pages_srv.serve_forever, daemon=True).start()
+            _vals = {"company": "株式会社テスト", "name": "試験 太郎", "email": "t@example.com",
+                     "message": "お問い合わせ本文です。", "subject": "ご提案"}
+
+            def _count(r):
+                txt = " ".join((r.page_text_snippet or "").split())
+                i = txt.find("押された回数")
+                return txt[i:i + 32] if i >= 0 else "?"
+
+            # このテスト本体は既に同じスレッドで sync_playwright を起動している。
+            # navigate_and_submit() は自前で sync_playwright を起動する(スレッドローカル)
+            # ので、同じスレッドから呼ぶと "Sync API inside the asyncio loop" で落ちる。
+            # 1本の別スレッドで順に走らせる(max_workers=1 なら同じスレッドが使い回される)
+            import concurrent.futures as _cf
+            _ex = _cf.ThreadPoolExecutor(max_workers=1)
+
+            def _go(url):
+                return _ex.submit(navigate_and_submit, url, _vals, headless=True).result()
+
+            try:
+                # 応答が遅いAJAXフォーム(CF7風)。旧実装は1.7秒より遅いと未確認+二重送信になった
+                for ms in (150, 1800, 4000):
+                    r = _go(f"http://127.0.0.1:{pages_port}/cf7.html?ms={ms}")
+                    c = _count(r)
+                    ok = r.reason_code == "success_text_matched" and c == "押された回数: 1"
+                    print(f"  {'✓' if ok else '✗'} その場でAJAX送信するフォーム(応答{ms}ms): "
+                          f"1回だけ押して完了文言を確認する → {r.reason_code} / {c}"
+                          + (f" / {r.error_message}" if r.error_message else ""))
+                # その場で確認画面へ切り替わる2段階フォーム。2回目は押さないといけない
+                r = _go(f"http://127.0.0.1:{pages_port}/twostep.html")
+                c = _count(r)
+                ok = r.reason_code == "success_text_matched" and c == "押された回数: 2 / 送信回数: 1"
+                print(f"  {'✓' if ok else '✗'} その場で確認画面へ切り替わる2段階フォーム: "
+                      f"確認画面の「送信する」も押して完了まで進む → {r.reason_code} / {c}")
+                # 押しても何も起きないフォーム。未確認のままでよいが、2回押してはいけない
+                r = _go(f"http://127.0.0.1:{pages_port}/mailto.html")
+                c = _count(r)
+                ok = r.reason_code == "success_not_confirmed" and c == "押された回数: 1"
+                print(f"  {'✓' if ok else '✗'} mailto:フォーム(押しても何も起きない): "
+                      f"未確認のまま、ただし2回は押さない → {r.reason_code} / {c}")
+            finally:
+                pages_srv.shutdown()
+                _ex.submit(close_thread_browser).result()
+                _ex.shutdown()
 
             print("\n── プロキシ経由の実アクセス(T42。ローカルの疑似ターゲット+"
                   "疑似プロキシで、実際にChromiumがプロキシを通ることを確認) ──")

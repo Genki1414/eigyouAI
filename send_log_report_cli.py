@@ -38,15 +38,33 @@ def _since(days):
     return (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
 
 
+def _window(args):
+    """集計の開始時刻を決める。--since があればそれを優先する。
+
+    --days は**現在時刻からのスライド窓**なので、時間をおいて2回実行すると
+    母集団が変わり、比べても意味のない数字になる(2026-09-23に実際にやった:
+    改修の前後を --days 1 で比べたが、前半が窓から外れて件数が減っただけだった)。
+    改修の効果を測るときは --since で固定の開始時刻を渡すこと。"""
+    if getattr(args, "since", None):
+        return args.since
+    return _since(args.days)
+
+
+def _window_label(args):
+    if getattr(args, "since", None):
+        return f"{args.since} 以降"
+    return f"直近{args.days}日"
+
+
 def cmd_reasons(con, args):
     rows = con.execute("""SELECT status, reason_code, COUNT(*) n
         FROM form_send_log WHERE started_at >= ?
-        GROUP BY status, reason_code ORDER BY n DESC""", (_since(args.days),)).fetchall()
+        GROUP BY status, reason_code ORDER BY n DESC""", (_window(args),)).fetchall()
     total = sum(r["n"] for r in rows)
     if not total:
-        print(f"直近{args.days}日の送信ログはありません")
+        print(f"{_window_label(args)}の送信ログはありません")
         return
-    print(f"直近{args.days}日の試行 {total:,}件(1試行=1行。再試行のたびに増えます)")
+    print(f"{_window_label(args)}の試行 {total:,}件(1試行=1行。再試行のたびに増えます)")
     print(f"{'結果':22s} {'理由':28s} {'件数':>7s} {'割合':>7s}  日本語")
     print("-" * 92)
     for r in rows:
@@ -70,7 +88,7 @@ def cmd_urls(con, args):
     """指定した理由の問い合わせ先URLを出す(検証用)。会社名は出さない。"""
     q = """SELECT contact_url, target_url, success_evidence, error_message, started_at
         FROM form_send_log WHERE started_at >= ?"""
-    params = [_since(args.days)]
+    params = [_window(args)]
     if args.reason:
         q += " AND reason_code = ?"
         params.append(args.reason)
@@ -101,7 +119,7 @@ def cmd_delivery(con, args):
     **送信ボタンを押せた会社の割合**に相当する。同じものさしで比べられるよう、
     1試行=1行のログを**会社単位**に畳んで段階別に出す(再試行や重複送信で
     水増しされないよう COUNT(DISTINCT company_id) で数える)。"""
-    since = _since(args.days)
+    since = _window(args)
     row = con.execute("""SELECT
             COUNT(DISTINCT company_id) companies,
             COUNT(DISTINCT CASE WHEN submit_attempted=1 THEN company_id END) submitted,
@@ -118,12 +136,13 @@ def cmd_delivery(con, args):
         FROM form_send_log WHERE started_at >= ?""", (since,)).fetchone()
     n = row["companies"]
     if not n:
-        print(f"直近{args.days}日の送信ログはありません")
+        print(f"{_window_label(args)}の送信ログはありません")
         return
 
     def pct(x):
         return f"{x*100.0/n:5.1f}%"
 
+    print(f"集計範囲: {_window_label(args)}")
     print(f"対象 {n:,}社(会社単位。再試行・重複は畳んで数えています)")
     print("-" * 74)
     print(f"  送信ボタンを押せた            {row['submitted']:6,d}社  {pct(row['submitted'])}"
@@ -156,7 +175,7 @@ def cmd_error_hints(con, args):
     rows = con.execute("""SELECT error_message, COUNT(*) n FROM form_send_log
         WHERE reason_code = 'error_message_detected' AND started_at >= ?
         GROUP BY error_message ORDER BY n DESC LIMIT ?""",
-        (_since(args.days), args.limit)).fetchall()
+        (_window(args), args.limit)).fetchall()
     if not rows:
         print("error_message_detected の行はありません")
         return
@@ -178,9 +197,9 @@ def cmd_runs(con, args):
             COUNT(DISTINCT company_id) companies
         FROM form_send_log WHERE started_at >= ?
         GROUP BY list_id ORDER BY t1 DESC LIMIT ?""",
-        (_since(args.days), args.limit)).fetchall()
+        (_window(args), args.limit)).fetchall()
     if not rows:
-        print(f"直近{args.days}日の送信ログはありません")
+        print(f"{_window_label(args)}の送信ログはありません")
         return
     print(f"{'リストID':>8s} {'開始':17s} {'終了':17s} {'試行':>7s} {'会社数':>7s} {'成功':>7s} {'成功率':>7s}")
     print("-" * 80)
@@ -196,22 +215,27 @@ def main():
 
     p1 = sub.add_parser("reasons", help="理由別の件数")
     p1.add_argument("--days", type=int, default=30)
+    p1.add_argument("--since", help="開始時刻(例 2026-09-23T15:05:00)。--daysより優先")
 
     p2 = sub.add_parser("urls", help="指定した理由のURLを検証用に出す")
     p2.add_argument("--reason", default=None)
     p2.add_argument("--status", default=None)
     p2.add_argument("--days", type=int, default=30)
+    p2.add_argument("--since", help="開始時刻(例 2026-09-23T15:05:00)。--daysより優先")
     p2.add_argument("--limit", type=int, default=20)
 
     p5 = sub.add_parser("delivery", help="どこまで進めたかを会社数で(他社比較用)")
     p5.add_argument("--days", type=int, default=30)
+    p5.add_argument("--since", help="開始時刻(例 2026-09-23T15:05:00)。--daysより優先")
 
     p4 = sub.add_parser("error-hints", help="エラー文言の内訳(誤検出の確認)")
     p4.add_argument("--days", type=int, default=30)
+    p4.add_argument("--since", help="開始時刻(例 2026-09-23T15:05:00)。--daysより優先")
     p4.add_argument("--limit", type=int, default=30)
 
     p3 = sub.add_parser("runs", help="実行(リスト)単位の成績")
     p3.add_argument("--days", type=int, default=30)
+    p3.add_argument("--since", help="開始時刻(例 2026-09-23T15:05:00)。--daysより優先")
     p3.add_argument("--limit", type=int, default=20)
 
     args = ap.parse_args()

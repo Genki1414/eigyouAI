@@ -182,11 +182,13 @@ def note_proxy_result(error_message):
 
     プロセスが再起動すれば設定は読み直されるので、プロキシを直した後は
     デプロイやワーカー再起動でそのまま元に戻る(恒久的に無効化はしない)。
+
+    FORM_PROXY_POOLの有無に関わらず判定する。プロキシはコンテナの
+    HTTP_PROXY / HTTPS_PROXY 経由でも効く(Chromiumが環境変数を自動で拾う)ため。
+    2026-09-23: 最初の実装はここで `if not FORM_PROXY_POOL: return False` と
+    していたため、本番でフォールバックが一切発動しなかった。
     """
     global _PROXY_FAILS, _PROXY_DISABLED
-    import config as C
-    if not C.FORM_PROXY_POOL:
-        return False
     with _PROXY_LOCK:
         if _PROXY_DISABLED:
             return False
@@ -196,7 +198,8 @@ def note_proxy_result(error_message):
                 _PROXY_DISABLED = True
                 print(f"  [proxy] プロキシ由来の失敗が{_PROXY_FAILS}回続いたため、"
                       f"以後は直接接続に切り替えます(送信を止めないための緊急回避。"
-                      f"FORM_PROXY_POOLの状態を確認してください)")
+                      f"FORM_PROXY_POOL と HTTP(S)_PROXY の状態を確認してください)",
+                      flush=True)
                 return True
         else:
             _PROXY_FAILS = 0
@@ -237,12 +240,19 @@ def _launch_browser(p, headless):
     config.FORM_PROXY_POOLが設定されていれば、起動のたびにプールから選んだ
     プロキシを経由させる(T42: 送信元IPの分散)。"""
     proxy = _pick_proxy()
+    args = []
+    if proxy is None and proxy_disabled():
+        # プロキシを諦めた後は、コンテナの HTTP_PROXY / HTTPS_PROXY をChromiumが
+        # 自動で拾うのも止める。proxy=None を渡すだけでは環境変数が効いたままで、
+        # 「直接接続へ切り替えた」はずが同じ死んだプロキシを使い続けてしまう
+        args.append("--no-proxy-server")
     exe = os.environ.get("PLAYWRIGHT_CHROMIUM_PATH")
     if exe:
         return p.chromium.launch(
             executable_path=exe, headless=headless, proxy=proxy,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
-    return p.chromium.launch(headless=headless, proxy=proxy)
+            args=["--no-sandbox", "--disable-setuid-sandbox",
+                   "--disable-dev-shm-usage"] + args)
+    return p.chromium.launch(headless=headless, proxy=proxy, args=args)
 
 # ── フィールド判定の同義語辞書 ────────────────
 # 表記ゆれ・同義語を広めに持つ。name/id/placeholder/aria-label/label文言/
@@ -1765,12 +1775,14 @@ if __name__ == "__main__":
                 print(f"  {'✓' if not any(site) and not proxy_disabled() else '✗'} "
                       f"相手サイト都合のエラー(ERR_CONNECTION_REFUSED)では切り替えない")
 
-                # プロキシを使っていないときは何もしない
+                # FORM_PROXY_POOLが空でも切り替える。プロキシはコンテナの
+                # HTTP_PROXY / HTTPS_PROXY 経由でも効くため(Chromiumが自動で拾う)。
+                # 最初の実装はここでreturnしており、本番で一切発動しなかった
                 _reset_proxy_state()
                 C_px.FORM_PROXY_POOL = []
-                none_px = [note_proxy_result(tunnel) for _ in range(PROXY_FAILURE_THRESHOLD * 2)]
-                print(f"  {'✓' if not any(none_px) and not proxy_disabled() else '✗'} "
-                      f"FORM_PROXY_POOL未設定なら判定自体を行わない")
+                none_px = [note_proxy_result(tunnel) for _ in range(PROXY_FAILURE_THRESHOLD)]
+                print(f"  {'✓' if none_px[-1] and proxy_disabled() else '✗'} "
+                      f"FORM_PROXY_POOL未設定でも切り替える(環境変数のプロキシ対策)")
             finally:
                 C_px.FORM_PROXY_POOL = orig_px
                 _reset_proxy_state()

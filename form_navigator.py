@@ -576,6 +576,23 @@ def _label_for(page, el):
                     .map(n => n.textContent).join(' ').trim();
                 if (txt) return txt;
             }
+            // 表組み(th→td)・定義リスト(dt→dd)・行ブロック(<div>見出し</div><div>欄</div>)の
+            // 見出し。CF7 の text-563(電話番号) のように name が汎用で、ラベルが <th> にだけ
+            // あるフォームで欄の種類を取れていなかった(2026-09-24、T135)。
+            // 見出しは短いものだけ採用する(段落の本文を拾わないため)
+            const cell = e.closest('td, dd');
+            if (cell) {
+                const head = cell.previousElementSibling;
+                if (head && /^(TH|DT|TD)$/.test(head.tagName) && head.innerText && head.innerText.trim().length <= 40)
+                    return head.innerText;
+            }
+            let node = e.parentElement;
+            for (let i = 0; i < 3 && node && node.tagName !== 'FORM'; i++) {
+                const head = node.previousElementSibling;
+                const t = head && head.innerText ? head.innerText.trim() : '';
+                if (t && t.length <= 40 && !head.querySelector('input, textarea, select')) return t;
+                node = node.parentElement;
+            }
             return '';
         }""") or ""
     except Exception:  # noqa: BLE001
@@ -623,9 +640,13 @@ def _classify_field(page, el):
         return "subject"
     # 「セイ」「メイ」(姓・名を分けたカナ欄)は「フリガナ（セイ）」のように両方の語を含むので
     # furigana より先に判定する
-    if any(h in text for h in _FIELD_HINTS["last_name_kana"]):
+    # ただし「担当者名(カナ)」「氏名（カナ）」のようにフルネームの語があれば、それは
+    # 姓名を分けた欄ではなく氏名全体のカナ(furigana)。「名(カナ」が部分一致してしまう
+    # (2026-09-24、T135のテストで発覚)
+    full_name_word = any(h in text for h in _NAME_HINTS_STRONG)
+    if not full_name_word and any(h in text for h in _FIELD_HINTS["last_name_kana"]):
         return "last_name_kana"
-    if any(h in text for h in _FIELD_HINTS["first_name_kana"]):
+    if not full_name_word and any(h in text for h in _FIELD_HINTS["first_name_kana"]):
         return "first_name_kana"
     if any(h in text for h in _FIELD_HINTS["furigana"]):
         return "furigana"
@@ -2055,12 +2076,22 @@ if __name__ == "__main__":
                   <p><input name="your-yuubin"></p><p><input name="your-sikutyouson"></p>
                   <p><label for="t">ＴＥＬ *</label><input id="t" name="f1"></p>
                 </form>""", {"phone", "name", "address", "postal_code", "city"}),
+            ("ラベルが th / dt / 行ブロックの見出しにしか無い欄(CF7の text-563 等。2026-09-24)", """
+                <form>
+                  <table>
+                    <tr><th>電話番号 必須</th><td><input name="text-563"></td></tr>
+                    <tr><th>ご担当者様名(カナ)*</th><td><input name="text-469"></td></tr>
+                  </table>
+                  <dl><dt>住所*</dt><dd><input name="add"></dd></dl>
+                  <div class="row"><div class="ttl">貴社名</div><div class="fld"><input name="your_comp"></div></div>
+                </form>""", {"phone", "furigana", "address", "company"}),
             ("姓・名を分けたカナ欄(セイ/メイ)は furigana ではなく last_name_kana/first_name_kana", """
                 <form>
                   <label for="s">セイ</label><input id="s" name="k1">
                   <label for="m">メイ</label><input id="m" name="k2">
                   <label for="f">フリガナ（セイ）</label><input id="f" name="k3">
-                </form>""", {"last_name_kana", "first_name_kana"}),
+                  <label for="g">ご担当者名（カナ）</label><input id="g" name="k4">
+                </form>""", {"last_name_kana", "first_name_kana", "furigana"}),
             ("ふりがな欄の別名(name=furi / yomi。実測: 白石建設)", """
                 <form>
                   <input name="furi" placeholder="">

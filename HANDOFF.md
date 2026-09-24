@@ -4714,7 +4714,13 @@ retry_holds は保留中だけ / 再試行失敗で試行回数+1 / 届いたら
 test_pipeline 42/42(`run.py all --demo` で初期化後)、senders・concurrency・storage 通過。
 
 **運用手順(四国リスト=list 10)**: デプロイ後、ops-write `send-holds-backfill` に `list_id=10`
-→ ops-readonly `send-holds` で理由別の保留数を確認。次回の送り直し(send-clone)から自動で
+→ ops-readonly `send-holds` で理由別の保留数を確認。
+
+**本番で実施(9/24 15:06 JST、CI & Deploy 成功後に `send-holds-backfill list_id=10`)**: 四国
+2,975社のうち **298社を保留**(フォームが見つからない144 / ページを開けない58 / 採用専用35 /
+証明書不備29 / 問い合わせリンク無し27 / bot判定4 / 会員専用1)。画像認証(約100社)は保留にして
+いない。次回の送り直し(send-clone)からこの298社は自動で除外され、10月1日 8:00 の cron が
+保留中の会社だけへの再試行の予約を作る(届いた会社は保留から外れる)。次回の送り直し(send-clone)から自動で
 除外される。再試行は毎月1日に自動、手動なら `send-holds-retry`(承認)。
 
 ### T135. ラベルが th/dt/行ブロックの見出しにしか無い欄を読む(2026-09-24)

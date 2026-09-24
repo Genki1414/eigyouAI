@@ -618,7 +618,7 @@ def _is_quota_error(error):
 
 def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clicks=False,
                    sender_template_id=None, allow_no_solicit=False, sender_override=None,
-                   skip_already_sent=False, company_ids=None,
+                   skip_already_sent=False, company_ids=None, skip_attempted_since=None,
                   stop_check=None):
     """キャンペーンの対象企業へ実際に送る。
     campaign.py simulate の本番版がこれ。接触ガードはここでも最終確認する。
@@ -718,6 +718,16 @@ def send_campaign(con, campaign_id, step=1, dry_run=True, limit=None, track_clic
                     "blocked_by_reason": {}, "failed_by_reason": {}}
         q += f" AND t.company_id IN ({','.join('?' * len(company_ids))})"
         p += list(company_ids)
+    if skip_attempted_since:
+        # 停止→再開(T127)や再起動後の取り込み直しで、**この予約で既に試した会社**は
+        # 成功・失敗を問わず飛ばす(2026-09-24、T134)。以前は成功した会社しか飛ばさず、
+        # 再開のたびに停止前の失敗分(死んだドメイン・弾かれたフォーム)をもう一度試して
+        # いた(9/24の送り直しで174社ぶん無駄に再試行し、完了通知の失敗数も水増しされた)。
+        # 境界は予約の作成時刻。それより前の記録(前回の送信)はここでは見ない
+        q += """ AND NOT EXISTS (SELECT 1 FROM form_send_log f
+                     WHERE f.company_id = t.company_id AND f.list_id = tl.id
+                       AND f.started_at >= ?)"""
+        p.append(skip_attempted_since)
     if skip_already_sent:
         # 中断した送信の「自動再開」用(T110)。既に届いた会社には二度と送らない。
         # 判定にtouches.sent_atを使わないのは、ドライランでもsent_atが入るため
@@ -1332,6 +1342,32 @@ if __name__ == "__main__":
                 raise RuntimeError("DB断の想定")
             st3 = send_campaign(con, stop_cid, step=1, dry_run=True, stop_check=_broken)
             print(f"  {'✓' if st3['sent'] == 5 else '✗'} 確認関数が例外を投げても送信は続く (sent={st3['sent']})")
+            # 再開時は「この予約で既に試した会社」を成功・失敗を問わず飛ばす(T134)。
+            # 999990 は境界後に失敗の記録あり、999991 は境界前の記録だけ → 999990 だけ飛ぶ
+            con.execute("UPDATE touches SET sent_at=NULL, note=NULL WHERE campaign_id=?", (stop_cid,))
+            con.execute("DELETE FROM idempotency WHERE key LIKE '%:99999_:1'")
+            con.execute("DELETE FROM form_send_log WHERE company_id IN (999990, 999991)")
+            lid_row = con.execute("SELECT id FROM target_lists WHERE campaign_id=?", (stop_cid,)).fetchone()
+            # touches→target_lists の結び付き(tl.id)が要るので、テスト用のリストを campaign に紐付ける
+            if not lid_row:
+                con.execute("INSERT INTO target_lists (tenant_id,name,source,company_count,created_at,campaign_id) "
+                            "VALUES (1,'test-skip-attempted','filter',5,?,?)",
+                            (datetime.now().isoformat(timespec="seconds"), stop_cid))
+                lid_row = con.execute("SELECT id FROM target_lists WHERE campaign_id=?", (stop_cid,)).fetchone()
+            skip_lid = lid_row["id"]
+            con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, started_at, status, reason_code)
+                VALUES (999990, 1, ?, '2026-09-24T07:10:00', 'FAILED_RETRYABLE', 'goto_failed'),
+                       (999991, 1, ?, '2026-09-22T15:00:00', 'FAILED_UNSUPPORTED', 'form_not_found')""",
+                (skip_lid, skip_lid))
+            con.commit()
+            st4 = send_campaign(con, stop_cid, step=1, dry_run=True, skip_attempted_since="2026-09-24T07:00:00")
+            skipped = con.execute("SELECT sent_at FROM touches WHERE campaign_id=? AND company_id=999990",
+                                  (stop_cid,)).fetchone()["sent_at"]
+            print(f"  {'✓' if st4['sent'] == 4 and skipped is None else '✗'} "
+                  f"再開時は予約の作成後に試した会社(失敗も)を飛ばし、それより前の記録は見ない (sent={st4['sent']})")
+            con.execute("DELETE FROM form_send_log WHERE company_id IN (999990, 999991)")
+            con.execute("DELETE FROM target_lists WHERE name='test-skip-attempted'")
+            con.commit()
         finally:
             C.FORM_SEND_CONCURRENCY = orig_conc
             db.set_global_kill_switch(con, orig_ks2, reason=orig_ks2_reason, updated_by="test-restore")

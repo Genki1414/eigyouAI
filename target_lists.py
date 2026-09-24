@@ -783,7 +783,7 @@ def count_send_targets(con, tenant_id, list_id, cancel_recent_days=None):
 def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks=False,
               sender_template_id=None, staff_id=None, allow_no_solicit=False,
               sender_override=None, cancel_recent_days=None, skip_already_sent=False,
-              stop_check=None):
+              stop_check=None, skip_attempted_since=None):
     """保存済みリストからフォーム自動送信キャンペーンを作り、既存のsenders.send_campaign()
     にそのまま委譲する。can_contact()・冪等性・FormSenderのペーシング上限はすべて
     send_campaign()側の仕組みがそのまま効く(ここで独自の送信経路は作らない)。
@@ -925,11 +925,14 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
                                    allow_no_solicit=allow_no_solicit, sender_override=sender_override,
                                    skip_already_sent=skip_already_sent,
                                    company_ids=[m["id"] for m in members],
-                                   stop_check=stop_check)
+                                   stop_check=stop_check,
+                                   skip_attempted_since=skip_attempted_since)
     if not dry_run:
         db.sync_target_list_member_status(con, list_id, campaign_id, step=1)
         _notify_completion(con, tenant_id, lst["name"], len(members), stats,
-                           list_id=list_id, since=now2)
+                           list_id=list_id, since=now2,
+                           stopped_by=stats.get("stopped_by_request"),
+                           resumed=bool(skip_attempted_since or skip_already_sent))
     return {"campaign_id": campaign_id, "target_count": len(members),
             "dry_run": dry_run, "stats": stats, "cancelled_recent": cancelled_recent,
             # 停止要求で途中で抜けたなら 'PAUSE' / 'CANCEL'(T127)。呼び出し側が予約の
@@ -981,7 +984,51 @@ def failure_reason_counts(con, tenant_id, list_id, since=None, limit=8):
             for r in con.execute(q, params).fetchall()]
 
 
-def _notify_completion(con, tenant_id, list_name, target_count, stats, list_id=None, since=None):
+def completion_message(list_name, target_count, stats, reasons=(), stopped_by=None, resumed=False):
+    """完了通知の件名と本文を組み立てる(送信はしない。テストしやすいよう分けた。T134)。
+
+    stopped_by: 'PAUSE' / 'CANCEL' なら「完了」ではなく「停止/取り消し」の通知にする。
+    9/24に一時停止しただけで「送信完了: 成功0」のメールが届き、紛らわしかった。
+    resumed: 停止や再起動のあとの続きの実行。数字はこの実行分だけなので、その旨を添える。"""
+    blocked_lines = "".join(f"  内訳 - {reason}: {n}\n"
+                             for reason, n in (stats.get("blocked_by_reason") or {}).items())
+    reason_lines = ""
+    if reasons:
+        reason_lines = ("\n送れなかった理由(多い順):\n"
+                        + "".join(f"  {label}: {n}\n" for label, n in reasons)
+                        + "\n管理画面の「自動送信ログ」→ 明細で会社ごとに確認できます。\n")
+    sent = stats.get("sent", 0)
+    rate = f"({round(sent * 100 / target_count)}%)" if target_count else ""
+    if stopped_by == "PAUSE":
+        subject = f"【ヒラケル】送信を停止しました: {list_name}"
+        head = (f"リスト「{list_name}」への送信を途中で停止しました。\n"
+                f"予約一覧の「再開」で、続きから(送信済みと試行済みの会社は飛ばして)送れます。\n\n")
+    elif stopped_by == "CANCEL":
+        subject = f"【ヒラケル】送信を取り消しました: {list_name}"
+        head = (f"リスト「{list_name}」への送信を途中で取り消しました。\n"
+                f"取り消し前に送った分はそのままです。続きは送りません。\n\n")
+    else:
+        subject = f"【ヒラケル】送信完了: {list_name}"
+        head = f"リスト「{list_name}」への送信が完了しました。\n\n"
+    note = ("※ この予約は途中で停止(または再起動)して再開したものです。以下の数字は"
+            "再開後に処理した分だけで、停止前に送った分は含みません。\n\n") if resumed else ""
+    unsent = ("" if not stopped_by else
+              f"未送信(停止のため): {stats.get('unsent_by_stop', 0)}\n")
+    body = (f"{head}{note}"
+            f"対象企業数: {target_count}\n"
+            f"送信成功: {sent} {rate}\n"
+            f"失敗: {stats.get('failed', 0)}\n"
+            f"{unsent}"
+            f"ガードで中止: {stats.get('blocked', 0)}\n"
+            f"{blocked_lines}"
+            f"配信停止: {stats.get('suppressed', 0)}\n"
+            f"Kill Switchで中止: {stats.get('stopped', 0)}\n"
+            f"{reason_lines}")
+    return subject, body
+
+
+def _notify_completion(con, tenant_id, list_name, target_count, stats, list_id=None, since=None,
+                       stopped_by=None, resumed=False):
     """送信完了を担当者へメール通知する(MIKOMERU同等の完了通知)。
     senders.MailSenderがResend経由で実送信する(HANDOFF.md T32/T80)。
     RESEND_API_KEY未設定の環境ではNotImplementedErrorを投げるだけになるが、
@@ -999,31 +1046,15 @@ def _notify_completion(con, tenant_id, list_name, target_count, stats, list_id=N
     if not recipients:
         return
 
-    blocked_lines = "".join(f"  内訳 - {reason}: {n}\n"
-                             for reason, n in (stats.get("blocked_by_reason") or {}).items())
-    reason_lines = ""
+    reasons = []
     if list_id:
         try:
             reasons = failure_reason_counts(con, tenant_id, list_id, since=since)
         except Exception as e:  # noqa: BLE001
             print(f"  [完了通知] 理由の集計に失敗しました(通知は続行): {e}")
             reasons = []
-        if reasons:
-            reason_lines = ("\n送れなかった理由(多い順):\n"
-                            + "".join(f"  {label}: {n}\n" for label, n in reasons)
-                            + "\n管理画面の「自動送信ログ」→ 明細で会社ごとに確認できます。\n")
-    sent = stats.get("sent", 0)
-    rate = f"({round(sent * 100 / target_count)}%)" if target_count else ""
-    subject = f"【ヒラケル】送信完了: {list_name}"
-    body = (f"リスト「{list_name}」への送信が完了しました。\n\n"
-            f"対象企業数: {target_count}\n"
-            f"送信成功: {sent} {rate}\n"
-            f"失敗: {stats.get('failed', 0)}\n"
-            f"ガードで中止: {stats.get('blocked', 0)}\n"
-            f"{blocked_lines}"
-            f"配信停止: {stats.get('suppressed', 0)}\n"
-            f"Kill Switchで中止: {stats.get('stopped', 0)}\n"
-            f"{reason_lines}")
+    subject, body = completion_message(list_name, target_count, stats, reasons,
+                                       stopped_by=stopped_by, resumed=resumed)
     default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
                                      address="", optout_url=C.OPTOUT_URL)
     mailer = senders.MailSender(con, dry_run=False)

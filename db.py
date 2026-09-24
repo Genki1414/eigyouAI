@@ -1082,7 +1082,7 @@ def due_scheduled_sends(con, now_iso):
     """期限が来たPENDINGを取得する。scheduled_send_cli.pyがcronから呼ぶ。"""
     rows = con.execute("""SELECT id, tenant_id, list_id, subject, body, dry_run, track_clicks,
             sender_template_id, allow_no_solicit, cancel_recent_days, sender_override_json, attempts,
-            resumed
+            resumed, created_at
         FROM scheduled_sends WHERE status='PENDING' AND scheduled_at<=?
         ORDER BY scheduled_at""", (now_iso,)).fetchall()
     return [dict(r) for r in rows]

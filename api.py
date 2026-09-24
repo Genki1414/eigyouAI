@@ -4841,6 +4841,22 @@ def self_test(port=8899):
       and new_row["scheduled_at"] <= datetime.now().isoformat(timespec="seconds")
       and new_row["dry_run"] == 0)
     t("複製元が無ければ None", db.clone_scheduled_send(con, 99999999) is None)
+
+    # 完了通知の文面(T134)。停止しただけで「送信完了」と出ていた
+    st_stats = {"sent": 0, "failed": 188, "blocked": 0, "suppressed": 0, "stopped": 0,
+                "blocked_by_reason": {}, "unsent_by_stop": 771, "stopped_by_request": "PAUSE"}
+    subj, body = TL.completion_message("四国", 959, st_stats, [], stopped_by="PAUSE")
+    t("停止したときは件名が「送信を停止しました」で、未送信の社数と再開の案内が入る",
+      "送信を停止しました" in subj and "未送信(停止のため): 771" in body and "再開" in body
+      and "完了しました" not in body)
+    subj, body = TL.completion_message("四国", 959, dict(st_stats, stopped_by_request="CANCEL"), [],
+                                       stopped_by="CANCEL")
+    t("取り消したときは件名が「送信を取り消しました」", "取り消しました" in subj and "続きは送りません" in body)
+    subj, body = TL.completion_message("四国", 959, {"sent": 47, "failed": 700}, [("x", 1)], resumed=True)
+    t("再開後の完了通知は「再開後に処理した分だけ」と断る",
+      "送信完了" in subj and "再開後に処理した分" in body and "送信成功: 47" in body)
+    subj, body = TL.completion_message("四国", 959, {"sent": 47, "failed": 700})
+    t("通常の完了通知は従来どおり", "送信完了" in subj and "再開" not in body and "未送信" not in body)
     db.request_stop_scheduled_send(con, tid_a, sid_new, "CANCEL")
     db.request_stop_scheduled_send(con, tid_a, sid_src, "CANCEL")
 

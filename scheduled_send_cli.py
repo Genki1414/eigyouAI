@@ -61,6 +61,8 @@ def _execute(con, s, worker):
                            skip_already_sent=bool(s.get("resumed")),
                            # 再開なら、この予約で既に試した会社(成功・失敗とも)を飛ばす(T134)
                            skip_attempted_since=(s.get("created_at") if s.get("resumed") else None),
+                           # 保留中の会社だけに送る予約(T136。send_holds_cli retry が作る)
+                           retry_holds=bool(s.get("retry_holds")),
                            # ワーカースレッドが会社ごとに呼ぶ。渡される接続はそのスレッド専用
                            stop_check=lambda con_t: db.stop_requested_for(con_t, s["id"]))
         if res is None:

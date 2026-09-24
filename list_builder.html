@@ -3587,6 +3587,7 @@ async function refreshSendTargetCount() {
     const n = r.target_count || 0;
     const parts = [`${n.toLocaleString()}件に送信`];
     if (r.cancelled_recent) parts.push(`(送信済み${r.cancelled_recent.toLocaleString()}件を除外${r.cancelled_unconfirmed ? `。うち完了未確認${r.cancelled_unconfirmed.toLocaleString()}件` : ""})`);
+    if (r.held) parts.push(`(送信保留中${r.held.toLocaleString()}件を除外。サイト閉鎖・フォーム無し等。定期的に再試行します)`);
     const noUrl = (r.list_total || 0) - (r.with_contact_url || 0);
     if (noUrl > 0) parts.push(`(問い合わせURL未確認${noUrl.toLocaleString()}件は対象外)`);
     el.style.color = n > 0 ? "var(--warn)" : "var(--steel)";

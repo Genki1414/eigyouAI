@@ -721,7 +721,7 @@ def update_member_company(con, tenant_id, list_id, company_id, fields):
     return {"ok": True, "company": dict(row)}
 
 
-def _sendable_member_ids(con, list_id, cancel_recent_days=None):
+def _sendable_member_ids(con, list_id, cancel_recent_days=None, retry_holds=False):
     """このリストで実際に送信対象になる会社のIDと、除外された内訳を返す。
 
     送信本体(send_list)と画面の件数表示(count_send_targets)が**必ず同じ数**に
@@ -736,7 +736,17 @@ def _sendable_member_ids(con, list_id, cancel_recent_days=None):
         WHERE m.list_id=? AND c.contact_url IS NOT NULL""", (list_id,)).fetchall()
     ids = [m["id"] for m in members]
     out = {"ids": ids, "with_contact_url": len(ids), "cancelled_recent": 0,
-           "cancelled_unconfirmed": 0}
+           "cancelled_unconfirmed": 0, "held": 0}
+    # 送信保留(T136)。通常の送信では保留中の会社を外す。retry_holds の予約(定期的な
+    # 再試行)では逆に保留中の会社だけを対象にする
+    import db as _db
+    held = _db.active_hold_ids(con, ids)
+    if retry_holds:
+        ids = [i for i in ids if i in held]
+    else:
+        out["held"] = len(held)
+        ids = [i for i in ids if i not in held]
+    out["ids"] = ids
     if not ids or not cancel_recent_days:
         return out
     cutoff = (datetime.now() - timedelta(days=cancel_recent_days)).isoformat(timespec="seconds")
@@ -777,13 +787,14 @@ def count_send_targets(con, tenant_id, list_id, cancel_recent_days=None):
             "with_contact_url": r["with_contact_url"],
             "cancelled_recent": r["cancelled_recent"],
             "cancelled_unconfirmed": r.get("cancelled_unconfirmed", 0),
+            "held": r.get("held", 0),
             "target_count": len(r["ids"])}
 
 
 def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks=False,
               sender_template_id=None, staff_id=None, allow_no_solicit=False,
               sender_override=None, cancel_recent_days=None, skip_already_sent=False,
-              stop_check=None, skip_attempted_since=None):
+              stop_check=None, skip_attempted_since=None, retry_holds=False):
     """保存済みリストからフォーム自動送信キャンペーンを作り、既存のsenders.send_campaign()
     にそのまま委譲する。can_contact()・冪等性・FormSenderのペーシング上限はすべて
     send_campaign()側の仕組みがそのまま効く(ここで独自の送信経路は作らない)。
@@ -844,13 +855,15 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
 
     # フォーム自動送信は問い合わせURLが分かっている企業にしか行えない。
     # 絞り込みは画面の件数表示と共有する(_sendable_member_ids)
-    picked = _sendable_member_ids(con, list_id, cancel_recent_days)
+    picked = _sendable_member_ids(con, list_id, cancel_recent_days, retry_holds=retry_holds)
     if not picked["with_contact_url"]:
         return {"error": "このリストにはフォーム送信可能な企業がありません"
                           "(問い合わせURLが確認できた企業のみ送信対象になります)"}
     cancelled_recent = picked["cancelled_recent"]
     members = [{"id": i} for i in picked["ids"]]
     if not members:
+        if retry_holds:
+            return {"error": "このリストに保留中の会社はありません"}
         return {"error": f"過去送信対象キャンセルにより、送信可能な企業がありません"
                           f"(直近{cancel_recent_days}日以内に送信済み)"}
 
@@ -927,17 +940,25 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
                                    company_ids=[m["id"] for m in members],
                                    stop_check=stop_check,
                                    skip_attempted_since=skip_attempted_since)
+    holds = {"held": 0, "released": 0}
     if not dry_run:
         db.sync_target_list_member_status(con, list_id, campaign_id, step=1)
+        # 送信保留の更新(T136): 構造的に送れなかった会社は保留に、届いた会社は保留から外す
+        try:
+            holds = db.apply_send_holds(con, list_id, now2)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [送信保留] 更新に失敗しました(送信結果には影響しません): {e}")
         _notify_completion(con, tenant_id, lst["name"], len(members), stats,
                            list_id=list_id, since=now2,
                            stopped_by=stats.get("stopped_by_request"),
-                           resumed=bool(skip_attempted_since or skip_already_sent))
+                           resumed=bool(skip_attempted_since or skip_already_sent),
+                           retry_holds=retry_holds, holds=holds)
     return {"campaign_id": campaign_id, "target_count": len(members),
             "dry_run": dry_run, "stats": stats, "cancelled_recent": cancelled_recent,
             # 停止要求で途中で抜けたなら 'PAUSE' / 'CANCEL'(T127)。呼び出し側が予約の
             # 最終状態を決めるのに使う
-            "stopped_by": stats.get("stopped_by_request")}
+            "stopped_by": stats.get("stopped_by_request"),
+            "holds": holds}
 
 
 # 送れなかった理由(form_navigator.pyのreason_code)の日本語訳。完了通知メール用
@@ -984,12 +1005,15 @@ def failure_reason_counts(con, tenant_id, list_id, since=None, limit=8):
             for r in con.execute(q, params).fetchall()]
 
 
-def completion_message(list_name, target_count, stats, reasons=(), stopped_by=None, resumed=False):
+def completion_message(list_name, target_count, stats, reasons=(), stopped_by=None, resumed=False,
+                       retry_holds=False, holds=None):
     """完了通知の件名と本文を組み立てる(送信はしない。テストしやすいよう分けた。T134)。
 
     stopped_by: 'PAUSE' / 'CANCEL' なら「完了」ではなく「停止/取り消し」の通知にする。
     9/24に一時停止しただけで「送信完了: 成功0」のメールが届き、紛らわしかった。
-    resumed: 停止や再起動のあとの続きの実行。数字はこの実行分だけなので、その旨を添える。"""
+    resumed: 停止や再起動のあとの続きの実行。数字はこの実行分だけなので、その旨を添える。
+    retry_holds: 送信保留中の会社だけに送る定期的な再試行(T136)。件名に添える。
+    holds: 今回の結果による保留の更新 {"held": n, "released": n}。本文に添える。"""
     blocked_lines = "".join(f"  内訳 - {reason}: {n}\n"
                              for reason, n in (stats.get("blocked_by_reason") or {}).items())
     reason_lines = ""
@@ -1007,9 +1031,18 @@ def completion_message(list_name, target_count, stats, reasons=(), stopped_by=No
         subject = f"【ヒラケル】送信を取り消しました: {list_name}"
         head = (f"リスト「{list_name}」への送信を途中で取り消しました。\n"
                 f"取り消し前に送った分はそのままです。続きは送りません。\n\n")
+    elif retry_holds:
+        subject = f"【ヒラケル】送信完了(保留の再試行): {list_name}"
+        head = (f"リスト「{list_name}」で送信保留中だった会社(サイト閉鎖・フォーム無し等)への"
+                f"定期的な再試行が完了しました。届いた会社は保留から外れます。\n\n")
     else:
         subject = f"【ヒラケル】送信完了: {list_name}"
         head = f"リスト「{list_name}」への送信が完了しました。\n\n"
+    hold_lines = ""
+    if holds and (holds.get("held") or holds.get("released")):
+        hold_lines = (f"送信保留: 新たに保留 {holds.get('held', 0)}社 / 保留から外れた {holds.get('released', 0)}社\n"
+                      f"  (サイト閉鎖・フォーム無し等で構造的に送れない会社は次回から除外し、"
+                      f"定期的に再試行します。画像認証は除外しません)\n")
     note = ("※ この予約は途中で停止(または再起動)して再開したものです。以下の数字は"
             "再開後に処理した分だけで、停止前に送った分は含みません。\n\n") if resumed else ""
     unsent = ("" if not stopped_by else
@@ -1023,12 +1056,13 @@ def completion_message(list_name, target_count, stats, reasons=(), stopped_by=No
             f"{blocked_lines}"
             f"配信停止: {stats.get('suppressed', 0)}\n"
             f"Kill Switchで中止: {stats.get('stopped', 0)}\n"
+            f"{hold_lines}"
             f"{reason_lines}")
     return subject, body
 
 
 def _notify_completion(con, tenant_id, list_name, target_count, stats, list_id=None, since=None,
-                       stopped_by=None, resumed=False):
+                       stopped_by=None, resumed=False, retry_holds=False, holds=None):
     """送信完了を担当者へメール通知する(MIKOMERU同等の完了通知)。
     senders.MailSenderがResend経由で実送信する(HANDOFF.md T32/T80)。
     RESEND_API_KEY未設定の環境ではNotImplementedErrorを投げるだけになるが、
@@ -1054,7 +1088,8 @@ def _notify_completion(con, tenant_id, list_name, target_count, stats, list_id=N
             print(f"  [完了通知] 理由の集計に失敗しました(通知は続行): {e}")
             reasons = []
     subject, body = completion_message(list_name, target_count, stats, reasons,
-                                       stopped_by=stopped_by, resumed=resumed)
+                                       stopped_by=stopped_by, resumed=resumed,
+                                       retry_holds=retry_holds, holds=holds)
     default_sender = senders.Sender(name="ヒラケル", email="info@ashibase.jp",
                                      address="", optout_url=C.OPTOUT_URL)
     mailer = senders.MailSender(con, dry_run=False)

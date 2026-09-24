@@ -196,6 +196,20 @@ CREATE TABLE IF NOT EXISTS autofill_queue (
 -- can_contact()・Kill Switch・冪等性等のガードは変更なしでそのまま効く
 -- (scheduled_send_cli.pyがcronから定期的にPENDINGかつ期限到来分を拾って
 -- send_list()を呼ぶだけで、新しい送信経路を作らない)。
+-- 送信保留(T136。2026-09-24)。相手サイト側の事情で構造的に送れない会社
+-- (ドメイン消滅・フォーム無し・採用専用など。CAPTCHAは除く=人が解けば送れる)を
+-- 通常の送信から外し、定期的に試して届いたら外す。サイト側の事情なのでテナントを
+-- 問わず会社単位。released_at が NULL のものが「保留中」。
+CREATE TABLE IF NOT EXISTS send_holds (
+  company_id INTEGER PRIMARY KEY,
+  reason_code TEXT NOT NULL,        -- 保留の理由(form_send_log.reason_code)
+  held_at TEXT NOT NULL,            -- 保留にした日時
+  last_checked_at TEXT,             -- 最後に送信を試した日時
+  check_count INTEGER DEFAULT 0,    -- 保留後に試した回数
+  released_at TEXT,                 -- 外した日時(届いた / 手動)
+  release_note TEXT
+);
+
 CREATE TABLE IF NOT EXISTS scheduled_sends (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tenant_id INTEGER NOT NULL,
@@ -562,6 +576,8 @@ def migrate(con):
         # 見て、要求があればそれ以上の会社へ送らずに抜ける。それまでRUNNINGの予約を
         # 止める正規の手段が無く、9/23はSSHでコンテナを止めてDBを直接書き換えた
         ("scheduled_sends", "stop_requested", "TEXT"),
+        # 1なら「保留中の会社だけ」に送る予約(T136。定期的な再試行用。通常の予約は保留を除外する)
+        ("scheduled_sends", "retry_holds", "INTEGER DEFAULT 0"),
         # T29: フォーム送信のペーシングを「全テナント合算の単一プール」から
         # 「テナントごとの公平な取り分」へ再設計。NULL=config.pyの
         # FORM_MAX_PER_TENANT_PER_*_DEFAULTを使う(=契約プラン未設定の
@@ -990,6 +1006,95 @@ def list_scheduled_sends(con, tenant_id, list_id=None):
     return rows
 
 
+# 送信結果からそのまま保留にする理由(T136)。相手サイト側の事情で、こちらのコードを
+# 直しても届かないもの。**CAPTCHA は含めない**(人が画像認証を解けば送れるので、
+# 手動フォローの対象として通常の対象に残す。ユーザー指示 2026-09-24)。
+# 弾かれた(error_message_detected)・必須欄を埋められない(required_field_unfilled)・
+# 未確認(success_not_confirmed)はこちら側で直せる余地があるので保留にしない。
+HOLD_REASONS = frozenset({
+    "goto_failed", "contact_page_unreachable", "invalid_certificate",   # 開けない
+    "form_not_found", "contact_link_not_found",                          # フォームが無い
+    "recruit_only_form", "support_only_form",                            # 営業を受け付けない窓口
+    "mailto_form", "bot_challenge_detected",                             # 押しても送られない
+})
+# 届いた(可能性がある)と見なして保留を外す条件
+_RELEASE_OK = "(status='SUCCESS' OR reason_code='success_not_confirmed')"
+
+
+def apply_send_holds(con, list_id, since):
+    """送信1回ぶん(list_id、since以降)の結果から保留を更新する(T136)。
+    会社ごとの**最後の**試行を見て、HOLD_REASONS なら保留にする(既に保留なら試行回数を
+    増やす)。届いた(SUCCESS / 完了未確認)なら保留を外す。戻り値 {"held": n, "released": n}。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    rows = con.execute("""SELECT f.company_id, f.status, f.reason_code FROM form_send_log f
+        JOIN (SELECT company_id, MAX(id) mid FROM form_send_log
+              WHERE list_id=? AND started_at>=? GROUP BY company_id) last
+          ON last.mid = f.id""", (list_id, since)).fetchall()
+    held = released = 0
+    for r in rows:
+        ok = r["status"] == "SUCCESS" or r["reason_code"] == "success_not_confirmed"
+        if ok:
+            cur = con.execute("""UPDATE send_holds SET released_at=?, release_note='届いたため自動で解除'
+                WHERE company_id=? AND released_at IS NULL""", (now, r["company_id"]))
+            released += cur.rowcount
+        elif r["reason_code"] in HOLD_REASONS:
+            cur = con.execute("""UPDATE send_holds SET reason_code=?, last_checked_at=?,
+                check_count=check_count+1 WHERE company_id=? AND released_at IS NULL""",
+                (r["reason_code"], now, r["company_id"]))
+            if not cur.rowcount:
+                # 過去に解除された行があれば作り直す(PRIMARY KEY なので上書き)
+                con.execute("""INSERT INTO send_holds (company_id, reason_code, held_at, last_checked_at, check_count)
+                    VALUES (?,?,?,?,0)
+                    ON CONFLICT(company_id) DO UPDATE SET reason_code=excluded.reason_code,
+                        held_at=excluded.held_at, last_checked_at=excluded.last_checked_at,
+                        check_count=0, released_at=NULL, release_note=NULL""",
+                    (r["company_id"], r["reason_code"], now, now))
+                held += 1
+    con.commit()
+    return {"held": held, "released": released}
+
+
+def active_hold_ids(con, ids):
+    """与えた会社IDのうち保留中のもの。"""
+    if not ids:
+        return set()
+    ph = ",".join("?" * len(ids))
+    return {r["company_id"] for r in con.execute(
+        f"SELECT company_id FROM send_holds WHERE released_at IS NULL AND company_id IN ({ph})",
+        list(ids)).fetchall()}
+
+
+def release_send_hold(con, company_id, note="手動で解除"):
+    cur = con.execute("""UPDATE send_holds SET released_at=?, release_note=?
+        WHERE company_id=? AND released_at IS NULL""",
+        (datetime.now().isoformat(timespec="seconds"), note, company_id))
+    con.commit()
+    return cur.rowcount > 0
+
+
+def hold_counts(con, list_id=None):
+    """保留中の会社数を理由別に。list_id を渡すとそのリストの会社だけ。"""
+    q = """SELECT h.reason_code, COUNT(*) n FROM send_holds h"""
+    p = []
+    if list_id is not None:
+        q += " JOIN target_list_members m ON m.company_id = h.company_id AND m.list_id=?"
+        p.append(list_id)
+    q += " WHERE h.released_at IS NULL GROUP BY h.reason_code ORDER BY n DESC"
+    return [(r["reason_code"], r["n"]) for r in con.execute(q, p).fetchall()]
+
+
+def lists_with_holds_due(con, older_than_days):
+    """保留中の会社を持つリストのうち、再試行の期限(最後に試してから older_than_days 日)が
+    来た会社が1社以上あるものと、その社数。定期的な再試行(send_holds_cli retry --all)用。"""
+    cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat(timespec="seconds")
+    return [dict(r) for r in con.execute("""SELECT m.list_id, tl.tenant_id, tl.name, COUNT(*) n
+        FROM send_holds h
+        JOIN target_list_members m ON m.company_id = h.company_id
+        JOIN target_lists tl ON tl.id = m.list_id AND tl.deleted_at IS NULL
+        WHERE h.released_at IS NULL AND COALESCE(h.last_checked_at, h.held_at) < ?
+        GROUP BY m.list_id ORDER BY m.list_id""", (cutoff,)).fetchall()]
+
+
 STOP_MODES = ("PAUSE", "CANCEL")
 # 停止要求が終了時にどの状態になるか
 _STOP_FINAL_STATUS = {"PAUSE": "PAUSED", "CANCEL": "CANCELLED"}
@@ -1023,8 +1128,9 @@ def request_stop_scheduled_send(con, tenant_id, scheduled_id, mode):
     return cur.rowcount > 0
 
 
-def clone_scheduled_send(con, src_id, cancel_recent_days=None, scheduled_at=None):
+def clone_scheduled_send(con, src_id, cancel_recent_days=None, scheduled_at=None, retry_holds=False):
     """過去の予約(件名・本文・送信元・各設定)を複製して、新しいPENDINGの予約を作る(T131)。
+    retry_holds=True なら「保留中の会社だけ」に送る予約になる(T136。定期的な再試行用)。
 
     パソコンから離れていて本部画面を開けないとき、「前回と同じ内容で送り直す」を
     GitHub Actions(ops-write の send-clone、要承認)から始められるようにするため。
@@ -1040,13 +1146,13 @@ def clone_scheduled_send(con, src_id, cancel_recent_days=None, scheduled_at=None
     cur = con.execute("""INSERT INTO scheduled_sends
         (tenant_id, list_id, subject, body, dry_run, scheduled_at, track_clicks,
          sender_template_id, allow_no_solicit, cancel_recent_days, sender_override_json,
-         status, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,'PENDING',?)""",
+         status, created_at, retry_holds)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,'PENDING',?,?)""",
         (src["tenant_id"], src["list_id"], src["subject"], src["body"], src["dry_run"],
          scheduled_at or datetime.now().isoformat(timespec="seconds"),
          src.get("track_clicks") or 0, src.get("sender_template_id"),
          src.get("allow_no_solicit") or 0, days, src.get("sender_override_json"),
-         datetime.now().isoformat(timespec="seconds")))
+         datetime.now().isoformat(timespec="seconds"), 1 if retry_holds else 0))
     con.commit()
     return cur.lastrowid
 
@@ -1082,7 +1188,7 @@ def due_scheduled_sends(con, now_iso):
     """期限が来たPENDINGを取得する。scheduled_send_cli.pyがcronから呼ぶ。"""
     rows = con.execute("""SELECT id, tenant_id, list_id, subject, body, dry_run, track_clicks,
             sender_template_id, allow_no_solicit, cancel_recent_days, sender_override_json, attempts,
-            resumed, created_at
+            resumed, created_at, retry_holds
         FROM scheduled_sends WHERE status='PENDING' AND scheduled_at<=?
         ORDER BY scheduled_at""", (now_iso,)).fetchall()
     return [dict(r) for r in rows]

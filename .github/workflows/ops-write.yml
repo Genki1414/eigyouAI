@@ -37,6 +37,8 @@ on:
           - set-env          # 許可した設定値の変更(変更後に再起動)
           - exec             # 任意コマンド(server-exec環境の承認が必要)
           - send-clone       # 過去の予約(scheduled_id)を複製して本番送信を始める(承認が必要)
+          - send-holds-backfill  # 過去の送信結果からリスト(list_id)の送信保留を作る(送信はしない。T136)
+          - send-holds-retry     # リスト(list_id)の保留中の会社だけに送り直す予約を作る(承認が必要。T136)
       key:
         description: "set-envのときの設定名(例: FORM_SEND_CONCURRENCY)"
         required: false
@@ -47,6 +49,10 @@ on:
         type: string
       scheduled_id:
         description: "send-stop / send-cancel / send-resume / send-clone のときの予約番号(queueで見える #番号)"
+        required: false
+        type: string
+      list_id:
+        description: "send-holds-backfill / send-holds-retry のときのリスト番号(ops-readonly の send-targets で見える list)"
         required: false
         type: string
       cancel_recent_days:
@@ -66,7 +72,7 @@ on:
 jobs:
   # ── 決め打ちの操作(承認なしで実行。任意コマンドは含まない) ──
   change:
-    if: inputs.action != 'exec' && inputs.action != 'send-clone'
+    if: inputs.action != 'exec' && inputs.action != 'send-clone' && inputs.action != 'send-holds-retry'
     runs-on: ubuntu-latest
     env:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -77,6 +83,7 @@ jobs:
       ENV_KEY: ${{ inputs.key }}
       ENV_VALUE: ${{ inputs.value }}
       SCHEDULED_ID: ${{ inputs.scheduled_id }}
+      LIST_ID: ${{ inputs.list_id }}
     steps:
       - name: Validate inputs
         run: |
@@ -128,6 +135,15 @@ jobs:
               SUB="${ACTION#send-}"
               REMOTE="cd '$DEPLOY_PATH'
                 $C exec -T sender python3 scheduled_send_cli.py $SUB $SCHEDULED_ID" ;;
+            # 送信保留の作成(T136)。過去30日の送信結果から、構造的に送れなかった会社を
+            # 保留にする(送信はしない。保留は次の送信から除外され、月1回だけ再試行される)
+            send-holds-backfill)
+              case "$LIST_ID" in
+                "") echo "::error::list_id を指定してください"; exit 1 ;;
+                *[!0-9]*) echo "::error::list_id は数字だけ"; exit 1 ;;
+              esac
+              REMOTE="cd '$DEPLOY_PATH'
+                $C exec -T sender python3 send_holds_cli.py backfill --list $LIST_ID --days 30" ;;
             restart-all)
               REMOTE="cd '$DEPLOY_PATH'; $C up -d; sleep 3; $C ps" ;;
             show-env)
@@ -205,7 +221,7 @@ jobs:
   # 「過去送信対象キャンセル」の日数は上書きできる(既定30。届いた可能性のある会社を除外)。
   # 何社に送るかは事前に ops-readonly の send-targets で確かめること。
   send:
-    if: inputs.action == 'send-clone'
+    if: inputs.action == 'send-clone' || inputs.action == 'send-holds-retry'
     runs-on: ubuntu-latest
     environment: server-exec        # ← exec と同じ承認ゲート(本番送信が始まるため)
     permissions:
@@ -215,8 +231,10 @@ jobs:
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
       DEPLOY_PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      ACTION: ${{ inputs.action }}
       SCHEDULED_ID: ${{ inputs.scheduled_id }}
       CANCEL_DAYS: ${{ inputs.cancel_recent_days }}
+      LIST_ID: ${{ inputs.list_id }}
     steps:
       - name: Verify approval gate is configured
         env:
@@ -234,6 +252,14 @@ jobs:
 
       - name: Validate inputs
         run: |
+          if [ "$ACTION" = "send-holds-retry" ]; then
+            case "$LIST_ID" in
+              "") echo "::error::list_id を指定してください"; exit 1 ;;
+              *[!0-9]*) echo "::error::list_id は数字だけ"; exit 1 ;;
+            esac
+            echo "送信保留の再試行: リスト $LIST_ID(保留中の会社だけに、直近の本番予約と同じ文面で送る)"
+            exit 0
+          fi
           case "$SCHEDULED_ID" in
             "") echo "::error::scheduled_id(複製元の予約番号)を指定してください"; exit 1 ;;
             *[!0-9]*) echo "::error::scheduled_id は数字だけ"; exit 1 ;;
@@ -255,7 +281,14 @@ jobs:
 
       - name: Start the resend over SSH
         run: |
-          REMOTE="cd '$DEPLOY_PATH'
-            docker compose -f deploy/docker-compose.yml exec -T sender \
-              python3 scheduled_send_cli.py clone $SCHEDULED_ID --cancel-recent-days $CANCEL_DAYS"
+          if [ "$ACTION" = "send-holds-retry" ]; then
+            # 保留中の会社だけに送る予約を作る(T136)。--older-than-days 0 = 期限を待たず今すぐ
+            REMOTE="cd '$DEPLOY_PATH'
+              docker compose -f deploy/docker-compose.yml exec -T sender \
+                python3 send_holds_cli.py retry --list $LIST_ID --older-than-days 0"
+          else
+            REMOTE="cd '$DEPLOY_PATH'
+              docker compose -f deploy/docker-compose.yml exec -T sender \
+                python3 scheduled_send_cli.py clone $SCHEDULED_ID --cancel-recent-days $CANCEL_DAYS"
+          fi
           ssh -i ~/.ssh/id_ed25519 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$REMOTE"

@@ -30,6 +30,13 @@ TZ=Asia/Tokyo
 # いる場合の保険として手動で `docker compose run --rm sender python3 scheduled_send_cli.py run-due`
 # を実行できる(取り込みはアトミックなので二重実行にはならない)。
 
+# 送信保留の定期的な再試行(T136): 毎月1日の8時に、保留中(サイト閉鎖・フォーム無し等で
+# 構造的に送れなかった)会社のうち最後に試してから30日経ったものだけに送る予約を作る
+# (直近の本番予約の複製。件名・本文は前回と同じ)。実際の送信はsenderサービスが
+# キューから拾って9時以降に行う。届いた会社はその時点で保留から外れる。
+# 送信自体はここでは起きない(予約を作るだけ)。止めたいときはこの行をコメントアウト。
+0 8 1 * * cd /app && python3 send_holds_cli.py retry --all --older-than-days 30 >> /app/out/cron.log 2>&1
+
 # 学習: 週次。昇格ゲートを通ればV2に切り替わる
 0 3 * * 1 cd /app && python3 learn.py >> /app/out/cron.log 2>&1
 

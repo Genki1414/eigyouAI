@@ -4675,6 +4675,48 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T136. 送信保留 — 構造的に送れない会社を次回から外し、定期的に試して届いたら戻す(2026-09-24)
+
+**経緯**: 四国2,975社の累計は「届いた可能性 72%」で頭打ち。残りの大半はサイト閉鎖・
+問い合わせフォームが無い・採用専用窓口・mailto: だけ・ボット検知ページなど**相手側の事情で
+構造的に送れない**会社で、送り直すたびに同じ数百社を無駄に試していた。ユーザー指示:
+「今回のリストで画像認証以外は最初から送信除外して欲しい。そして定期的に送信を試みて
+送信出来たタイミングで送信除外から外す」。**画像認証(captcha_detected)は保留にしない**
+(人が解けば送れるので手動フォローの対象として通常の対象に残す)。
+
+**仕組み**:
+- `send_holds` テーブル(会社単位。サイト側の事情なのでテナントを問わない。`released_at IS NULL`
+  が保留中)。`db.HOLD_REASONS` = goto_failed / contact_page_unreachable / invalid_certificate /
+  form_not_found / contact_link_not_found / recruit_only_form / support_only_form / mailto_form /
+  bot_challenge_detected。こちらのコードで直せる余地がある理由(弾かれた・必須欄未入力・
+  完了未確認・欄が埋まらない・送信ボタン無し)は保留にしない
+- `db.apply_send_holds(con, list_id, since)`: 送信1回ぶんの結果から、会社ごとの**最後の**試行を
+  見て保留を作る/更新する(既に保留なら理由更新+試行回数+1)。SUCCESS または
+  success_not_confirmed なら保留を外す。`target_lists.send_list()` が本番送信の完了後に呼ぶ
+  (完了通知メールに「送信保留: 新たに保留N社 / 保留から外れたM社」が入る)
+- `_sendable_member_ids(..., retry_holds=False)`: 通常の送信は保留中を除外(画面の件数表示に
+  「送信保留中N件を除外」)。`retry_holds=True` なら逆に**保留中の会社だけ**が対象
+- 定期的な再試行: `scheduled_sends.retry_holds`(1なら保留中だけに送る予約)。
+  `send_holds_cli.py retry --list N | --all [--older-than-days 30]` が、そのリストの直近の本番予約
+  (件名・本文・送信元が同じ)を `db.clone_scheduled_send(..., retry_holds=True)` で複製して作る。
+  最後に試してから指定日数経った保留が1社も無ければ作らない。未完了の再試行予約があれば作らない。
+  `deploy/crontab` に **毎月1日 8:00 `retry --all --older-than-days 30`**(予約を作るだけ。送信は
+  sender サービスがキューから実行)。完了通知の件名は「送信完了(保留の再試行)」
+- CLI: `send_holds_cli.py list [--list N]` / `backfill --list N [--days 30]`(過去の送信結果から保留を
+  作る。仕組みを入れる前に送ったリストへ1回)/ `release COMPANY_ID`
+- ops-readonly `send-holds`(理由別の保留数)。ops-write `send-holds-backfill`(+ `list_id`。送信
+  しないので承認不要)/ `send-holds-retry`(+ `list_id`。本番送信が始まるので `send` ジョブ=承認
+  必要。期限を待たず今すぐ)
+
+**テスト**(`api.py test` に15件): 画像認証は保留にならない / 件数表示と送信対象から除外 /
+retry_holds は保留中だけ / 再試行失敗で試行回数+1 / 届いたら解除(完了未確認も) / 解除後の
+再保留 / 手動解除 / 30日期限の判定 / retry_holds=1 の複製 / 通知文面。api 629/629、
+test_pipeline 42/42(`run.py all --demo` で初期化後)、senders・concurrency・storage 通過。
+
+**運用手順(四国リスト=list 10)**: デプロイ後、ops-write `send-holds-backfill` に `list_id=10`
+→ ops-readonly `send-holds` で理由別の保留数を確認。次回の送り直し(send-clone)から自動で
+除外される。再試行は毎月1日に自動、手動なら `send-holds-retry`(承認)。
+
 ### T135. ラベルが th/dt/行ブロックの見出しにしか無い欄を読む(2026-09-24)
 
 **経緯**: 予約#5(T133版で893社に送り直し)の途中経過で、弾かれた欄から `checkbox-*` は

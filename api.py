@@ -4857,6 +4857,112 @@ def self_test(port=8899):
       "送信完了" in subj and "再開後に処理した分" in body and "送信成功: 47" in body)
     subj, body = TL.completion_message("四国", 959, {"sent": 47, "failed": 700})
     t("通常の完了通知は従来どおり", "送信完了" in subj and "再開" not in body and "未送信" not in body)
+
+    # ── 送信保留(T136): 構造的に送れない会社を次回から除外し、定期的に試して届いたら外す ──
+    # ユーザー指示(2026-09-24)「今回のリストで画像認証以外は最初から送信除外して欲しい
+    # そして定期的に送信を試みて送信出来たタイミングで送信除外から外す」
+    hold_ids = [999981, 999982, 999983]
+    con.execute("DELETE FROM send_holds WHERE company_id IN (999981, 999982, 999983)")
+    con.execute("DELETE FROM form_send_log WHERE company_id IN (999981, 999982, 999983)")
+    con.execute("DELETE FROM companies WHERE id IN (999981, 999982, 999983)")
+    con.execute("""INSERT INTO companies (id, name, contact_url) VALUES
+        (999981, 'テスト_保留_サイト閉鎖', 'https://example.co.jp/contact/'),
+        (999982, 'テスト_保留_画像認証', 'https://example.co.jp/contact/'),
+        (999983, 'テスト_保留_成功', 'https://example.co.jp/contact/')""")
+    now_h = datetime.now().isoformat(timespec="seconds")
+    cur = con.execute("""INSERT INTO target_lists (tenant_id,name,source,company_count,created_at)
+        VALUES (?,?,?,?,?)""", (tid_a, "テストA_送信保留", "filter", 3, now_h))
+    hold_list_id = cur.lastrowid
+    con.executemany("""INSERT INTO target_list_members (list_id, company_id, send_status,
+        created_at, updated_at) VALUES (?,?,'PENDING',?,?)""",
+        [(hold_list_id, cid, now_h, now_h) for cid in hold_ids])
+    since_h = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    con.executemany("""INSERT INTO form_send_log (company_id, tenant_id, list_id, started_at, status,
+        reason_code, submit_attempted) VALUES (?,?,?,?,?,?,?)""", [
+        (999981, tid_a, hold_list_id, now_h, "FAILED_UNSUPPORTED", "goto_failed", 0),
+        (999982, tid_a, hold_list_id, now_h, "FAILED_UNSUPPORTED", "captcha_detected", 0),
+        (999983, tid_a, hold_list_id, now_h, "SUCCESS", "success_text_matched", 1)])
+    con.commit()
+    hr = db.apply_send_holds(con, hold_list_id, since_h)
+    t("送信結果から「ページを開けない」の会社だけが保留になる(画像認証は保留にしない)",
+      hr == {"held": 1, "released": 0}
+      and db.active_hold_ids(con, hold_ids) == {999981}, f"r={hr}")
+    cnt_h = TL.count_send_targets(con, tid_a, hold_list_id, cancel_recent_days=None)
+    t("画面の件数表示: 保留中1社が除外され held=1 が出る",
+      cnt_h and cnt_h.get("held") == 1 and cnt_h.get("target_count") == 2, f"cnt={cnt_h}")
+    res_h = TL.send_list(con, tid_a, hold_list_id, "件名", "本文", dry_run=True)
+    t("通常の送信は保留中の会社を対象から外す(2社)",
+      res_h is not None and "error" not in res_h and res_h.get("target_count") == 2, f"res={res_h}")
+    picked_r = TL._sendable_member_ids(con, hold_list_id, None, retry_holds=True)
+    t("retry_holds(定期的な再試行)は逆に保留中の会社だけを対象にする",
+      picked_r["ids"] == [999981], f"ids={picked_r['ids']}")
+    res_r = TL.send_list(con, tid_a, hold_list_id, "件名", "本文", dry_run=True, retry_holds=True)
+    t("send_list(retry_holds=True) は保留中の1社だけに送る",
+      res_r is not None and "error" not in res_r and res_r.get("target_count") == 1, f"res={res_r}")
+    t("保留中の社数を理由別に数えられる(リスト単位)",
+      db.hold_counts(con, hold_list_id) == [("goto_failed", 1)])
+    # 2回目も送れなかった → 保留のまま試行回数が増える
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, started_at, status,
+        reason_code, submit_attempted) VALUES (999981, ?, ?, ?, 'FAILED_UNSUPPORTED', 'form_not_found', 0)""",
+        (tid_a, hold_list_id, now_h))
+    con.commit()
+    hr2 = db.apply_send_holds(con, hold_list_id, since_h)
+    row_h = con.execute("SELECT * FROM send_holds WHERE company_id=999981").fetchone()
+    t("再試行でも送れなければ保留のまま(理由を更新し、試行回数+1)",
+      hr2 == {"held": 0, "released": 0} and row_h["reason_code"] == "form_not_found"
+      and row_h["check_count"] == 1 and row_h["released_at"] is None, f"r={hr2} row={dict(row_h)}")
+    # 届いた → 保留から外れる
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, started_at, status,
+        reason_code, submit_attempted) VALUES (999981, ?, ?, ?, 'FAILED_UNSUPPORTED', 'success_not_confirmed', 1)""",
+        (tid_a, hold_list_id, now_h))
+    con.commit()
+    hr3 = db.apply_send_holds(con, hold_list_id, since_h)
+    t("送信できた(完了未確認も含む)時点で保留から外れる",
+      hr3 == {"held": 0, "released": 1} and db.active_hold_ids(con, hold_ids) == set()
+      and TL.count_send_targets(con, tid_a, hold_list_id).get("held") == 0, f"r={hr3}")
+    # また閉鎖した → 保留に戻る(解除済みの行を作り直す)
+    con.execute("""INSERT INTO form_send_log (company_id, tenant_id, list_id, started_at, status,
+        reason_code, submit_attempted) VALUES (999981, ?, ?, ?, 'FAILED_UNSUPPORTED', 'goto_failed', 0)""",
+        (tid_a, hold_list_id, now_h))
+    con.commit()
+    hr4 = db.apply_send_holds(con, hold_list_id, since_h)
+    row_h = con.execute("SELECT * FROM send_holds WHERE company_id=999981").fetchone()
+    t("解除後にまた送れなくなれば保留に戻る(試行回数は0から)",
+      hr4 == {"held": 1, "released": 0} and row_h["released_at"] is None and row_h["check_count"] == 0)
+    t("手動で保留を外せる", db.release_send_hold(con, 999981, "テスト") is True
+      and db.release_send_hold(con, 999981) is False)
+    # 定期的な再試行の予約: 直近の本番予約の複製で retry_holds=1
+    con.execute("UPDATE send_holds SET released_at=NULL, release_note=NULL, last_checked_at=? WHERE company_id=999981",
+                ((datetime.now() - timedelta(days=40)).isoformat(timespec="seconds"),))
+    con.commit()
+    due_lists = db.lists_with_holds_due(con, 30)
+    t("最後に試してから30日経った保留を持つリストが再試行の対象に出る",
+      any(d["list_id"] == hold_list_id and d["n"] == 1 for d in due_lists), f"due={due_lists}")
+    t("期限が来ていなければ出ない(45日)",
+      all(d["list_id"] != hold_list_id for d in db.lists_with_holds_due(con, 45)))
+    sid_h = db.create_scheduled_send(con, tid_a, hold_list_id, "保留元の件名", "本文", False, future_at)
+    sid_hr = db.clone_scheduled_send(con, sid_h, cancel_recent_days=0, retry_holds=True)
+    row_hr = con.execute("SELECT * FROM scheduled_sends WHERE id=?", (sid_hr,)).fetchone()
+    t("複製で retry_holds=1 の予約(保留中の会社だけに送る)が作れる",
+      row_hr["retry_holds"] == 1 and row_hr["subject"] == "保留元の件名" and row_hr["status"] == "PENDING")
+    t("ワーカーが受け取る due_scheduled_sends() に retry_holds が含まれる",
+      any(x["id"] == sid_hr and x.get("retry_holds") == 1 for x in db.due_scheduled_sends(
+          con, (datetime.now() + timedelta(seconds=2)).isoformat(timespec="seconds"))))
+    subj, body = TL.completion_message("四国", 150, {"sent": 12, "failed": 138}, [],
+                                       retry_holds=True, holds={"held": 0, "released": 12})
+    t("再試行の完了通知は件名に「(保留の再試行)」、本文に保留から外れた社数が入る",
+      "(保留の再試行)" in subj and "保留から外れた 12社" in body, f"subj={subj}")
+    subj, body = TL.completion_message("四国", 900, {"sent": 40, "failed": 800}, [], holds={"held": 300, "released": 0})
+    t("通常の完了通知にも今回新たに保留にした社数が入る", "新たに保留 300社" in body)
+    db.request_stop_scheduled_send(con, tid_a, sid_h, "CANCEL")
+    db.request_stop_scheduled_send(con, tid_a, sid_hr, "CANCEL")
+    con.execute("DELETE FROM send_holds WHERE company_id IN (999981, 999982, 999983)")
+    con.execute("DELETE FROM form_send_log WHERE company_id IN (999981, 999982, 999983)")
+    con.execute("DELETE FROM touches WHERE company_id IN (999981, 999982, 999983)")  # ドライランが作る
+    con.execute("DELETE FROM target_list_members WHERE list_id=?", (hold_list_id,))
+    con.execute("DELETE FROM target_lists WHERE id=?", (hold_list_id,))
+    con.execute("DELETE FROM companies WHERE id IN (999981, 999982, 999983)")
+    con.commit()
     db.request_stop_scheduled_send(con, tid_a, sid_new, "CANCEL")
     db.request_stop_scheduled_send(con, tid_a, sid_src, "CANCEL")
 

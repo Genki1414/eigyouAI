@@ -2123,6 +2123,18 @@ def h_tenant_list_send(con, tenant_id, list_id, data, staff_id=None):
         # 数百件の実送信(1件数秒〜十数秒)を同期で行うと他テナントの操作まで止まり、前段の
         # nginxもタイムアウトしていた。ドライランは軽い(ブラウザを起動しない)のでこれまで
         # 通り同期で結果を返す(テスト・デモの体験用)。
+        # 二度押しガード(T138。2026-09-25、「送信する」を10秒差で2回押して同じリストの
+        # 予約#7・#8が並び、#8を手で取り消した)。同じリストに順番待ち/送信中の本番送信が
+        # あれば受け付けない。先の送信が終わってから(または停止・取り消してから)押し直す
+        dup = con.execute("""SELECT id, status FROM scheduled_sends
+            WHERE tenant_id=? AND list_id=? AND dry_run=0 AND status IN ('PENDING','RUNNING')
+            ORDER BY id DESC LIMIT 1""", (tenant_id, list_id)).fetchone()
+        if dup:
+            label = "順番待ち" if dup["status"] == "PENDING" else "送信中"
+            return 409, {"error": f"このリストには{label}の送信(受付番号 #{dup['id']})があります。"
+                                  "二重には受け付けません。別の内容で送りたいときは、その送信の完了"
+                                  "(または停止・取り消し)を待ってから押してください",
+                         "scheduled_id": dup["id"], "duplicate": True}
         now_iso = datetime.now().isoformat(timespec="seconds")
         sid = db.create_scheduled_send(con, tenant_id, list_id, subject, body, False, now_iso,
                                         track_clicks=track_clicks,
@@ -4461,6 +4473,15 @@ def self_test(port=8899):
     st, r = get_auth(f"/api/tenant/scheduled-sends?list_id={list_a_id}", token=key_a)
     t("テナントの予約一覧に順番待ち(PENDING)として出る",
       st == 200 and any(s["id"] == q_id and s["status"] == "PENDING" for s in r["scheduled"]))
+    # 二度押しガード(T138): 同じリストに順番待ち/送信中があれば409で、既存の受付番号を返す
+    st, r = post_auth(f"/api/tenant/lists/{list_a_id}/send",
+                      {"subject": "キュー件名", "body": "キュー本文", "dry_run": False}, token=key_a)
+    t("同じリストに順番待ちの本番送信があるうちは、もう一度押しても受け付けない(409、既存の受付番号)",
+      st == 409 and r.get("duplicate") is True and r.get("scheduled_id") == q_id
+      and "順番待ち" in (r.get("error") or ""))
+    t("二重に予約は作られていない",
+      con.execute("SELECT COUNT(*) FROM scheduled_sends WHERE list_id=? AND dry_run=0 "
+                  "AND status IN ('PENDING','RUNNING')", (list_a_id,)).fetchone()[0] == 1)
     t("claim: 1回目は取り込める(PENDING→RUNNING)", db.claim_scheduled_send(con, q_id, "worker-1") is True)
     t("claim: 2回目(別ワーカー)は取り込めない=二重実行しない", db.claim_scheduled_send(con, q_id, "worker-2") is False)
     con.execute("UPDATE scheduled_sends SET claimed_at='2000-01-01T00:00:00' WHERE id=?", (q_id,))

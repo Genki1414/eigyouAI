@@ -4720,6 +4720,14 @@ aborted」を残す / 応答8秒の CF7 → 延長して完了文言を確認 / 
 recaptcha_v3_rejected / 隠した acceptance に入れて invert・メルマガには触らない。全151件通過。
 senders.py test 通過。
 
+**予約#6 の最終結果(3,184社。09:17〜12:45 JST、T137 反映前のコード)**: 送信ボタンを押せた
+2,412社(75.8%) / **成功と記録 1,276社(40.1%)** / 完了を確認できない 704社(22.1%) / 弾かれた
+432社(13.6%) / 届いた可能性の上限 1,980社(62.2%)。理由別(試行ベース): goto_failed 261 /
+required_field_unfilled 194 / captcha 175 / form_not_found 140 / required_field_empty 77 /
+no_fields_filled 62。**送信保留は自動更新で 298社 → 606社**(このリストから +308社:
+form_not_found 141 / goto_failed 65 / contact_link_not_found 30 / invalid_certificate 25 /
+recruit_only 16 / bot 25 / support_only 4 / mailto 2)。画像認証175社は保留にしていない。
+
 **デプロイ**: 予約#6 の完了後(送信中はデプロイしない)。反映後、次の送信で
 `send-unconfirmed-hints` の「CF7状態」の内訳を見て、aborted が多ければ REST 遮断(相手側・
 構造的)、submitting が残るなら `FORM_PENDING_WAIT_MS` を伸ばす。

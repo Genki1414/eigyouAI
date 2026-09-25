@@ -981,6 +981,7 @@ REASON_LABELS_JA = {
     "goto_failed": "ページを開けない(閉鎖・通信エラー)",
     "unexpected_error": "想定外のエラー",
     "captcha_detected": "画像認証(CAPTCHA)がある",
+    "recaptcha_v3_rejected": "reCAPTCHA v3のスパム判定で弾かれた(手動なら送れる)",
     "bot_challenge_detected": "bot判定でブロック",
     "no_solicitation_notice": "営業お断りの記載がある",
     "recruit_only_form": "採用専用フォーム",

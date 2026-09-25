@@ -51,6 +51,12 @@ POST_SUBMIT_WAIT_MS = int(os.environ.get("FORM_POST_SUBMIT_WAIT_MS", "1200"))
 # サイト(mailto:フォーム、reCAPTCHA v3にサーバー側で黙って捨てられた等)だけ。
 OUTCOME_WAIT_MS = int(os.environ.get("FORM_OUTCOME_WAIT_MS", "5000"))
 OUTCOME_POLL_MS = 250
+# 送信ボタンを押したあと、フォームが「送信中」(Contact Form 7 の data-status=submitting、
+# form.submitting、aria-busy)を示している間だけ、OUTCOME_WAIT_MS を超えてここまで待つ
+# (T137。2026-09-25、人材系3,174社の送信で未確認が22.7%。メール送信に時間のかかる
+# サーバーでは応答が5秒に間に合わず、届いているのに「完了を確認できない」になっていた
+# 疑い)。送信中でないフォームには適用しない(何も起きないサイトで待ち続けない)
+PENDING_WAIT_MS = int(os.environ.get("FORM_PENDING_WAIT_MS", "20000"))
 # ページを開いてから入力欄が描画されるまでの待ち上限(2026-09-20)。入力欄が現れた
 # 時点で即座に抜けるため、フォームがあるサイトでの所要時間はほとんど増えない。
 # 逆に「そもそもフォームが無いページ」ではこの秒数だけ待つことになるので、
@@ -491,6 +497,10 @@ _ERROR_HINTS = (
     "再度お試しください", "もう一度お試しください", "確認して再度", "必須項目が入力", "必須項目を入力",
     "is required", "required field", "please fill", "please enter a valid",
 )
+
+# Contact Form 7 がスパム判定(reCAPTCHA v3 の低スコア等)・メール送信失敗のときに出す文言
+# (「メッセージの送信に失敗しました。後でまたお試しください。」)に当たる _ERROR_HINTS の要素
+_CF7_MAIL_FAILED_HINTS = ("送信に失敗しました", "送信できませんでした")
 
 # Cloudflare等のボット検証チャレンジ画面。CAPTCHAと同じく自動突破の対象にはしない
 _BOT_CHALLENGE_TITLE_HINTS = ["just a moment", "attention required", "checking your browser"]
@@ -1197,6 +1207,15 @@ _SILENT_SUBMIT_PROBE_JS = """() => {
   if (/hcaptcha\\.com/.test(srcs)) out.push('hCaptchaあり');
   if (/challenges\\.cloudflare\\.com/.test(srcs)) out.push('Turnstileあり');
   if (q('form[onsubmit]').length) out.push('form onsubmitあり');
+  // Contact Form 7 の送信状態(T137)。init=一度も送っていない(送信ボタンが無効のまま等) /
+  // submitting=応答待ち / aborted=送信要求そのものが失敗(REST APIがWAF等で遮断) /
+  // sent / failed / invalid / spam / unaccepted(同意未チェック)
+  const st = q('form.wpcf7-form').map(f => f.getAttribute('data-status') || '').filter(Boolean);
+  if (st.length) out.push('CF7状態: ' + Array.from(new Set(st)).join(','));
+  if (q('form input[type=submit][disabled], form button[type=submit][disabled], form .wpcf7-submit[disabled]').length)
+    out.push('送信ボタンが無効(disabled)');
+  if (q('.wpcf7-acceptance:not(.invert) input[type=checkbox]').some(e => !e.checked))
+    out.push('同意チェックが未入力');
   return out;
 }"""
 
@@ -1305,7 +1324,9 @@ def _wait_for_outcome(page, scope, before_url, values=None, budget_ms=None):
     渡したときだけ見る)。どれも起きなければ budget_ms(既定 OUTCOME_WAIT_MS)まで待つ。
     networkidle と違い、AJAX応答が遅れて描画されるサイトを捕まえられる
     (OUTCOME_WAIT_MS のコメント参照)。"""
-    deadline = time.monotonic() + (budget_ms if budget_ms is not None else OUTCOME_WAIT_MS) / 1000.0
+    started = time.monotonic()
+    deadline = started + (budget_ms if budget_ms is not None else OUTCOME_WAIT_MS) / 1000.0
+    extended = False
     # 「編集できる→できなくなった」という**変化**だけを見る。確認画面で2回目を押した
     # あとは最初から編集できないので、状態そのものを条件にすると即座に抜けてしまい、
     # 遅れて出る完了文言を見逃す(2026-09-23、2段階フォームのテストで発覚)
@@ -1330,11 +1351,26 @@ def _wait_for_outcome(page, scope, before_url, values=None, budget_ms=None):
         if was_editable and not _input_form_still_editable(scope, values):
             return text
         if time.monotonic() >= deadline:
+            # フォームが「送信中」を示しているなら応答待ちなので、PENDING_WAIT_MS まで
+            # 一度だけ延長する(T137)。CF7 は応答が返るまで data-status=submitting のまま
+            if not extended and _form_is_submitting(page):
+                extended = True
+                deadline = started + PENDING_WAIT_MS / 1000.0
+                continue
             return text
         try:
             page.wait_for_timeout(OUTCOME_POLL_MS)
         except Exception:  # noqa: BLE001
             return text
+
+
+def _form_is_submitting(page):
+    """フォームが送信処理中(応答待ち)を示しているか(T137)。"""
+    try:
+        return bool(page.evaluate("""() => !!document.querySelector(
+            'form.wpcf7-form[data-status=submitting], form.submitting, form[aria-busy=true]')"""))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _click(el):
@@ -1447,6 +1483,81 @@ def _check_required_radios(page):
         }""") or 0)
     except Exception:  # noqa: BLE001
         return 0
+
+
+def _is_cf7_acceptance(el):
+    """Contact Form 7 の [acceptance](同意)チェックか。invert(「同意しない」型)は除く。"""
+    try:
+        return bool(el.evaluate("""e => { const w = e.closest('.wpcf7-acceptance');
+            return !!w && !w.classList.contains('invert'); }"""))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _check_box(el):
+    """チェックボックスに入れる。見えていれば普通にクリック、CSSで隠して<label>を
+    装飾している実装なら label をクリック、それでも入らなければ値を直接立てて
+    change を飛ばす。入ったかどうかを返す。"""
+    try:
+        if el.is_checked():
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        if el.is_visible():
+            el.check(timeout=ACTION_TIMEOUT_MS)
+            if el.is_checked():
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return bool(el.evaluate("""e => {
+            const l = (e.labels && e.labels[0]) || e.closest('label');
+            if (l) { try { l.click(); } catch (_) {} }
+            if (!e.checked) {
+              e.checked = true;
+              e.dispatchEvent(new Event('input', { bubbles: true }));
+              e.dispatchEvent(new Event('change', { bubbles: true }));
+              e.dispatchEvent(new Event('click', { bubbles: true }));
+            }
+            return e.checked;
+        }"""))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _check_consent_checkboxes(scope):
+    """送信に要る「同意」チェックを入れる(T137で関数化)。
+
+    旧実装は (1) 見えているチェックボックスしか対象にせず、CSS で <input> を隠して
+    <label> を装飾する実装(人材系サイトに多い)を素通りし、(2) ループ全体を1つの
+    try で包んでいたため1つの失敗で残りも飛ばしていた。Contact Form 7 は同意
+    ([acceptance])が未チェックだと**送信ボタンを disabled にする**ので、押しても何も
+    起きず「完了を確認できない」になる(2026-09-25、人材系の未確認219社の調査で判明)。
+    CF7 の acceptance はラベル文言によらず同意として扱う。"""
+    n = 0
+    try:
+        boxes = scope.query_selector_all("input[type=checkbox]")
+    except Exception:  # noqa: BLE001
+        return 0
+    for cb in boxes:
+        try:
+            if cb.is_checked():
+                continue
+            if not (_is_consent_checkbox(scope, cb) or _is_cf7_acceptance(cb)):
+                continue
+            if _check_box(cb):
+                n += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return n
+
+
+def _is_disabled(el):
+    try:
+        return bool(el.evaluate("e => !!e.disabled"))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _check_required_checkboxes(page):
@@ -1790,15 +1901,11 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             result.detected_fields = detected
             result.filled_fields = filled
 
-            # 同意チェックボックス
-            try:
-                for cb in scope.query_selector_all("input[type=checkbox]"):
-                    if not cb.is_visible() or cb.is_checked():
-                        continue
-                    if _is_consent_checkbox(scope, cb):
-                        cb.check(timeout=ACTION_TIMEOUT_MS)
-            except Exception:  # noqa: BLE001
-                pass
+            # 同意チェックボックス(隠された入力にも入れる。T137)
+            n_consent = _check_consent_checkboxes(scope)
+            if n_consent:
+                filled.append(f"同意×{n_consent}")
+                result.filled_fields = filled
 
             # 必須のラジオ群が未選択なら先頭を選ぶ(2026-09-19)
             n_radios = _check_required_radios(scope)
@@ -1867,6 +1974,15 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             # 本当に送信できていたのかを、あとからCSVで判断するために使う
             clicked_desc = ""
             if submit_btn:
+                if _is_disabled(submit_btn):
+                    # 同意チェックが未入力だと CF7 は送信ボタンを disabled にする(T137)。
+                    # 入れ直してから押す。それでも無効なら押しても何も起きないが、
+                    # 手がかり(「送信ボタンが無効」)は success_not_confirmed 側に残る
+                    if _check_consent_checkboxes(scope) or _check_required_checkboxes(scope):
+                        try:
+                            page.wait_for_timeout(300)
+                        except Exception:  # noqa: BLE001
+                            pass
                 result.submit_attempted = True
                 clicked_desc = _describe_element(submit_btn)
                 if not _click(submit_btn):
@@ -1962,6 +2078,18 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                 result.status = "FAILED_UNSUPPORTED"
                 result.reason_code = "error_message_detected"
                 result.error_message = f"送信後ページにエラー文言を検知: {error_hit}"
+                # Contact Form 7 は reCAPTCHA v3 のスコアが低い送信を「スパム」として
+                # 「メッセージの送信に失敗しました。後でまたお試しください。」(メール送信
+                # 失敗と同じ文言)で弾く。ヘッドレスブラウザはスコアが低くなりやすい。
+                # 人材系の「送信に失敗しました」55件のURL 23件を見たら 20件が CF7+v3 だった
+                # (2026-09-25、T137)。画像認証と同じく人が送れば通るので、別の理由に分けて
+                # 「こちらのコードで直せる弾かれ」と区別する(送信保留にもしない)
+                if (error_hit in _CF7_MAIL_FAILED_HINTS
+                        and any("reCAPTCHA v3" in h for h in _silent_submit_hints(scope))):
+                    result.reason_code = "recaptcha_v3_rejected"
+                    result.error_message = ("reCAPTCHA v3 のスパム判定で弾かれた可能性"
+                                            f"(Contact Form 7 の文言: {error_hit})")
+                    return result
                 # どの欄がどう弾かれたかを添える(_INVALID_FIELD_DETAILS_JS のコメント参照)。
                 # 総括文言だけでは原因が追えない。report側は「: 」の前で集計するので
                 # 既存の内訳(error-hints)は崩れない
@@ -2288,6 +2416,18 @@ if __name__ == "__main__":
                 got = _is_consent_checkbox(page, cb)
                 print(f"  {'✓' if got == want else '✗'} {desc} → "
                       f"{'チェックする' if got else 'チェックしない'}")
+            # T137: CSSで隠した CF7 の [acceptance] にも入れる(ラベル文言に頼らない)
+            page.set_content("""<style>.wpcf7-acceptance input{position:absolute;opacity:0;width:0;height:0}</style>
+                <form class="wpcf7-form"><span class="wpcf7-acceptance"><label><input type="checkbox" name="acceptance-9" value="1">
+                <span>上記内容を確認のうえ送信</span></label></span>
+                <span class="wpcf7-acceptance invert"><label><input type="checkbox" name="acceptance-10" value="1">
+                <span>同意しない</span></label></span>
+                <input type="checkbox" name="mm"><label>メルマガを受け取る</label></form>""")
+            n_c = _check_consent_checkboxes(page)
+            states = page.evaluate("() => Array.from(document.querySelectorAll('input[type=checkbox]')).map(e => e.checked)")
+            ok = n_c == 1 and states == [True, False, False]
+            print(f"  {'✓' if ok else '✗'} 隠された CF7 [acceptance] に入れる(invert とメルマガには触らない) "
+                  f"→ {n_c}件 / {states}")
 
             print("\n── CAPTCHA判定(T109。人手が要るものだけ除外する) ──")
             captcha_cases = [
@@ -2909,9 +3049,109 @@ document.getElementById('f').addEventListener('submit', function (e) {
 });
 </script></body></html>"""
 
+            # T137: CF7 の同意([acceptance])。<input> を CSS で隠して <label> を装飾し、
+            # 未チェックの間は送信ボタンを disabled にする(CF7 本体と同じ振る舞い)
+            _CF7_ACCEPT = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>お問い合わせ</title>
+<style>.wpcf7-acceptance input{position:absolute;opacity:0;width:0;height:0}
+.wpcf7-acceptance label span:before{content:'□ '} .wpcf7-acceptance input:checked+span:before{content:'☑ '}</style></head>
+<body><h1>お問い合わせ</h1>
+<form id="f" action="/contact/#wpcf7-f3-o1" method="post" class="wpcf7-form init" data-status="init" novalidate>
+  <p>お名前 <input type="text" name="your-name"></p>
+  <p>メール <input type="email" name="your-email"></p>
+  <p>本文 <textarea name="your-message"></textarea></p>
+  <p><span class="wpcf7-form-control-wrap" data-name="acceptance-1"><span class="wpcf7-form-control wpcf7-acceptance">
+    <span class="wpcf7-list-item"><label><input type="checkbox" name="acceptance-1" value="1"><span class="wpcf7-list-item-label">個人情報保護方針に同意する</span></label></span></span></span></p>
+  <p><input type="submit" value="送信" class="wpcf7-form-control wpcf7-submit" disabled></p>
+  <div id="out"></div><div id="cnt">押された回数: 0</div>
+</form>
+<script>
+let n = 0; const f = document.getElementById('f');
+const toggle = () => { f.querySelector('.wpcf7-submit').disabled = !f.querySelector('.wpcf7-acceptance input').checked; };
+f.addEventListener('change', toggle); toggle();
+f.addEventListener('submit', function (e) {
+  e.preventDefault(); n++;
+  document.getElementById('cnt').textContent = '押された回数: ' + n;
+  f.setAttribute('data-status', 'submitting');
+  setTimeout(function () {
+    f.setAttribute('data-status', 'sent');
+    document.getElementById('out').textContent = 'ありがとうございます。メッセージは送信されました。';
+    f.reset();
+  }, 300);
+});
+</script></body></html>"""
+            # T137: 送信要求そのものが失敗する CF7(REST API が遮断されている等)。
+            # CF7 は fetch の失敗時に data-status=aborted にして何も表示しない
+            _CF7_ABORTED = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>お問い合わせ</title></head>
+<body><h1>お問い合わせ</h1>
+<form id="f" action="/contact/#wpcf7-f4-o1" method="post" class="wpcf7-form init" data-status="init" novalidate>
+  <p>お名前 <input type="text" name="your-name"></p>
+  <p>メール <input type="email" name="your-email"></p>
+  <p>本文 <textarea name="your-message"></textarea></p>
+  <p><input type="submit" value="送信" class="wpcf7-form-control wpcf7-submit"></p>
+  <div id="cnt">押された回数: 0</div>
+</form>
+<script>
+let n = 0; const f = document.getElementById('f');
+f.addEventListener('submit', function (e) {
+  e.preventDefault(); n++;
+  document.getElementById('cnt').textContent = '押された回数: ' + n;
+  f.setAttribute('data-status', 'submitting');
+  setTimeout(function () { f.setAttribute('data-status', 'aborted'); }, 200);
+});
+</script></body></html>"""
+            # T137: 応答の遅い CF7(メール送信に時間がかかるサーバー)。?ms= の間 submitting のまま
+            _CF7_SLOW = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>お問い合わせ</title></head>
+<body><h1>お問い合わせ</h1>
+<form id="f" action="/contact/#wpcf7-f5-o1" method="post" class="wpcf7-form init" data-status="init" novalidate>
+  <p>お名前 <input type="text" name="your-name"></p>
+  <p>メール <input type="email" name="your-email"></p>
+  <p>本文 <textarea name="your-message"></textarea></p>
+  <p><input type="submit" value="送信" class="wpcf7-form-control wpcf7-submit"></p>
+  <div id="out"></div><div id="cnt">押された回数: 0</div>
+</form>
+<script>
+let n = 0; const f = document.getElementById('f');
+f.addEventListener('submit', function (e) {
+  e.preventDefault(); n++;
+  document.getElementById('cnt').textContent = '押された回数: ' + n;
+  f.setAttribute('data-status', 'submitting');
+  const ms = parseInt(new URLSearchParams(location.search).get('ms') || '8000', 10);
+  setTimeout(function () {
+    f.setAttribute('data-status', 'sent');
+    document.getElementById('out').textContent = 'ありがとうございます。メッセージは送信されました。';
+    f.reset();
+  }, ms);
+});
+</script></body></html>"""
+            # T137: CF7 + reCAPTCHA v3 でスパム判定されたときの文言
+            _CF7_V3SPAM = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>お問い合わせ</title>
+<script src="/recaptcha/api.js?render=6LdummySiteKey"></script></head>
+<body><h1>お問い合わせ</h1>
+<form id="f" action="/contact/#wpcf7-f6-o1" method="post" class="wpcf7-form init" data-status="init" novalidate>
+  <p>お名前 <input type="text" name="your-name"></p>
+  <p>メール <input type="email" name="your-email"></p>
+  <p>本文 <textarea name="your-message"></textarea></p>
+  <p><input type="submit" value="送信" class="wpcf7-form-control wpcf7-submit"></p>
+  <div id="out" class="wpcf7-response-output"></div><div id="cnt">押された回数: 0</div>
+</form>
+<script>
+let n = 0; const f = document.getElementById('f');
+f.addEventListener('submit', function (e) {
+  e.preventDefault(); n++;
+  document.getElementById('cnt').textContent = '押された回数: ' + n;
+  f.setAttribute('data-status', 'submitting');
+  setTimeout(function () {
+    f.setAttribute('data-status', 'spam');
+    document.getElementById('out').textContent = 'メッセージの送信に失敗しました。後でまたお試しください。';
+  }, 300);
+});
+</script></body></html>"""
+
             class _PagesHandler(_hs.BaseHTTPRequestHandler):
                 pages = {"/cf7.html": _CF7, "/twostep.html": _TWOSTEP, "/mailto.html": _MAILTO,
-                         "/silent_v3.html": _SILENT_V3, "/cf7_invalid.html": _CF7_INVALID}
+                         "/silent_v3.html": _SILENT_V3, "/cf7_invalid.html": _CF7_INVALID,
+                         "/cf7_accept.html": _CF7_ACCEPT, "/cf7_aborted.html": _CF7_ABORTED,
+                         "/cf7_slow.html": _CF7_SLOW, "/cf7_v3spam.html": _CF7_V3SPAM}
 
                 def do_GET(self):
                     path = _us2(self.path).path
@@ -2985,6 +3225,35 @@ document.getElementById('f').addEventListener('submit', function (e) {
                       and "your-message=必須項目に入力してください" in msg and "?=" not in msg)
                 print(f"  {'✓' if ok else '✗'} 弾かれたら欄ごとの文言を残す(CF7の validation_error) "
                       f"→ {r.reason_code} / {msg[:110]}")
+                # T137: 同意チェック(CSSで隠した<input>)が未チェックだと送信ボタンが無効のCF7。
+                # 同意を入れてから押せば完了する
+                r = _go(f"http://127.0.0.1:{pages_port}/cf7_accept.html")
+                c = _count(r)
+                ok = r.reason_code == "success_text_matched" and c == "押された回数: 1"
+                print(f"  {'✓' if ok else '✗'} 隠された同意チェックで送信ボタンが無効なCF7: "
+                      f"同意を入れて1回で完了する → {r.reason_code} / {c}"
+                      + (f" / {r.error_message}" if r.error_message else ""))
+                # T137: 送信要求が失敗(aborted)する CF7。未確認のままだが、状態を手がかりに残す
+                r = _go(f"http://127.0.0.1:{pages_port}/cf7_aborted.html")
+                c = _count(r)
+                msg = r.error_message or ""
+                ok = (r.reason_code == "success_not_confirmed" and c == "押された回数: 1"
+                      and "CF7状態: aborted" in msg)
+                print(f"  {'✓' if ok else '✗'} 送信要求が失敗する(aborted)CF7: 未確認のまま "
+                      f"CF7状態を残す → {r.reason_code} / {c} / {msg[:100]}")
+                # T137: 応答が遅い CF7(8秒)。submitting の間は待ちを延長して完了を拾う
+                r = _go(f"http://127.0.0.1:{pages_port}/cf7_slow.html?ms=8000")
+                c = _count(r)
+                ok = r.reason_code == "success_text_matched" and c == "押された回数: 1"
+                print(f"  {'✓' if ok else '✗'} 応答が8秒かかるCF7(送信中): 待ちを延長して完了文言を"
+                      f"確認する → {r.reason_code} / {c}"
+                      + (f" / {r.error_message}" if r.error_message else ""))
+                # T137: CF7 + reCAPTCHA v3 のスパム判定は別の理由に分ける
+                r = _go(f"http://127.0.0.1:{pages_port}/cf7_v3spam.html")
+                msg = r.error_message or ""
+                ok = r.reason_code == "recaptcha_v3_rejected" and "reCAPTCHA v3" in msg
+                print(f"  {'✓' if ok else '✗'} CF7+reCAPTCHA v3 の「送信に失敗しました」は "
+                      f"recaptcha_v3_rejected → {r.reason_code} / {msg[:80]}")
             finally:
                 pages_srv.shutdown()
                 _ex.submit(close_thread_browser).result()

@@ -4675,6 +4675,55 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T137. 人材系3,174社の送信で未確認22.7% — CF7の同意チェック・送信中の待ち・v3スパム判定(2026-09-25)
+
+**経緯**: 9/25 09:17 に予約#6「中部・九州 人材系0925」(3,174社)を開始。1時間後の途中経過
+(963社)で 成功41.8% / **完了を確認できない 22.7%(219社)** / 弾かれた11.9%。四国の送り直し
+(#4/#5)では未確認が2%台だったが、あれは「前回失敗した会社だけ」の母集団で、新しい母集団では
+9/19の四国初回(22.8%)と同じ水準に戻った。未確認の手がかりはほぼ全部「押した / 入力値が
+残ったまま」(何も起きない)。40社のURLを取得して解析(Chromiumは使えないので urllib で
+HTML を読む)した結果:
+- 19社が Contact Form 7(CF7)。うち **7社に [acceptance](同意チェック)** があり、CF7 本体の JS
+  (index.js を実際に読んだ)は同意が未チェックだと **送信ボタンを disabled にする**。旧実装の
+  同意チェックは `is_visible()` な <input> しか対象にせず、CSS で隠して <label> を装飾する実装を
+  素通りしていた(さらにループ全体が1つの try で、1つ失敗すると残りも飛ばしていた)。
+  disabled のボタンを JS click しても何も起きない=この署名
+- 「送信に失敗しました」55件(弾かれた96件の最多)は URL 23件のうち **20件が CF7 + reCAPTCHA v3**。
+  CF7 は v3 の低スコアを「スパム」として、メール送信失敗と同じ文言
+  「メッセージの送信に失敗しました。後でまたお試しください。」で弾く。ヘッドレスは低スコアに
+  なりやすい。こちらのコードで直せる弾かれではなく、画像認証と同じ「人が送れば通る」層
+- 残りの CF7(同意なし・v3なし)が何も起きない原因は、この環境からは確定できない
+  (CF7 の REST API へ実際に送る確認は「実サイトへの送信」なので行わない)。候補は
+  (a) REST API が WAF 等で遮断され CF7 が `data-status=aborted` で黙る、(b) メール送信に
+  時間がかかり 5 秒(OUTCOME_WAIT_MS)以内に応答が返らない。**次回の送信で判別できるよう
+  CF7 の data-status を手がかりに残す**
+
+**直した点**(`form_navigator.py`):
+- `_check_consent_checkboxes()`: 同意チェックを関数化。CF7 の `.wpcf7-acceptance`(invert 以外)は
+  ラベル文言によらず同意として扱う。`_check_box()` は 見えていれば check、隠されていれば
+  label クリック → それでも入らなければ値を立てて input/change/click を飛ばす。1件ごとの try
+- 送信ボタンが disabled なら押す前に同意・必須チェックを入れ直す(`_is_disabled`)
+- `_wait_for_outcome()`: 期限が来てもフォームが送信中(`form.wpcf7-form[data-status=submitting]`、
+  `form.submitting`、`aria-busy`)なら `PENDING_WAIT_MS`(既定20秒。環境変数 `FORM_PENDING_WAIT_MS`)
+  まで一度だけ延長。送信中でないサイトでは待たない
+- 手がかり(`_SILENT_SUBMIT_PROBE_JS`)に「CF7状態: aborted/submitting/init/…」「送信ボタンが
+  無効(disabled)」「同意チェックが未入力」を追加。success_not_confirmed の error_message に載る
+  → ops-readonly `send-unconfirmed-hints` で内訳が見える
+- 新しい理由 `recaptcha_v3_rejected`: CF7 の「送信に失敗しました/送信できませんでした」かつ
+  ページに reCAPTCHA v3 があるとき。`FAILED_UNSUPPORTED` のまま理由だけ分ける。送信保留
+  (`db.HOLD_REASONS`)には入れない(人が送れば通る)。ラベルを `target_lists.REASON_LABELS_JA` /
+  `list_builder.html` に追加、`send_log_report_cli delivery` に「reCAPTCHA v3で弾かれた」行を追加
+
+**テスト**(`form_navigator.py test`、ローカル http.server のページ): 隠した acceptance で送信
+ボタンが無効な CF7 → 同意を入れて1回で完了 / aborted になる CF7 → 未確認のまま「CF7状態:
+aborted」を残す / 応答8秒の CF7 → 延長して完了文言を確認 / CF7+v3 の失敗文言 →
+recaptcha_v3_rejected / 隠した acceptance に入れて invert・メルマガには触らない。全151件通過。
+senders.py test 通過。
+
+**デプロイ**: 予約#6 の完了後(送信中はデプロイしない)。反映後、次の送信で
+`send-unconfirmed-hints` の「CF7状態」の内訳を見て、aborted が多ければ REST 遮断(相手側・
+構造的)、submitting が残るなら `FORM_PENDING_WAIT_MS` を伸ばす。
+
 ### T136. 送信保留 — 構造的に送れない会社を次回から外し、定期的に試して届いたら戻す(2026-09-24)
 
 **経緯**: 四国2,975社の累計は「届いた可能性 72%」で頭打ち。残りの大半はサイト閉鎖・

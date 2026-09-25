@@ -132,7 +132,9 @@ def cmd_delivery(con, args):
                   THEN company_id END) unconfirmed,
             COUNT(DISTINCT CASE WHEN reason_code IN
                   ('error_message_detected','required_field_empty','submit_click_failed')
-                  THEN company_id END) blocked
+                  THEN company_id END) blocked,
+            COUNT(DISTINCT CASE WHEN reason_code='recaptcha_v3_rejected'
+                  THEN company_id END) v3_rejected
         FROM form_send_log WHERE started_at >= ?""", (since,)).fetchone()
     n = row["companies"]
     if not n:
@@ -153,6 +155,9 @@ def cmd_delivery(con, args):
     print(f"    完了を確認できない          {row['unconfirmed']:6,d}社  {pct(row['unconfirmed'])}")
     print(f"    押したが相手に弾かれた      {row['blocked']:6,d}社  {pct(row['blocked'])}"
           "   ←届いていない")
+    if row["v3_rejected"]:
+        print(f"    reCAPTCHA v3で弾かれた      {row['v3_rejected']:6,d}社  {pct(row['v3_rejected'])}"
+              "   ←届いていない(画像認証と同じく人が送れば通る。T137)")
     print("-" * 74)
     print(f"  ヒラケルが『成功』と記録      {row['success_any']:6,d}社  {pct(row['success_any'])}")
     reached = row["success_any"] + row["unconfirmed"]

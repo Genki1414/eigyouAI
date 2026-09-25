@@ -1398,31 +1398,91 @@ _SELECT_PLACEHOLDER_RE = re.compile(
 _SELECT_INQUIRY_OPTION_RE = re.compile(r"お問い合わせ|その他|general|other", re.I)
 
 
-def _invalid_visible_fields(page):
+def _format_variants(kind, value):
+    """電話番号・郵便番号の別の書き方。フォームの形式指定(pattern / maxlength)に合わなかった
+    ときに順に試す(T139。2026-09-25、人材系で「電話番号（ハイフンなし）*」「郵便番号」が
+    required_field_unfilled になっていた)。"""
+    digits = re.sub(r"\D", "", value or "")
+    out = []
+    if kind in ("phone", "fax"):
+        if len(digits) == 10:
+            out += [digits, f"{digits[:2]}-{digits[2:6]}-{digits[6:]}", f"{digits[:3]}-{digits[3:6]}-{digits[6:]}",
+                    f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"]
+        elif len(digits) == 11:
+            out += [digits, f"{digits[:3]}-{digits[3:7]}-{digits[7:]}"]
+        elif digits:
+            out.append(digits)
+    elif kind == "postal_code":
+        if len(digits) == 7:
+            out += [digits, f"{digits[:3]}-{digits[3:]}"]
+        elif digits:
+            out.append(digits)
+    return [v for v in dict.fromkeys(out) if v != value]
+
+
+def _refill_for_format(el, kind, value):
+    """入れた値が pattern / maxlength に合わず無効なら、_format_variants の書き方を順に試す。
+    直ったかどうかを返す。形式指定の無い欄には何もしない。"""
+    try:
+        bad = el.evaluate("e => !!(e.validity && (e.validity.patternMismatch || e.validity.tooLong || e.validity.tooShort))")
+    except Exception:  # noqa: BLE001
+        return False
+    if not bad:
+        return False
+    for alt in _format_variants(kind, value):
+        try:
+            el.fill(alt, timeout=ACTION_TIMEOUT_MS)
+            el.dispatch_event("input")
+            el.dispatch_event("change")
+            if el.evaluate("e => e.checkValidity()"):
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def _invalid_visible_fields(page, form_el=None):
     """ブラウザのHTML5検証(required/pattern/type=email等)で「無効」になっている可視の入力欄の
     ラベルを返す。1つでもあればブラウザは送信をブロックし、ページは変わらず
     「Please fill out this field」の吹き出しが出るだけになる(2026-09-19の実インシデント:
-    ふりがなの必須欄が未入力のままなのに、ページ内の文言一致でSUCCESSと記録されていた)。"""
+    ふりがなの必須欄が未入力のままなのに、ページ内の文言一致でSUCCESSと記録されていた)。
+
+    form_el(埋めた欄が属する<form>)を渡すとその中だけを見る(T139。2026-09-25)。以前は
+    ページ全体を見ていたので、ヘッダーのサイト内検索(required 付き)やフッターのメルマガ
+    登録欄まで「埋められない必須欄」に数えて送信をやめていた(人材系の送り直しで
+    required_field_unfilled 190件のうち「検索」が10件)。問い合わせフォームのブラウザ検証は
+    そのフォームの欄にしか掛からない。
+    ラベルは th/dt の見出しも見る(以前は label だけで、51件が「text」としか残らなかった)。
+    「なぜ無効か」(未入力 / 形式不一致 等)を validationMessage から添える。"""
     try:
-        return page.evaluate("""() => {
+        return page.evaluate("""(root) => {
           const out = [];
-          for (const el of document.querySelectorAll('input, textarea, select')) {
+          const scope = root || document;
+          for (const el of scope.querySelectorAll('input, textarea, select')) {
             if (!el.willValidate || el.disabled) continue;
             const t = (el.type || '').toLowerCase();
-            if (['hidden', 'submit', 'button', 'image', 'file', 'reset'].includes(t)) continue;
+            if (['hidden', 'submit', 'button', 'image', 'file', 'reset', 'search'].includes(t)) continue;
             if (!el.getClientRects().length) continue;
             if (el.checkValidity()) continue;
             let label = '';
             try {
               if (el.id) { const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) label = l.textContent; }
               if (!label && el.closest('label')) label = el.closest('label').textContent;
+              if (!label) { const cell = el.closest('td, dd'); const h = cell && cell.previousElementSibling; if (h && !h.querySelector('input,textarea,select')) label = h.textContent; }
+              if (!label) { const p = el.parentElement; const prev = p && p.previousElementSibling; if (prev && !prev.querySelector('input,textarea,select') && (prev.textContent || '').trim().length <= 40) label = prev.textContent; }
             } catch (e) {}
             const name = (label || el.getAttribute('aria-label') || el.placeholder || el.name || el.id || t) + '';
-            const clean = name.replace(/\s+/g, ' ').trim().slice(0, 40);
+            let why = '';
+            try {
+              const v = el.validity;
+              why = v.valueMissing ? '未入力' : v.patternMismatch ? '形式不一致' : v.typeMismatch ? '型不一致'
+                  : (v.tooShort || v.tooLong) ? '長さ' : v.rangeUnderflow || v.rangeOverflow ? '範囲外' : '';
+            } catch (e) {}
+            const clean = name.replace(/\s+/g, ' ').trim().slice(0, 40) + (why ? '(' + why + ')' : '');
             if (!out.includes(clean)) out.push(clean);
           }
           return out;
-        }""") or []
+        }""", form_el) or []
     except Exception:  # noqa: BLE001
         return []
 
@@ -1878,6 +1938,9 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                             el.dispatch_event("change")
                         except Exception:  # noqa: BLE001
                             pass
+                        # 形式指定(pattern / maxlength)に合わず無効なら、別の書き方で入れ直す
+                        # (電話「ハイフンなし」「市外局番-市内-番号」、郵便番号「1234567」等。T139)
+                        _refill_for_format(el, kind, fill_value)
                         filled.append(kind)
                         if first_filled_el is None:
                             first_filled_el = el
@@ -1922,7 +1985,8 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             # 残っていればブラウザが送信をブロックするので、押しても送られない。
             # その状態を「成功」と誤記録しないため、ここで失敗として記録し、
             # どの欄が埋まらなかったかを残す(「自動入力」での手動フォローに使える)
-            missing = _invalid_visible_fields(scope)
+            form_el = _owning_form(first_filled_el) if first_filled_el is not None else None
+            missing = _invalid_visible_fields(scope, form_el)
             if missing:
                 result.status = "FAILED_UNSUPPORTED"
                 result.reason_code = "required_field_unfilled"
@@ -1946,7 +2010,6 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
 
             # 以降はデッドラインを見ない。送信を押した後に時間切れで打ち切ると、
             # 既に届いているかもしれないものを失敗として記録してしまう
-            form_el = _owning_form(first_filled_el) if first_filled_el is not None else None
             submit_btn = _find_button(scope, _SUBMIT_TEXT_RE, form_el=form_el)
             if not submit_btn:
                 # 入力欄より少し遅れて送信ボタンが描画されるサイトがある
@@ -2067,7 +2130,8 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
             # 送信後もブラウザ検証で無効な欄が残り、入力した値もそのまま残っている
             # =ブラウザが送信をブロックした(JSで後から必須になった欄など)。
             # 文言一致・URL変化・フォーム消失の判定より優先する(2026-09-19)
-            still_invalid = _invalid_visible_fields(scope)
+            still_invalid = _invalid_visible_fields(scope, _owning_form(first_filled_el)
+                                                    if first_filled_el is not None else None)
             if still_invalid and _has_fillable_form(scope) and _form_keeps_our_values(scope, values):
                 result.status = "FAILED_UNSUPPORTED"
                 result.reason_code = "required_field_empty"
@@ -2920,7 +2984,9 @@ if __name__ == "__main__":
             n_r = _check_required_radios(page)
             inv = _invalid_visible_fields(page)
             print(f"  {'✓' if n_r == 1 else '✗'} 必須ラジオ群が未選択なら先頭を選ぶ: {n_r}")
-            print(f"  {'✓' if inv == ['ふりがな'] else '✗'} 未入力の必須欄(ふりがな)を検出し、埋めた欄は含めない: {inv}")
+            print(f"  {'✓' if inv == ['ふりがな(未入力)'] else '✗'} 未入力の必須欄(ふりがな)を検出し、埋めた欄は含めない"
+                  f"(なぜ無効かも添える。T139): {inv}")
+
             keeps = _form_keeps_our_values(page, {"email": "a@example.co.jp", "message": "こんにちは。本文です。"})
             print(f"  {'✓' if keeps else '✗'} 入力した値がフォームに残っていることを検知できる")
             page.fill("#k", "ふりがな")
@@ -2930,6 +2996,14 @@ if __name__ == "__main__":
             page.fill("#m", "")
             keeps2 = _form_keeps_our_values(page, {"email": "a@example.co.jp", "message": "こんにちは。本文です。"})
             print(f"  {'✓' if not keeps2 else '✗'} 送信成功後にリセットされたフォーム(値が消えた)は失敗にしない")
+            # T139: 問い合わせフォームの外(ヘッダーの検索欄など)は form_el を渡せば見ない
+            page.set_content("""<form role="search"><input name="s" required placeholder="検索"></form>
+                <form id="c"><label for="k2">ふりがな</label><input id="k2" required>
+                <input type="tel" id="t2" pattern="[0-9]{10}" value="03-1234-5678"></form>""")
+            inv_all = _invalid_visible_fields(page)
+            inv_form = _invalid_visible_fields(page, page.query_selector("#c"))
+            print(f"  {'✓' if inv_all == ['検索(未入力)', 'ふりがな(未入力)', 't2(形式不一致)'] and inv_form == ['ふりがな(未入力)', 't2(形式不一致)'] else '✗'} "
+                  f"form_el を渡すとその<form>の欄だけを見る(検索欄を数えない): 全体={inv_all} / フォーム内={inv_form}")
 
             print("\n── 送信後の待ちと2回目のボタン(2026-09-23。Contact Form 7 で二重送信していた) ──")
             # 3種類のページをローカルHTTPで配り、navigate_and_submit() を実際に走らせる。
@@ -3147,11 +3221,56 @@ f.addEventListener('submit', function (e) {
 });
 </script></body></html>"""
 
+            # T139: ヘッダーに required 付きのサイト内検索がある問い合わせページ。検索欄は
+            # 問い合わせフォームの外なので、送信前検証で「埋められない必須欄」に数えない
+            _SEARCH_HEADER = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>お問い合わせ</title></head>
+<body><header><form action="/search" method="get" role="search">
+  <input type="text" name="s" placeholder="検索" required><button type="submit">検索</button></form></header>
+<h1>お問い合わせ</h1>
+<form id="f" action="/contact/" method="post">
+  <p>お名前 <input type="text" name="your-name" required></p>
+  <p>メール <input type="email" name="your-email" required></p>
+  <p>本文 <textarea name="your-message" required></textarea></p>
+  <p><input type="submit" value="送信"></p>
+  <div id="out"></div><div id="cnt">押された回数: 0</div>
+</form>
+<script>
+let n = 0;
+document.getElementById('f').addEventListener('submit', function (e) {
+  e.preventDefault(); n++;
+  document.getElementById('cnt').textContent = '押された回数: ' + n;
+  setTimeout(function () { document.getElementById('out').textContent = 'お問い合わせありがとうございます。送信が完了しました。'; e.target.reset(); }, 200);
+});
+</script></body></html>"""
+
+            # T139: 電話「ハイフンなし」・郵便番号7桁の形式指定(pattern)があるフォーム
+            _FORMAT_PAGE = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>お問い合わせ</title></head>
+<body><h1>お問い合わせ</h1>
+<form id="f" action="/contact/" method="post">
+  <p>お名前 <input type="text" name="your-name" required></p>
+  <p>メール <input type="email" name="your-email" required></p>
+  <p>電話番号（ハイフンなし） <input type="tel" name="your-tel" pattern="[0-9]{10,11}" required></p>
+  <p>郵便番号 <input type="text" name="your-zip" pattern="[0-9]{7}" maxlength="7" required></p>
+  <p>本文 <textarea name="your-message" required></textarea></p>
+  <p><input type="submit" value="送信"></p>
+  <div id="out"></div><div id="cnt">押された回数: 0</div><div id="vals"></div>
+</form>
+<script>
+let n = 0;
+document.getElementById('f').addEventListener('submit', function (e) {
+  e.preventDefault(); n++;
+  document.getElementById('cnt').textContent = '押された回数: ' + n;
+  document.getElementById('vals').textContent = '電話=' + e.target['your-tel'].value + ' 郵便=' + e.target['your-zip'].value;
+  setTimeout(function () { document.getElementById('out').textContent = 'お問い合わせありがとうございます。送信が完了しました。'; }, 200);
+});
+</script></body></html>"""
+
             class _PagesHandler(_hs.BaseHTTPRequestHandler):
                 pages = {"/cf7.html": _CF7, "/twostep.html": _TWOSTEP, "/mailto.html": _MAILTO,
                          "/silent_v3.html": _SILENT_V3, "/cf7_invalid.html": _CF7_INVALID,
                          "/cf7_accept.html": _CF7_ACCEPT, "/cf7_aborted.html": _CF7_ABORTED,
-                         "/cf7_slow.html": _CF7_SLOW, "/cf7_v3spam.html": _CF7_V3SPAM}
+                         "/cf7_slow.html": _CF7_SLOW, "/cf7_v3spam.html": _CF7_V3SPAM,
+                         "/search_header.html": _SEARCH_HEADER, "/format.html": _FORMAT_PAGE}
 
                 def do_GET(self):
                     path = _us2(self.path).path
@@ -3170,7 +3289,8 @@ f.addEventListener('submit', function (e) {
             pages_port = pages_srv.server_address[1]
             _th.Thread(target=pages_srv.serve_forever, daemon=True).start()
             _vals = {"company": "株式会社テスト", "name": "試験 太郎", "email": "t@example.com",
-                     "message": "お問い合わせ本文です。", "subject": "ご提案"}
+                     "message": "お問い合わせ本文です。", "subject": "ご提案",
+                     "phone": "03-1234-5678", "postal_code": "123-4567"}
 
             def _count(r):
                 txt = " ".join((r.page_text_snippet or "").split())
@@ -3254,6 +3374,20 @@ f.addEventListener('submit', function (e) {
                 ok = r.reason_code == "recaptcha_v3_rejected" and "reCAPTCHA v3" in msg
                 print(f"  {'✓' if ok else '✗'} CF7+reCAPTCHA v3 の「送信に失敗しました」は "
                       f"recaptcha_v3_rejected → {r.reason_code} / {msg[:80]}")
+                # T139: ヘッダーの検索欄(required)は問い合わせフォームの外なので送信を止めない
+                r = _go(f"http://127.0.0.1:{pages_port}/search_header.html")
+                c = _count(r)
+                ok = r.reason_code == "success_text_matched" and c == "押された回数: 1"
+                print(f"  {'✓' if ok else '✗'} ヘッダーに required 付きの検索欄があっても送信する "
+                      f"(検証は埋めた欄の<form>内だけ) → {r.reason_code} / {c}"
+                      + (f" / {r.error_message}" if r.error_message else ""))
+                # T139: 形式指定(ハイフンなし・7桁)に合わせて入れ直す
+                r = _go(f"http://127.0.0.1:{pages_port}/format.html")
+                txt = " ".join((r.page_text_snippet or "").split())
+                ok = r.reason_code == "success_text_matched" and "電話=0312345678 郵便=1234567" in txt
+                print(f"  {'✓' if ok else '✗'} 電話「ハイフンなし」・郵便番号7桁の pattern に合わせて入れ直す "
+                      f"→ {r.reason_code} / {txt[txt.find('電話='):txt.find('電話=')+28] if '電話=' in txt else '?'}"
+                      + (f" / {r.error_message}" if r.error_message else ""))
             finally:
                 pages_srv.shutdown()
                 _ex.submit(close_thread_browser).result()

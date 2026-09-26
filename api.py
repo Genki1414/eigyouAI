@@ -1316,6 +1316,55 @@ def h_tenant_send_log_manual_sent(con, tenant_id, log_id, data):
     return 200, {"ok": True}
 
 
+# 「人が送れば届く」層(T140。2026-09-26)。自動では送れないが、フォーム自体はあり、人が
+# 画像認証を解く・普通のブラウザで送るなら通る理由。送信保留(db.HOLD_REASONS)には入れず、
+# 手動フォローの対象として一覧に出す。人材系3,184社では 画像認証174社+v3判定162社=約10%
+MANUAL_FOLLOWUP_REASONS = ("captcha_detected", "recaptcha_v3_rejected", "bot_challenge_detected")
+
+
+def h_tenant_manual_followup_csv(con, tenant_id, qs):
+    """手動フォロー用の一覧CSV(T140)。リストの会社のうち、**最後の試行**が画像認証・
+    reCAPTCHA v3 のスパム判定・bot判定で、まだ手動送信済みにしていないものを1社1行で出す。
+    その後に自動送信が成功した会社は最後の試行が成功になるので自然に外れる。
+    ?list_id= 必須。?days=(既定90)以内の試行だけを見る。"""
+    list_id = qs.get("list_id", [None])[0]
+    if not list_id or not list_id.isdigit():
+        return 400, {"error": "list_idを指定してください"}
+    list_id = int(list_id)
+    days = qs.get("days", ["90"])[0]
+    days = int(days) if days.isdigit() and 0 < int(days) <= 3650 else 90
+    lst = con.execute("SELECT id, name FROM target_lists WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+                      (list_id, tenant_id)).fetchone()
+    if not lst:
+        return 404, {"error": "リストが見つかりません"}
+    since = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    ph = ",".join("?" * len(MANUAL_FOLLOWUP_REASONS))
+    rows = con.execute(f"""SELECT c.id company_id, c.name, l.contact_url, l.reason_code, l.started_at,
+            c.phone, c.pref, c.city, c.address,
+            (SELECT MAX(l2.manual_sent_at) FROM form_send_log l2
+               WHERE l2.company_id=c.id AND l2.tenant_id=l.tenant_id) manual_sent_at
+        FROM form_send_log l
+        JOIN (SELECT company_id, MAX(id) mid FROM form_send_log
+              WHERE tenant_id=? AND list_id=? AND started_at>=? GROUP BY company_id) last ON last.mid=l.id
+        JOIN companies c ON c.id=l.company_id
+        WHERE l.reason_code IN ({ph})
+        ORDER BY l.reason_code, c.name""", [tenant_id, list_id, since, *MANUAL_FOLLOWUP_REASONS]).fetchall()
+    import csv, io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["会社名", "お問い合わせURL", "自動送信できない理由", "最終試行日時", "電話", "住所", "手動送信済み"])
+    n = 0
+    for r in rows:
+        if r["manual_sent_at"]:
+            continue
+        addr = " ".join(x for x in (r["pref"], r["city"], r["address"]) if x)
+        w.writerow([r["name"] or "", r["contact_url"] or "",
+                    TL.REASON_LABELS_JA.get(r["reason_code"], r["reason_code"]),
+                    r["started_at"] or "", r["phone"] or "", addr, ""])
+        n += 1
+    return 200, {"csv": buf.getvalue(), "count": n, "list_name": lst["name"]}
+
+
 def h_tenant_send_log_csv(con, tenant_id, qs):
     """自動送信ログのCSVダウンロード(MIKOMERU同等)。表示中の絞り込み(?q=/?status=/?list_id=)
     をそのまま反映する。件数上限は付けない(ダウンロード目的のため一覧表示より緩くする)。"""
@@ -3342,6 +3391,7 @@ class Handler(BaseHTTPRequestHandler):
                 or u.path == "/api/tenant/send-log/csv"
                 or u.path == "/api/tenant/send-log/executions"
                 or u.path == "/api/tenant/send-log/executions/csv"
+                or u.path == "/api/tenant/send-log/manual-followup/csv"
                 or u.path == "/api/tenant/autofill/pending"
                 or u.path == "/api/tenant/scheduled-sends"
                 or u.path == "/api/tenant/exclusions"
@@ -3373,6 +3423,8 @@ class Handler(BaseHTTPRequestHandler):
                     st, res = h_tenant_send_log_executions(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/send-log/executions/csv":
                     st, res = h_tenant_send_log_executions_csv(con, tenant["id"], qs)
+                elif u.path == "/api/tenant/send-log/manual-followup/csv":
+                    st, res = h_tenant_manual_followup_csv(con, tenant["id"], qs)
                 elif u.path == "/api/tenant/autofill/pending":
                     st, res = h_tenant_autofill_pending(con, tenant["id"])
                 elif u.path == "/api/tenant/scheduled-sends":
@@ -5410,6 +5462,39 @@ def self_test(port=8899):
                      f"&date_from=2026-01-06&date_to=2026-01-06", token=key_a)
     t("日付で絞り込むと、その日に実行されたぶんだけ返る",
       st == 200 and len(r.get("executions", [])) == 2, f"n={len(r.get('executions', []))}")
+    # ── 手動フォロー用CSV(T140): 最後の試行が画像認証/v3判定/bot判定の会社だけ ──
+    con.execute("DELETE FROM companies WHERE id IN (999971, 999972, 999973)")
+    con.execute("""INSERT INTO companies (id, name, contact_url, phone, pref, city, address) VALUES
+        (999971, 'テスト_手動_画像認証', 'https://example.co.jp/c1/', '022-000-0001', '宮城県', '名取市', '牛野1'),
+        (999972, 'テスト_手動_v3', 'https://example.co.jp/c2/', NULL, NULL, NULL, NULL),
+        (999973, 'テスト_手動_v3のち成功', 'https://example.co.jp/c3/', NULL, NULL, NULL, NULL)""")
+    now_m = datetime.now().isoformat(timespec="seconds")
+    con.executemany("""INSERT INTO form_send_log (company_id, tenant_id, list_id, target_url, started_at,
+        status, reason_code, submit_attempted) VALUES (?,?,?,?,?,?,?,?)""", [
+        (999971, tid_a, t22_list_id, "https://example.co.jp/c1/", now_m, "SKIP_CAPTCHA", "captcha_detected", 0),
+        (999972, tid_a, t22_list_id, "https://example.co.jp/c2/", now_m, "FAILED_UNSUPPORTED", "recaptcha_v3_rejected", 1),
+        (999973, tid_a, t22_list_id, "https://example.co.jp/c3/", now_m, "FAILED_UNSUPPORTED", "recaptcha_v3_rejected", 1),
+        (999973, tid_a, t22_list_id, "https://example.co.jp/c3/", now_m, "SUCCESS", "success_text_matched", 1)])
+    con.commit()
+    st, r = get_auth(f"/api/tenant/send-log/manual-followup/csv?list_id={t22_list_id}", token=key_a)
+    csv_txt = r.get("csv", "") if st == 200 else ""
+    t("GET /api/tenant/send-log/manual-followup/csv: 画像認証・v3判定の会社だけが出て、その後成功した会社は出ない",
+      st == 200 and r.get("count") == 2 and "テスト_手動_画像認証" in csv_txt and "テスト_手動_v3," in csv_txt
+      and "v3のち成功" not in csv_txt and "画像認証(CAPTCHA)がある" in csv_txt
+      and "reCAPTCHA v3のスパム判定で弾かれた" in csv_txt, f"st={st} count={r.get('count')}")
+    t("電話・住所が入る", "022-000-0001" in csv_txt and "宮城県 名取市 牛野1" in csv_txt)
+    st, r = get_auth(f"/api/tenant/send-log/manual-followup/csv?list_id={t22_list_id}", token=key_b)
+    t("他テナントのリストは404", st == 404)
+    st, r = get_auth("/api/tenant/send-log/manual-followup/csv", token=key_a)
+    t("list_id が無ければ400", st == 400)
+    log_m = con.execute("SELECT id FROM form_send_log WHERE company_id=999971").fetchone()["id"]
+    st, r = post_auth(f"/api/tenant/send-log/{log_m}/manual-sent", {"manual_sent": True}, token=key_a)
+    st, r = get_auth(f"/api/tenant/send-log/manual-followup/csv?list_id={t22_list_id}", token=key_a)
+    t("手動送信済みにした会社は一覧から外れる", st == 200 and r.get("count") == 1
+      and "テスト_手動_画像認証" not in r.get("csv", ""), f"count={r.get('count')}")
+    con.execute("DELETE FROM form_send_log WHERE company_id IN (999971, 999972, 999973)")
+    con.execute("DELETE FROM companies WHERE id IN (999971, 999972, 999973)")
+    con.commit()
     con.execute("DELETE FROM form_send_log WHERE list_id=? AND (send_run_id IS NOT NULL "
                 "OR started_at LIKE '2026-01-%')", (t22_list_id,))
     con.commit()

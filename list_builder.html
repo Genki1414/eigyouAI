@@ -427,6 +427,7 @@ tr.clickable:hover{background:var(--accent-soft)}
             <div style="display:flex;align-items:flex-end;gap:8px">
               <button class="ghost" id="btnSendLogSearch">検索</button>
               <button class="ghost" id="btnSendLogCsv">📥 会社別の明細をCSVでダウンロード</button>
+              <button class="ghost" id="btnManualFollowupCsv" title="画像認証・reCAPTCHA v3のスパム判定・bot判定で自動送信できなかった会社の一覧(会社名・URL・電話・住所)。人がフォームから送れば届く層です">📋 手動フォロー一覧をCSVで</button>
               <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;cursor:pointer;padding-bottom:9px">
                 <input type="checkbox" id="sendLogClickedOnly" style="width:auto">URLをクリックした会社のみ</label>
             </div>
@@ -2082,6 +2083,24 @@ async function refreshSendLog() {
   }
 }
 
+// 手動フォロー用の一覧(T140)。画像認証・v3判定・bot判定=自動では送れないが人なら送れる会社
+async function downloadManualFollowupCsv() {
+  if (!currentSendLogListId) { alert("リストの詳細画面から実行してください"); return; }
+  try {
+    const r = await call(`/api/tenant/send-log/manual-followup/csv?list_id=${currentSendLogListId}&days=90`);
+    if (!r.count) { alert("手動フォローの対象(画像認証・reCAPTCHA v3・bot判定で自動送信できなかった会社)はありません"); return; }
+    const blob = new Blob(["\ufeff" + r.csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `manual_followup_${(r.list_name || "list").replace(/[\\/:*?"<>|]/g, "_")}_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (e) {
+    alert("CSVダウンロードに失敗しました: " + e.message);
+  }
+}
+
 async function downloadSendLogCsv() {
   try {
     const q = $("sendLogSearch").value.trim();
@@ -2149,6 +2168,7 @@ async function queueAutofill(logId, btn) {
 $("btnSendLogSearch").addEventListener("click", refreshSendLog);
 $("sendLogSearch").addEventListener("keydown", (e) => { if (e.key === "Enter") refreshSendLog(); });
 $("btnSendLogCsv").addEventListener("click", downloadSendLogCsv);
+$("btnManualFollowupCsv").addEventListener("click", downloadManualFollowupCsv);
 $("sendLogClickedOnly").addEventListener("change", refreshSendLog);
 
 async function refreshExclusions() {

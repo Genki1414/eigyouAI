@@ -4675,6 +4675,20 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T140. 手動フォロー用CSV — 画像認証・reCAPTCHA v3・bot判定で自動送信できない会社の一覧(2026-09-26)
+
+**経緯**: 人材系3,184社のうち画像認証174社+v3判定162社(約10%)は「自動では送れないが人が
+フォームから送れば届く」層。営業成果に直結するので、画面から一覧を落とせるようにした。
+
+**追加**: `GET /api/tenant/send-log/manual-followup/csv?list_id=N[&days=90]`
+(`api.py h_tenant_manual_followup_csv`、`MANUAL_FOLLOWUP_REASONS` = captcha_detected /
+recaptcha_v3_rejected / bot_challenge_detected)。リストの会社ごとに**最後の試行**がこれらの理由で、
+手動送信済み(`manual_sent_at`)でないものを1社1行(会社名・お問い合わせURL・理由・最終試行日時・
+電話・住所・手動送信済み欄)。その後に自動送信が成功した会社は最後の試行が成功になるので外れる。
+画面: 自動送信ログ→詳細の「📋 手動フォロー一覧をCSVで」(`list_builder.html`
+`downloadManualFollowupCsv`)。詳細画面の各行「自動入力」+Chrome拡張(既存)と組み合わせて使う。
+テスト5件(636/636)。
+
 ### T139. 送り直し#7(896社)の結果 — 送信前検証をフォーム内に限定、電話・郵便番号の形式に合わせて入れ直す(2026-09-25)
 
 **予約#7 の結果(人材系の送り直し。#6で失敗した896社だけ。13:28〜14:15 JST、T137反映後)**:

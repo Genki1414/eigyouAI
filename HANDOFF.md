@@ -4696,6 +4696,14 @@ invalid")。値は入っていたので9/17の`test -n`確認では検出でき�
   再試行は1回だけ)。他チャネルは従来どおり4回
 - テスト: senders 69件 / form_navigator 154件 通過
 
+**追加で直した点(ユーザーが A=サーバー増強を選択。リサイズ後に1回のデプロイで効くように)**:
+- `config.FORM_SEND_CONCURRENCY` の既定値を CPU コア数に連動(2コア→3、4→4、8→8、上限10。
+  .env で明示した値が常に優先)。リサイズ後に .env を触らなくても並列数が上がる
+- `FORM_NAV_TIMEOUT_MS` 既定 30秒→20秒、`FORM_SETTLE_TIMEOUT_MS` 既定 6秒→3秒
+- `deploy/Dockerfile` に procps(pgrep)。sender/worker のヘルスチェックが unhealthy と出ていたのは
+  pgrep が無かったため
+- テスト: senders 69 / form_navigator 154 / concurrency 通過
+
 **速くする本命はサーバーの増強**: 2コア/3.8GB(OOMが1回)→ 8コア/16GB 程度に上げて
 `FORM_SEND_CONCURRENCY` を 8〜10 にすれば 4〜5倍(110万社/日ではなく、11万社が1.5日程度)。
 Hetzner のリサイズは数分の停止で済み、コンテナは `restart: unless-stopped`、実行中の予約は

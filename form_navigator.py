@@ -34,9 +34,13 @@ MAX_CRAWL_PAGES = 5          # 問い合わせページ探索で開くページ�
 # T107: 1社あたりの所要時間を削るため、待ち時間はすべて.envで調整できるようにした。
 # 既定値の根拠: 実運用のフォームはほぼ2秒以内に落ち着く。一方で広告・計測タグが常時通信して
 # いるサイトでは"networkidle"が永久に来ず、旧実装(15秒×2回)はその上限を丸ごと待っていた。
-NAV_TIMEOUT_MS = int(os.environ.get("FORM_NAV_TIMEOUT_MS", "30000"))
+# T141(2026-09-28): 30秒→20秒。11万社の送信で所要時間の90%点が30.0秒=このタイムアウトそのもの
+# だった(閉鎖・激重サイト)。20秒で開かないサイトは20〜30秒で開いてもまず送れない
+NAV_TIMEOUT_MS = int(os.environ.get("FORM_NAV_TIMEOUT_MS", "20000"))
 ACTION_TIMEOUT_MS = int(os.environ.get("FORM_ACTION_TIMEOUT_MS", "10000"))
-SETTLE_TIMEOUT_MS = int(os.environ.get("FORM_SETTLE_TIMEOUT_MS", "6000"))
+# T141: 6秒→3秒。押した直後の networkidle 待ちは、計測タグが通信し続けるサイトで上限まで
+# 待ってしまう。結果の検知は直後の _wait_for_outcome(文言・URL・フォームの変化を見る)が担う
+SETTLE_TIMEOUT_MS = int(os.environ.get("FORM_SETTLE_TIMEOUT_MS", "3000"))
 POST_SUBMIT_WAIT_MS = int(os.environ.get("FORM_POST_SUBMIT_WAIT_MS", "1200"))
 # 送信ボタンを押したあと「何かが起きる」まで待つ上限(2026-09-23)。
 # Contact Form 7 等の「その場でAJAX送信し、URLもフォームもそのままで結果文言だけ出す」

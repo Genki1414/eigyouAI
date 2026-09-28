@@ -1024,7 +1024,13 @@ QUOTA_UNLIMITED = -1
 # T91: .envで変更可能(送信ワーカー1プロセスあたりの並列数)。増やすほどChromiumの
 # 同時起動数が増える(1つ数百MB)。ワーカー数(SENDER_WORKERS)×この値がサーバー全体の
 # 同時送信数になるので、メモリに合わせて決める(目安: 4GB→合計3、8GB→合計6〜8、16GB→合計12〜16)。
-FORM_SEND_CONCURRENCY = int(os.environ.get("FORM_SEND_CONCURRENCY", "3"))
+# T141(2026-09-28): 未設定なら CPU コア数に合わせる(2コア→3、4コア→4、8コア→8、上限10)。
+# 11万社の送信で「同時実行3・2コア」が頭打ち(約12社/分)だったため、サーバー増強後に
+# .env を触らなくても並列数が上がるようにした。明示的に設定した値は常に優先する
+def _default_form_concurrency():
+    n = os.cpu_count() or 2
+    return str(min(10, max(3, n)))
+FORM_SEND_CONCURRENCY = int(os.environ.get("FORM_SEND_CONCURRENCY", _default_form_concurrency()))
 
 # ── 送信元IPの分散(プロキシ。T42) ─────────────
 # T41でフォーム送信を並列化した結果、複数ワーカーが同じサーバーIPから

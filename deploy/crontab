@@ -37,6 +37,12 @@ TZ=Asia/Tokyo
 # 送信自体はここでは起きない(予約を作るだけ)。止めたいときはこの行をコメントアウト。
 0 8 1 * * cd /app && python3 send_holds_cli.py retry --all --older-than-days 30 >> /app/out/cron.log 2>&1
 
+# スクリーンショットの掃除(T142): 毎日4時40分。リストの送信が終わって3日経った分の
+# 送信前後の画像(1試行2枚)を消し、DBのパスもNULLにする(ユーザー指示 2026-09-29
+# 「リスト送信消化後3日で消える」)。空きが8GB未満なら古い順にさらに消す(安全弁)。
+# 送信中のリストの分は消さない。engine-dataボリュームはsenderと共有
+40 4 * * * cd /app && python3 screenshot_cleanup.py run --days 3 --min-free-gb 8 >> /app/out/cron.log 2>&1
+
 # 学習: 週次。昇格ゲートを通ればV2に切り替わる
 0 3 * * 1 cd /app && python3 learn.py >> /app/out/cron.log 2>&1
 

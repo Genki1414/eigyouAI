@@ -4698,16 +4698,20 @@ invalid")。値は入っていたので9/17の`test -n`確認では検出でき�
   自己テスト10件(`--selftest`)
 - ops-readonly `disk`: out/ 配下の内訳(サイズ・枚数・最古/最新)と `docker system df`
 
-**まだやっていない(ユーザー判断が要る。サーバー上で消す操作なので自動化していない)**:
-1. **docker のビルドキャッシュと古いイメージの削除(約50GB戻る)**。ops-write の exec(承認つき)で
-   `docker image prune -af && docker builder prune -af` を実行するか、SSHで手で実行する。
+**掃除の基準(ユーザー指示 2026-09-29「リスト送信消化後3日で消える」)**: `screenshot_cleanup.py run --days 3`
+- 「送信が終わったリスト」= そのリストに順番待ち・送信中・停止中の予約が無く、最後の試行から3日経った
+  リスト。その画像を全部消して DB のパスを NULL にする。リスト無しの記録は試行から3日
+- DB に記録の無い孤児ファイルは30日より古ければ消す
+- 空きが8GB未満なら古い順にさらに消す(安全弁)。自己テスト13件
+- `deploy/crontab` 毎日4:40(worker コンテナ。engine-data を sender と共有)。送信中のリストは消さない
+
+**まだやっていない(ユーザーが実施)**:
+1. **docker のビルドキャッシュと古いイメージの削除(約50GB戻る)**。ops-write
+   (https://github.com/Genki1414/eigyouAI/actions/workflows/ops-write.yml)の exec(承認つき)で
+   `docker image prune -af && docker builder prune -af && df -h /` を実行する。
    動いているコンテナのイメージは消えない。次のデプロイは一からビルドするので数分長くなる
-2. **掃除の定期実行**。`deploy/crontab` に
-   `30 4 * * * cd /app && python3 screenshot_cleanup.py run --days 14 --min-free-gb 8 >> /app/out/cron.log 2>&1`
-   を足せば worker コンテナ(engine-data ボリュームを共有)が毎日消す。ops-write の change に
-   `screenshots-cleanup` アクションを足す案もある
-3. deploy.yml の末尾に `docker image prune -f; docker builder prune -f --keep-storage 5GB` を足せば
-   今後溜まらない
+2. deploy.yml の末尾に `docker image prune -f; docker builder prune -f --keep-storage 5GB` を足せば
+   今後溜まらない(サーバー上で消す操作なので、このセッションでは自動化の許可が下りなかった)
 
 JPEG化だけで増え方は 0.8GB/時→0.1〜0.15GB/時になるので、残り11GBでも #9 の完了(約2日)には
 足りる見込み。ただし 1. を早めにやるのが安全。

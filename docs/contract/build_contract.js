@@ -196,7 +196,7 @@ children.push(P("甲（利用者）　※クラウドサイン上の入力欄に
 children.push(sigTable("甲", [["所在地", ""], ["会社名", ""], ["代表者", ""], ["担当者・連絡先", ""]]));
 children.push(P("", { after: 200 }));
 children.push(P("乙（サービス提供者）", { bold: true, after: 80 }));
-children.push(sigTable("乙", [["所在地", "宮城県名取市牛野八幡23"], ["会社名", "東北三上機材株式会社"], ["代表者", "　　　　　　　　　　（電子署名）"], ["連絡先", "022-738-7913 ／ info@tohoku-mikamikizai.co.jp"]]));
+children.push(sigTable("乙", [["所在地", "宮城県名取市小塚原字東遠泉63番地"], ["会社名", "東北三上機材株式会社"], ["代表者", "　　　　　　　　　　（電子署名）"], ["連絡先", "022-738-7913 ／ info@tohoku-mikamikizai.co.jp"]]));
 
 // 別紙1
 children.push(new Paragraph({ children: [new PageBreak()] }));

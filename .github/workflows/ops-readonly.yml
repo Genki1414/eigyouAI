@@ -52,6 +52,7 @@ on:
           - tenants            # テナントの一覧(番号・名前・種別・作成日・リスト数・送信数。鍵は出さない)
           - send-targets       # 各リストで「過去送信対象キャンセル30日」を付けて送ると何社に送るか(送信はしない)
           - send-holds         # 送信保留中(サイト閉鎖・フォーム無し等。T136)の会社数を理由別に
+          - send-timing-since  # since 以降の1社あたり所要時間を理由別に(どこで時間を食っているか)。CPU数も
           - send-urls-error    # 送信ログ: 送信後にエラー表示が出たURL(必須欄の取りこぼし調査)
           - send-urls-nofield  # 送信ログ: 入力できる欄が見つからなかったURL
 
@@ -252,6 +253,12 @@ jobs:
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \
                   python3 -c 'import db, target_lists as TL; c=db.connect(); rows=c.execute(\"SELECT id, tenant_id, name, company_count FROM target_lists WHERE deleted_at IS NULL ORDER BY tenant_id, id\").fetchall(); print(\"%4s %3s %-24s %6s %8s %8s %10s %8s\" % (\"list\",\"tn\",\"name\",\"total\",\"url有り\",\"除外\",\"うち未確認\",\"送る社数\")); [print(\"%4d %3d %-24s %6d %8d %8d %10d %8d\" % (r[0], r[1], (r[2] or \"\")[:24], t[\"list_total\"], t[\"with_contact_url\"], t[\"cancelled_recent\"], t.get(\"cancelled_unconfirmed\", 0), t[\"target_count\"])) for r in rows for t in [TL.count_send_targets(c, r[1], r[0], cancel_recent_days=30)] if t]'" ;;
+            # 1社あたりの所要時間を理由別に(T141。「送信に時間がかかりすぎ」の原因を数字で見る)
+            send-timing-since)
+              [ -n "$SINCE" ] || { echo "::error::since を指定してください"; exit 1; }
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T -e SINCE_AT='$SINCE' sender \
+                  python3 -c 'import os,db; c=db.connect(); s=os.environ[\"SINCE_AT\"]; rows=c.execute(\"SELECT reason_code, COUNT(*) n, AVG(execution_seconds) avg_s, SUM(execution_seconds) sum_s, MAX(execution_seconds) max_s FROM form_send_log WHERE started_at>=? AND execution_seconds IS NOT NULL GROUP BY reason_code ORDER BY sum_s DESC\", (s,)).fetchall(); tot=sum(r[3] or 0 for r in rows); n=sum(r[1] for r in rows); print(\"集計開始: \"+s+\"  試行 %d件  合計 %.0f秒  平均 %.1f秒/件  CPU数 %d\" % (n, tot, (tot/n if n else 0), os.cpu_count() or 0)); print(\"%-28s %6s %8s %8s %8s %6s\" % (\"reason\",\"件数\",\"平均秒\",\"最大秒\",\"合計秒\",\"時間比\")); [print(\"%-28s %6d %8.1f %8.1f %8.0f %5.1f%%\" % (r[0] or \"-\", r[1], r[2] or 0, r[4] or 0, r[3] or 0, (r[3] or 0)*100/tot if tot else 0)) for r in rows]; q=c.execute(\"SELECT execution_seconds FROM form_send_log WHERE started_at>=? AND execution_seconds IS NOT NULL ORDER BY execution_seconds\", (s,)).fetchall(); print(\"中央値 %.1f秒 / 90%%点 %.1f秒 / 99%%点 %.1f秒\" % (q[len(q)//2][0], q[int(len(q)*0.9)][0], q[int(len(q)*0.99)][0]) if q else \"\")'" ;;
             # 送信保留の状況(T136)。保留中の会社数を理由別に。送信はしない
             send-holds)
               REMOTE="cd '$DEPLOY_PATH'

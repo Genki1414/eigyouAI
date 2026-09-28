@@ -4705,8 +4705,11 @@ invalid")。値は入っていたので9/17の`test -n`確認では検出でき�
 - 空きが8GB未満なら古い順にさらに消す(安全弁)。自己テスト13件
 - `deploy/crontab` 毎日4:40(worker コンテナ。engine-data を sender と共有)。送信中のリストは消さない
 
+**docker prune はユーザーが 2026-09-29 06:44 JST に ops-write exec で実施済み**: 使用 60G→30G、空き 12G→43G。
+以後は下記 2. を入れるまで、デプロイのたびに数GBずつ溜まる点に注意。
+
 **まだやっていない(ユーザーが実施)**:
-1. **docker のビルドキャッシュと古いイメージの削除(約50GB戻る)**。ops-write
+1. (済)**docker のビルドキャッシュと古いイメージの削除**。ops-write
    (https://github.com/Genki1414/eigyouAI/actions/workflows/ops-write.yml)の exec(承認つき)で
    `docker image prune -af && docker builder prune -af && df -h /` を実行する。
    動いているコンテナのイメージは消えない。次のデプロイは一からビルドするので数分長くなる

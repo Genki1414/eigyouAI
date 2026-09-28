@@ -502,6 +502,11 @@ _ERROR_HINTS = (
 # (「メッセージの送信に失敗しました。後でまたお試しください。」)に当たる _ERROR_HINTS の要素
 _CF7_MAIL_FAILED_HINTS = ("送信に失敗しました", "送信できませんでした")
 
+# ページを開けない原因のうち「サイトが閉じている」もの。再試行しても結果は同じ(T141)。
+# タイムアウト・接続リセット・HTTP2エラーは一時的な可能性があるので含めない
+_DEAD_SITE_ERRORS = ("ERR_NAME_NOT_RESOLVED", "ERR_CONNECTION_REFUSED", "ERR_ADDRESS_UNREACHABLE",
+                     "ERR_EMPTY_RESPONSE", "ERR_INVALID_URL", "ERR_BLOCKED_BY_CLIENT")
+
 # Cloudflare等のボット検証チャレンジ画面。CAPTCHAと同じく自動突破の対象にはしない
 _BOT_CHALLENGE_TITLE_HINTS = ["just a moment", "attention required", "checking your browser"]
 
@@ -1835,6 +1840,11 @@ def navigate_and_submit(start_url, values, *, headless=True, screenshot_dir=None
                     # リトライ対象にしない(FAILED_RETRYABLEにしない)
                     result.status = "FAILED_UNSUPPORTED"
                     result.reason_code = "invalid_certificate"
+                elif any(k in msg for k in _DEAD_SITE_ERRORS):
+                    # ドメイン不在・接続拒否・空応答=サイトが閉じている。数秒後に引き直しても
+                    # 同じなので再試行しない(T141)。理由は goto_failed のまま(送信保留の対象)
+                    result.status = "FAILED_UNSUPPORTED"
+                    result.reason_code = "goto_failed"
                 else:
                     result.status = "FAILED_RETRYABLE"
                     result.reason_code = "goto_failed"

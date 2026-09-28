@@ -94,6 +94,7 @@ class BaseSender:
     channel = "base"
     unit_cost_yen = 0
     rate_service = "default"
+    retry_attempts = 4          # 一時エラー(Retryable)の試行回数(R.retry の attempts)
 
     def __init__(self, con, dry_run=True):
         self.con = con
@@ -140,7 +141,7 @@ class BaseSender:
         full_body = body + self.footer(sender, to)
         try:
             res = R.retry(lambda: self._deliver(to, sender, subject, full_body),
-                          attempts=4, job=f"{self.channel}:{to.name}")
+                          attempts=self.retry_attempts, job=f"{self.channel}:{to.name}")
         except Exception as e:  # noqa: BLE001
             # 占有を解放する(失敗は再試行できないと詰むため。占有したまま
             # 失敗で終わると、以後ずっと「送信済み」扱いになってしまう)
@@ -364,6 +365,11 @@ class FormSender(BaseSender):
     channel = "フォーム"
     unit_cost_yen = 0
     rate_service = "form_submit"
+    # ページを開けない(タイムアウト等)の再試行は1回だけ(T141。2026-09-28)。11万社の送信で
+    # goto_failed が所要時間の24%を占め、4回×30秒のタイムアウトで1社に2分使っていた。
+    # DNS不在・接続拒否は form_navigator 側で再試行対象外(FAILED_UNSUPPORTED)にしたので、
+    # ここに来るのは主にタイムアウトと通信リセット。1回引き直せば十分
+    retry_attempts = 2
     URL_RE = re.compile(r"^https?://", re.I)
 
     def __init__(self, con, dry_run=True, tenant_id=None, offer_id=None, list_id=None,

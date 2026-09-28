@@ -4675,6 +4675,33 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T141. 11万社の送信が遅い — 所要時間の内訳と、閉鎖サイトの再試行をやめる(2026-09-28)
+
+**経緯**: 予約#9「四国除く建設0928」110,812社を 09:59 に開始。ペース約12社/分で完了まで6日と
+出て、ユーザーから「さすがに時間がかかりすぎ」。ops-readonly に `send-timing-since`(1社あたり
+所要時間を理由別に。`form_send_log.execution_seconds`)を追加して測った。
+
+**実測(5,665試行、7時間、同時実行3、CPU 2コア)**: 平均12.7秒/試行、中央値9.7秒、90%点30.0秒
+(=ページを開くタイムアウト `FORM_NAV_TIMEOUT_MS` 30秒)。時間の内訳: 成功 28% / **goto_failed 24%**
+(977試行、平均17.7秒。4回×30秒のタイムアウトで1社に2分)/ 未確認 23%(平均19.4秒。CF7 の送信中
+待ち20秒を含む)。3ワーカー×3600秒÷12.7秒≒850試行/時が理論上限で、実測(約720/時)はほぼ頭打ち。
+**CPUが2コアしかないので同時実行数を上げても伸びない**(Chromium はCPU食い)。goto_failed の
+エラー内訳(40件): 接続拒否16 / タイムアウト15 / DNS不在5 / 空応答4。
+
+**直した点**:
+- `form_navigator.py`: `_DEAD_SITE_ERRORS`(ERR_NAME_NOT_RESOLVED / ERR_CONNECTION_REFUSED /
+  ERR_ADDRESS_UNREACHABLE / ERR_EMPTY_RESPONSE / ERR_INVALID_URL / ERR_BLOCKED_BY_CLIENT)は
+  再試行せず `FAILED_UNSUPPORTED` + `goto_failed`(送信保留の対象のまま)
+- `senders.py`: `BaseSender.retry_attempts = 4`、`FormSender.retry_attempts = 2`(タイムアウト等の
+  再試行は1回だけ)。他チャネルは従来どおり4回
+- テスト: senders 69件 / form_navigator 154件 通過
+
+**速くする本命はサーバーの増強**: 2コア/3.8GB(OOMが1回)→ 8コア/16GB 程度に上げて
+`FORM_SEND_CONCURRENCY` を 8〜10 にすれば 4〜5倍(110万社/日ではなく、11万社が1.5日程度)。
+Hetzner のリサイズは数分の停止で済み、コンテナは `restart: unless-stopped`、実行中の予約は
+`requeue_all_running` で自動再開(試行済みは飛ばす)。あわせて `FORM_NAV_TIMEOUT_MS=20000` で
+タイムアウトを短くする(set-env。再起動を伴う)。
+
 ### T140. 手動フォロー用CSV — 画像認証・reCAPTCHA v3・bot判定で自動送信できない会社の一覧(2026-09-26)
 
 **経緯**: 人材系3,184社のうち画像認証174社+v3判定162社(約10%)は「自動では送れないが人が

@@ -55,6 +55,7 @@ on:
           - send-timing-since  # since 以降の1社あたり所要時間を理由別に(どこで時間を食っているか)。CPU数も
           - send-urls-error    # 送信ログ: 送信後にエラー表示が出たURL(必須欄の取りこぼし調査)
           - send-urls-nofield  # 送信ログ: 入力できる欄が見つからなかったURL
+          - disk               # ディスクの内訳(out/配下のサイズ・スクリーンショット枚数と古さ・dockerの使用量)。T142
 
 jobs:
   look:
@@ -264,6 +265,15 @@ jobs:
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \
                   python3 send_holds_cli.py list" ;;
+            # ディスクが埋まる前に「何が食っているか」を見る(T142。スクリーンショットが
+            # 1試行2枚ずつ溜まり、11万社の送信で数十GBになる)。削除はしない
+            disk)
+              REMOTE="cd '$DEPLOY_PATH'
+                echo '=== ディスク ==='; df -h /
+                echo; echo '=== out/ の内訳(コンテナ内) ==='
+                docker compose -f deploy/docker-compose.yml exec -T sender \
+                  python3 -c 'import os,time; b=\"/app/out\"; now=time.time(); S=lambda p: [(lambda s:(s.st_size,s.st_mtime))(os.stat(os.path.join(r,f))) for r,d,fs in os.walk(p) for f in fs] if os.path.isdir(p) else [(lambda s:(s.st_size,s.st_mtime))(os.stat(p))]; [print(\"%-24s %8.2f GB %9d 個  最古 %6.1f日前 / 最新 %6.1f日前\" % (n, sum(x[0] for x in L)/1e9, len(L), (now-min(x[1] for x in L))/86400 if L else 0, (now-max(x[1] for x in L))/86400 if L else 0)) for n in sorted(os.listdir(b)) for L in [S(os.path.join(b,n))]]'
+                echo; echo '=== docker の使用量 ==='; docker system df" ;;
             # どのテナントが実在するか(2026-09-23、「テナント2・3・4は誰?」に答えるため)。
             # 名前・種別・作成日と、リスト数・送信ログ数だけ。APIキーは出さない。デモ利用の
             # テナント名にはメールアドレスが入るので伏せる(初回実行で1度出てしまった)

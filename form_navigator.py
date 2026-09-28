@@ -1731,6 +1731,13 @@ def _fill_selects(page):
 
 
 # ── メイン ───────────────────────────────
+# スクリーンショットの形式(T142。2026-09-28)。PNGは1枚170KB前後で、11万社の送信
+# (1試行2枚)で約40GBになりディスクを圧迫した。JPEG品質60なら目視確認には十分で
+# 1/5〜1/10になる。戻すなら FORM_SCREENSHOT_FORMAT=png
+SCREENSHOT_FORMAT = os.environ.get("FORM_SCREENSHOT_FORMAT", "jpeg").lower()
+SCREENSHOT_QUALITY = int(os.environ.get("FORM_SCREENSHOT_QUALITY", "60"))
+
+
 def _save_screenshot(page, screenshot_dir, run_id, suffix):
     """送信前後の目視確認用スクリーンショット(MIKOMERU同等機能)。
     撮影・保存に失敗しても送信処理自体は止めない(あくまで補助情報のため)。"""
@@ -1740,8 +1747,13 @@ def _save_screenshot(page, screenshot_dir, run_id, suffix):
         from pathlib import Path
         d = Path(screenshot_dir)
         d.mkdir(parents=True, exist_ok=True)
-        path = d / f"{run_id}_{suffix}.png"
-        page.screenshot(path=str(path), timeout=ACTION_TIMEOUT_MS)
+        if SCREENSHOT_FORMAT == "png":
+            path = d / f"{run_id}_{suffix}.png"
+            page.screenshot(path=str(path), timeout=ACTION_TIMEOUT_MS)
+        else:
+            path = d / f"{run_id}_{suffix}.jpg"
+            page.screenshot(path=str(path), type="jpeg", quality=SCREENSHOT_QUALITY,
+                            timeout=ACTION_TIMEOUT_MS)
         return str(path)
     except Exception:  # noqa: BLE001
         return None

@@ -3311,7 +3311,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(404, {"error": "not found"})
                 body = p.read_bytes()
                 self.send_response(200)
-                self.send_header("Content-Type", "image/png")
+                # T142以降はJPEG(拡張子.jpg)。それ以前のPNGも残っているので拡張子で返す
+                self.send_header("Content-Type",
+                                 "image/jpeg" if p.suffix.lower() in (".jpg", ".jpeg") else "image/png")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 return self.wfile.write(body)
@@ -5574,6 +5576,18 @@ def self_test(port=8899):
     st, body, ctype = get_raw(f"/api/tenant/send-log/{log_id}/screenshot?kind=before", token=key_a)
     t("自テナントの送信前画像が取得できる", st == 200 and ctype == "image/png"
       and body == shot_path.read_bytes())
+    jpg_path = shot_dir / "test_before.jpg"
+    jpg_path.write_bytes(b"\xff\xd8\xff\xe0test-jpeg-bytes")
+    con.execute("UPDATE form_send_log SET screenshot_before_path=? WHERE id=?", (str(jpg_path), log_id))
+    con.commit()
+    st, body, ctype = get_raw(f"/api/tenant/send-log/{log_id}/screenshot?kind=before", token=key_a)
+    t("JPEGの画像はimage/jpegで返る(T142)", st == 200 and ctype == "image/jpeg"
+      and body == jpg_path.read_bytes())
+    jpg_path.unlink()
+    st, body, ctype = get_raw(f"/api/tenant/send-log/{log_id}/screenshot?kind=before", token=key_a)
+    t("ファイルが削除済みなら404(掃除後もAPIは落ちない)", st == 404)
+    con.execute("UPDATE form_send_log SET screenshot_before_path=? WHERE id=?", (str(shot_path), log_id))
+    con.commit()
     st, body, ctype = get_raw(f"/api/tenant/send-log/{log_id}/screenshot?kind=after", token=key_a)
     t("送信後画像が無い場合は404", st == 404)
     st, body, ctype = get_raw(f"/api/tenant/send-log/{log_id}/screenshot?kind=bogus", token=key_a)

@@ -4675,6 +4675,43 @@ DONEになる・claimの二重取り込み防止・stale requeue)を追加。Pla
 invalid")。値は入っていたので9/17の`test -n`確認では検出できなかった。ユーザーに
 新しいキーの発行と`.env`更新→`docker compose up -d`を案内(未完了なら要フォロー)。
 
+### T142. ディスクが埋まりかけた — スクリーンショットをJPEGに、掃除CLI、diskアクション(2026-09-28)
+
+**発端**: 予約#9(11万社)の実行中、`status` のディスクが 59G→60G→62G(残り11GB)と1時間に約0.8GB
+増えていた。このままだと十数時間で満杯になり、Postgresが書けなくなって送信が止まる。
+
+**内訳**(新設の ops-readonly `disk` で確認。2026-09-28 23:04 JST):
+- `out/form_screenshots` 12.2GB / 71,243枚(最古31.6日)。1試行2枚(送信前・送信後)のPNGで
+  1枚170KB前後。11万社ぶんだと約40GB
+- **docker のビルドキャッシュ 36GB + 使っていない古いイメージ 14GB(26個中、使用中6個)**。
+  デプロイのたびに溜まっていた。これが最大の原因で、消せば約50GB戻る
+- バックアップ 3.3GB(15個、14日ローテーション)。問題なし
+
+**直したこと**:
+- `form_navigator._save_screenshot`: PNG→JPEG(品質60、拡張子 .jpg)。目視確認には十分で
+  1枚あたり 1/5〜1/10。`FORM_SCREENSHOT_FORMAT=png` で戻せる。`FORM_SCREENSHOT_QUALITY` で品質
+- `api.py`: 画像の Content-Type を拡張子で返す(古いPNGも新しいJPEGも表示できる)。
+  ファイルが消えていれば404(落ちない)。テスト2件追加(638/638)
+- `screenshot_cleanup.py`(新規): `status` で枚数・容量・空き、`run --days 14 --min-free-gb 8`
+  で14日より古い画像を消し、それでも空きが8GB未満なら古い順にさらに消す。消した画像は
+  form_send_log のパスを NULL にする(画面の「確認」ボタンが消える)。`--dry` で試せる。
+  自己テスト10件(`--selftest`)
+- ops-readonly `disk`: out/ 配下の内訳(サイズ・枚数・最古/最新)と `docker system df`
+
+**まだやっていない(ユーザー判断が要る。サーバー上で消す操作なので自動化していない)**:
+1. **docker のビルドキャッシュと古いイメージの削除(約50GB戻る)**。ops-write の exec(承認つき)で
+   `docker image prune -af && docker builder prune -af` を実行するか、SSHで手で実行する。
+   動いているコンテナのイメージは消えない。次のデプロイは一からビルドするので数分長くなる
+2. **掃除の定期実行**。`deploy/crontab` に
+   `30 4 * * * cd /app && python3 screenshot_cleanup.py run --days 14 --min-free-gb 8 >> /app/out/cron.log 2>&1`
+   を足せば worker コンテナ(engine-data ボリュームを共有)が毎日消す。ops-write の change に
+   `screenshots-cleanup` アクションを足す案もある
+3. deploy.yml の末尾に `docker image prune -f; docker builder prune -f --keep-storage 5GB` を足せば
+   今後溜まらない
+
+JPEG化だけで増え方は 0.8GB/時→0.1〜0.15GB/時になるので、残り11GBでも #9 の完了(約2日)には
+足りる見込み。ただし 1. を早めにやるのが安全。
+
 ### T141. 11万社の送信が遅い — 所要時間の内訳と、閉鎖サイトの再試行をやめる(2026-09-28)
 
 **経緯**: 予約#9「四国除く建設0928」110,812社を 09:59 に開始。ペース約12社/分で完了まで6日と

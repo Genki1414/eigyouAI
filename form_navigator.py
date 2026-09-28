@@ -954,7 +954,7 @@ _BLOCKING_CAPTCHA_JS = """() => {
   // reCAPTCHA v2「私はロボットではありません」/ hCaptcha のチェックボックス枠
   for (const f of document.querySelectorAll('iframe')) {
     const src = f.getAttribute('src') || '';
-    if (!/recaptcha\/api2\/anchor|hcaptcha\.com\/captcha|turnstile/.test(src)) continue;
+    if (!/recaptcha\\/api2\\/anchor|hcaptcha\\.com\\/captcha|turnstile/.test(src)) continue;
     if (src.includes('size=invisible')) continue;
     if (visible(f)) return 'checkbox_challenge';
   }
@@ -1478,7 +1478,7 @@ def _invalid_visible_fields(page, form_el=None):
               why = v.valueMissing ? '未入力' : v.patternMismatch ? '形式不一致' : v.typeMismatch ? '型不一致'
                   : (v.tooShort || v.tooLong) ? '長さ' : v.rangeUnderflow || v.rangeOverflow ? '範囲外' : '';
             } catch (e) {}
-            const clean = name.replace(/\s+/g, ' ').trim().slice(0, 40) + (why ? '(' + why + ')' : '');
+            const clean = name.replace(/\\s+/g, ' ').trim().slice(0, 40) + (why ? '(' + why + ')' : '');
             if (!out.includes(clean)) out.push(clean);
           }
           return out;

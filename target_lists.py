@@ -894,19 +894,25 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
                                        (list_id,)).fetchone()["campaign_id"]
 
     now2 = datetime.now().isoformat(timespec="seconds")
-    for m in members:
-        # 2026-09-09: 以前は「まだ本番送信していない行に限り」件名・本文を
-        # 更新していた(WHERE touches.sent_at IS NULL OR ...)が、既に送信済みの
-        # 企業への再送信を許可した以上、再送信のたびに直前に入力し直した
-        # (またはT83: 商材のAI生成文面の)最新の件名・本文が使われるべきなので、
-        # 常に上書きするようにした。
-        con.execute("""INSERT INTO touches
+    # 2026-09-09: 以前は「まだ本番送信していない行に限り」件名・本文を
+    # 更新していた(WHERE touches.sent_at IS NULL OR ...)が、既に送信済みの
+    # 企業への再送信を許可した以上、再送信のたびに直前に入力し直した
+    # (またはT83: 商材のAI生成文面の)最新の件名・本文が使われるべきなので、
+    # 常に上書きするようにした。
+    # T143: 1社ずつ INSERT していて11万社で10分以上かかり、再開のたびに固まり検知の
+    # 20分に迫っていた。2,000件ずつまとめて実行し、区切りごとに heartbeat を打つ
+    if heartbeat:
+        heartbeat()
+    for i in range(0, len(members), 2000):
+        con.executemany("""INSERT INTO touches
             (campaign_id, company_id, channel, variant, step, subject, body)
             VALUES (?,?,'フォーム','A',1,?,?)
             ON CONFLICT(campaign_id, company_id, step) DO UPDATE SET
                 subject=excluded.subject, body=excluded.body""",
-            (campaign_id, m["id"], subject, body))
-    con.commit()
+            [(campaign_id, m["id"], subject, body) for m in members[i:i + 2000]])
+        con.commit()
+        if heartbeat:
+            heartbeat()
 
     if not dry_run:
         # 実送信の直前に「処理中」を記録しておく。サーバー再起動等で送信が
@@ -914,10 +920,13 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
         # 後から目視で気づけるようにするため(PENDINGのままだと「未着手」と
         # 「処理中に落ちた」の区別がつかない)。同じ企業への再送信も許可した
         # ため、既に送信済みかどうかを問わずリストの全メンバーを対象にする。
-        con.executemany("""UPDATE target_list_members SET send_status='PROCESSING',
-            started_at=?, updated_at=? WHERE list_id=? AND company_id=?""",
-            [(now2, now2, list_id, m["id"]) for m in members])
-        con.commit()
+        for i in range(0, len(members), 2000):
+            con.executemany("""UPDATE target_list_members SET send_status='PROCESSING',
+                started_at=?, updated_at=? WHERE list_id=? AND company_id=?""",
+                [(now2, now2, list_id, m["id"]) for m in members[i:i + 2000]])
+            con.commit()
+            if heartbeat:
+                heartbeat()
 
     # 「自動送信ログ」一覧(MIKOMERU同等。1リスト=1実行として集計表示する)用の
     # スナップショット。誰が・どの送信元で・いつ実行したかをtarget_listsへ記録する。

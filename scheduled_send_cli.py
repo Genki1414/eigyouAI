@@ -64,7 +64,9 @@ def _execute(con, s, worker):
                            # 保留中の会社だけに送る予約(T136。send_holds_cli retry が作る)
                            retry_holds=bool(s.get("retry_holds")),
                            # ワーカースレッドが会社ごとに呼ぶ。渡される接続はそのスレッド専用
-                           stop_check=lambda con_t: db.stop_requested_for(con_t, s["id"]))
+                           stop_check=lambda con_t: db.stop_requested_for(con_t, s["id"]),
+                           # 仕上げ処理の区切りごとに「生きている」と知らせる(T143)
+                           heartbeat=lambda: db.heartbeat_scheduled_send(con, s["id"]))
         if res is None:
             db.finish_scheduled_send(con, s["id"], "FAILED",
                                      {"error": "リストが見つかりません(削除された可能性)"})
@@ -196,9 +198,12 @@ def loop(workers, interval):
             alive_ids = set()
             for r in running:
                 alive_ids.add(r["id"])
+                # 処理数か heartbeat_at(T143。仕上げ処理中の生存合図)のどちらかが
+                # 動いていれば固まっていない
+                key = (r["processed"], r.get("heartbeat_at"))
                 prev = progress.get(r["id"])
-                if prev is None or prev[0] != r["processed"]:
-                    progress[r["id"]] = (r["processed"], time.time())
+                if prev is None or prev[0] != key:
+                    progress[r["id"]] = (key, time.time())
                     continue
                 if time.time() - prev[1] < STALL_MINUTES * 60:
                     continue

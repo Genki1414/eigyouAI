@@ -794,7 +794,7 @@ def count_send_targets(con, tenant_id, list_id, cancel_recent_days=None):
 def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks=False,
               sender_template_id=None, staff_id=None, allow_no_solicit=False,
               sender_override=None, cancel_recent_days=None, skip_already_sent=False,
-              stop_check=None, skip_attempted_since=None, retry_holds=False):
+              stop_check=None, skip_attempted_since=None, retry_holds=False, heartbeat=None):
     """保存済みリストからフォーム自動送信キャンペーンを作り、既存のsenders.send_campaign()
     にそのまま委譲する。can_contact()・冪等性・FormSenderのペーシング上限はすべて
     send_campaign()側の仕組みがそのまま効く(ここで独自の送信経路は作らない)。
@@ -942,10 +942,14 @@ def send_list(con, tenant_id, list_id, subject, body, dry_run=True, track_clicks
                                    skip_attempted_since=skip_attempted_since)
     holds = {"held": 0, "released": 0}
     if not dry_run:
-        db.sync_target_list_member_status(con, list_id, campaign_id, step=1)
+        # 仕上げ処理(T143)。heartbeat は送信ワーカーが渡す「まだ生きている」の合図で、
+        # 11万社の更新中に固まり検知がワーカーを止めないようにする
+        if heartbeat:
+            heartbeat()
+        db.sync_target_list_member_status(con, list_id, campaign_id, step=1, heartbeat=heartbeat)
         # 送信保留の更新(T136): 構造的に送れなかった会社は保留に、届いた会社は保留から外す
         try:
-            holds = db.apply_send_holds(con, list_id, now2)
+            holds = db.apply_send_holds(con, list_id, now2, heartbeat=heartbeat)
         except Exception as e:  # noqa: BLE001
             print(f"  [送信保留] 更新に失敗しました(送信結果には影響しません): {e}")
         _notify_completion(con, tenant_id, lst["name"], len(members), stats,

@@ -576,6 +576,10 @@ def migrate(con):
         # 見て、要求があればそれ以上の会社へ送らずに抜ける。それまでRUNNINGの予約を
         # 止める正規の手段が無く、9/23はSSHでコンテナを止めてDBを直接書き換えた
         ("scheduled_sends", "stop_requested", "TEXT"),
+        # 送信ワーカーの生存確認(T143。2026-09-30)。送信が終わったあとの仕上げ処理(11万社の
+        # 状態更新)の間は form_send_log が増えないため、固まり検知が「20分増えていない」と
+        # 誤ってワーカーを殺し、仕上げが永遠に終わらなかった。仕上げ中はここを更新する
+        ("scheduled_sends", "heartbeat_at", "TEXT"),
         # 1なら「保留中の会社だけ」に送る予約(T136。定期的な再試行用。通常の予約は保留を除外する)
         ("scheduled_sends", "retry_holds", "INTEGER DEFAULT 0"),
         # T29: フォーム送信のペーシングを「全テナント合算の単一プール」から
@@ -1021,47 +1025,74 @@ HOLD_REASONS = frozenset({
 _RELEASE_OK = "(status='SUCCESS' OR reason_code='success_not_confirmed')"
 
 
-def apply_send_holds(con, list_id, since):
-    """送信1回ぶん(list_id、since以降)の結果から保留を更新する(T136)。
-    会社ごとの**最後の**試行を見て、HOLD_REASONS なら保留にする(既に保留なら試行回数を
-    増やす)。届いた(SUCCESS / 完了未確認)なら保留を外す。戻り値 {"held": n, "released": n}。"""
-    now = datetime.now().isoformat(timespec="seconds")
-    rows = con.execute("""SELECT f.company_id, f.status, f.reason_code FROM form_send_log f
+def _last_attempts(con, list_id, since):
+    """会社ごとの最後の試行(list_id、since以降)を1回のクエリで返す。"""
+    return con.execute("""SELECT f.company_id, f.status, f.reason_code, f.error_message, f.retry_count
+        FROM form_send_log f
         JOIN (SELECT company_id, MAX(id) mid FROM form_send_log
               WHERE list_id=? AND started_at>=? GROUP BY company_id) last
           ON last.mid = f.id""", (list_id, since)).fetchall()
-    held = released = 0
-    for r in rows:
-        ok = r["status"] == "SUCCESS" or r["reason_code"] == "success_not_confirmed"
-        if ok:
-            cur = con.execute("""UPDATE send_holds SET released_at=?, release_note='届いたため自動で解除'
-                WHERE company_id=? AND released_at IS NULL""", (now, r["company_id"]))
-            released += cur.rowcount
+
+
+def _chunks(seq, n):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
+def apply_send_holds(con, list_id, since, heartbeat=None):
+    """送信1回ぶん(list_id、since以降)の結果から保留を更新する(T136)。
+    会社ごとの**最後の**試行を見て、HOLD_REASONS なら保留にする(既に保留なら試行回数を
+    増やす)。届いた(SUCCESS / 完了未確認)なら保留を外す。戻り値 {"held": n, "released": n}。
+
+    T143: 以前は1社ずつ UPDATE していて11万社で数十分かかり、その間に固まり検知が
+    ワーカーを殺していた。まとめて実行し、区切りごとに heartbeat() を呼ぶ。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    ok_ids = []
+    hold_rows = []
+    for r in _last_attempts(con, list_id, since):
+        if r["status"] == "SUCCESS" or r["reason_code"] == "success_not_confirmed":
+            ok_ids.append(r["company_id"])
         elif r["reason_code"] in HOLD_REASONS:
-            cur = con.execute("""UPDATE send_holds SET reason_code=?, last_checked_at=?,
-                check_count=check_count+1 WHERE company_id=? AND released_at IS NULL""",
-                (r["reason_code"], now, r["company_id"]))
-            if not cur.rowcount:
-                # 過去に解除された行があれば作り直す(PRIMARY KEY なので上書き)
-                con.execute("""INSERT INTO send_holds (company_id, reason_code, held_at, last_checked_at, check_count)
-                    VALUES (?,?,?,?,0)
-                    ON CONFLICT(company_id) DO UPDATE SET reason_code=excluded.reason_code,
-                        held_at=excluded.held_at, last_checked_at=excluded.last_checked_at,
-                        check_count=0, released_at=NULL, release_note=NULL""",
-                    (r["company_id"], r["reason_code"], now, now))
-                held += 1
-    con.commit()
+            hold_rows.append((r["company_id"], r["reason_code"]))
+    # 届いた → 保留中なら解除。解除数は「更新前に保留中だった数」で数える
+    released = len(active_hold_ids(con, ok_ids))
+    for chunk in _chunks(ok_ids, 500):
+        con.executemany("""UPDATE send_holds SET released_at=?, release_note='届いたため自動で解除'
+            WHERE company_id=? AND released_at IS NULL""", [(now, cid) for cid in chunk])
+        con.commit()
+        if heartbeat:
+            heartbeat()
+    # 送れなかった → 保留に(既に保留中なら理由と試行回数を更新、解除済みなら作り直す)
+    already = active_hold_ids(con, [cid for cid, _ in hold_rows])
+    held = sum(1 for cid, _ in hold_rows if cid not in already)
+    for chunk in _chunks(hold_rows, 500):
+        con.executemany("""INSERT INTO send_holds (company_id, reason_code, held_at, last_checked_at, check_count)
+            VALUES (?,?,?,?,0)
+            ON CONFLICT(company_id) DO UPDATE SET
+                reason_code=excluded.reason_code,
+                last_checked_at=excluded.last_checked_at,
+                check_count=CASE WHEN send_holds.released_at IS NULL THEN send_holds.check_count+1 ELSE 0 END,
+                held_at=CASE WHEN send_holds.released_at IS NULL THEN send_holds.held_at ELSE excluded.held_at END,
+                released_at=NULL, release_note=NULL""",
+            [(cid, reason, now, now) for cid, reason in chunk])
+        con.commit()
+        if heartbeat:
+            heartbeat()
     return {"held": held, "released": released}
 
 
 def active_hold_ids(con, ids):
-    """与えた会社IDのうち保留中のもの。"""
+    """与えた会社IDのうち保留中のもの。IDが多くても動くよう500件ずつに分けて聞く。"""
+    ids = list(ids)
     if not ids:
         return set()
-    ph = ",".join("?" * len(ids))
-    return {r["company_id"] for r in con.execute(
-        f"SELECT company_id FROM send_holds WHERE released_at IS NULL AND company_id IN ({ph})",
-        list(ids)).fetchall()}
+    out = set()
+    for chunk in _chunks(ids, 500):
+        ph = ",".join("?" * len(chunk))
+        out.update(r["company_id"] for r in con.execute(
+            f"SELECT company_id FROM send_holds WHERE released_at IS NULL AND company_id IN ({ph})",
+            chunk).fetchall())
+    return out
 
 
 def release_send_hold(con, company_id, note="手動で解除"):
@@ -1265,12 +1296,20 @@ def requeue_for_retry(con, scheduled_id, attempts, error, delay_seconds=60):
     con.commit()
 
 
+def heartbeat_scheduled_send(con, scheduled_id):
+    """送信ワーカーが「まだ生きている」と知らせる(T143)。仕上げ処理の区切りごとに呼ぶ。
+    固まり検知はこれが動いている間はワーカーを止めない。"""
+    con.execute("UPDATE scheduled_sends SET heartbeat_at=? WHERE id=?",
+                (datetime.now().isoformat(timespec="seconds"), scheduled_id))
+    con.commit()
+
+
 def running_sends_with_progress(con):
     """RUNNING中の予約と、取り込み後に処理した会社数(form_send_logの行数)を返す(T98)。
     送信サービスの監督側が「処理数が一定時間増えない=固まった」を検知するのと、
-    画面の「処理済み◯社」表示に使う。"""
-    rows = con.execute("""SELECT id, tenant_id, list_id, worker, claimed_at FROM scheduled_sends
-        WHERE status='RUNNING'""").fetchall()
+    画面の「処理済み◯社」表示に使う。heartbeat_at(T143)も返す。"""
+    rows = con.execute("""SELECT id, tenant_id, list_id, worker, claimed_at, heartbeat_at
+        FROM scheduled_sends WHERE status='RUNNING'""").fetchall()
     out = []
     for r in rows:
         r = dict(r)
@@ -1427,7 +1466,7 @@ def add_quota_purchase(con, tenant_id, qty, unit_price_yen=None, external_ref=No
 # 作らない)。ここはその結果を「1社ごとの現在状態」としてtarget_list_membersへ
 # 反映するだけの後処理。履歴(何度目のどの結果か)はform_send_logが持つので、
 # ここは上書きしてよい最新状態のスナップショットに徹する。
-def sync_target_list_member_status(con, list_id, campaign_id, step=1):
+def sync_target_list_member_status(con, list_id, campaign_id, step=1, heartbeat=None):
     """send_campaign()の実行直後に呼ぶ。呼び出し側がdry_run=Falseのときだけ呼ぶこと
     (呼ぶこと自体は安全だが、意味のある更新にはならない。理由は下記)。
 
@@ -1436,15 +1475,22 @@ def sync_target_list_member_status(con, list_id, campaign_id, step=1):
     「sent_atがある=実送信成功」と単純に判定してはいけない。過去にdry_runで
     「送信」した企業を、後から本番送信した際にまとめて同期すると、dry_run分の
     行まで誤ってSUCCESS扱いになってしまう。noteに"provider_id=mock_"が
-    含まれるかどうかで、実際に外部へ届いたかを判別する。"""
+    含まれるかどうかで、実際に外部へ届いたかを判別する。
+
+    T143: 以前は会社ごとに SELECT+UPDATE していて11万社で30分以上かかった。最後の
+    試行を1回のクエリで取り、UPDATE は2,000件ずつまとめて実行する。区切りごとに
+    heartbeat() を呼び、固まり検知に「生きている」と知らせる。"""
     rows = con.execute("SELECT company_id, sent_at, note FROM touches WHERE campaign_id=? AND step=?",
                         (campaign_id, step)).fetchall()
+    logs = {r["company_id"]: r for r in con.execute("""SELECT f.company_id, f.status, f.reason_code,
+            f.error_message, f.retry_count FROM form_send_log f
+        JOIN (SELECT company_id, MAX(id) mid FROM form_send_log WHERE list_id=? GROUP BY company_id) last
+          ON last.mid = f.id""", (list_id,)).fetchall()}
     now = datetime.now().isoformat(timespec="seconds")
+    updates = []
     for r in rows:
         company_id, note = r["company_id"], r["note"] or ""
-        log = con.execute("""SELECT status, reason_code, error_message, retry_count
-            FROM form_send_log WHERE company_id=? AND list_id=?
-            ORDER BY id DESC LIMIT 1""", (company_id, list_id)).fetchone()
+        log = logs.get(company_id)
 
         if r["sent_at"] and "provider_id=mock_" not in note:
             status = "SUCCESS"
@@ -1465,13 +1511,18 @@ def sync_target_list_member_status(con, list_id, campaign_id, step=1):
         last_error = (log["error_message"] if log else None) or (note or None)
         retry_count = log["retry_count"] if log else 0
         latest_result = f"{status}" + (f"({reason_code})" if reason_code else "")
-        con.execute("""UPDATE target_list_members SET send_status=?, reason_code=?,
+        updates.append((status, reason_code, last_error, retry_count, latest_result, now,
+                        status, now, now, list_id, company_id))
+    for chunk in _chunks(updates, 2000):
+        con.executemany("""UPDATE target_list_members SET send_status=?, reason_code=?,
             last_error=?, retry_count=?, latest_result=?, completed_at=?,
             contacted_at=CASE WHEN ?='SUCCESS' THEN ? ELSE contacted_at END, updated_at=?
-            WHERE list_id=? AND company_id=?""",
-            (status, reason_code, last_error, retry_count, latest_result, now,
-             status, now, now, list_id, company_id))
+            WHERE list_id=? AND company_id=?""", chunk)
+        con.commit()
+        if heartbeat:
+            heartbeat()
     con.commit()
+    return len(updates)
 
 
 def set_target_list_member_outcome(con, tenant_id, list_id, company_id, field, value, memo=None):

@@ -33,6 +33,10 @@ CREATE INDEX IF NOT EXISTS idx_sendtmpl_tenant ON sender_templates(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_staff_tenant ON staff(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tlm_status ON target_list_members(send_status);
 CREATE INDEX IF NOT EXISTS idx_formlog_list ON form_send_log(list_id);
+-- T143: 再開時の「この予約で試行済みの会社を飛ばす」(senders.send_campaign の NOT EXISTS)と
+-- 仕上げ処理の「会社ごとの最後の試行」が list_id 単独の索引だと会社数×会社数の走査になり、
+-- 11万社で10分以上かかっていた(2026-09-30)。複合索引で0.3秒になる
+CREATE INDEX IF NOT EXISTS idx_formlog_list_co ON form_send_log(list_id, company_id);
 CREATE INDEX IF NOT EXISTS idx_emailtok_touch ON email_tracking_tokens(touch_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_sends_due ON scheduled_sends(status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_planreq_tenant ON plan_change_requests(tenant_id);

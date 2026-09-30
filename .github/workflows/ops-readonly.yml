@@ -56,6 +56,7 @@ on:
           - send-urls-error    # 送信ログ: 送信後にエラー表示が出たURL(必須欄の取りこぼし調査)
           - send-urls-nofield  # 送信ログ: 入力できる欄が見つからなかったURL
           - disk               # ディスクの内訳(out/配下のサイズ・スクリーンショット枚数と古さ・dockerの使用量)。T142
+          - db-activity        # Postgres がいま実行中のクエリ(状態・経過時間・先頭200字)。送信が固まって見えるときの切り分け用。T143
 
 jobs:
   look:
@@ -265,6 +266,14 @@ jobs:
               REMOTE="cd '$DEPLOY_PATH'
                 docker compose -f deploy/docker-compose.yml exec -T sender \
                   python3 send_holds_cli.py list" ;;
+            # DBで何が動いているか(T143)。参照だけ。パラメータ値は出ない(先頭200字)
+            db-activity)
+              REMOTE="cd '$DEPLOY_PATH'
+                docker compose -f deploy/docker-compose.yml exec -T postgres \
+                  psql -U ashibase -d ashibase -c \"SELECT pid, state, now()-query_start AS elapsed, wait_event_type, left(regexp_replace(query, '\\s+', ' ', 'g'), 200) AS query FROM pg_stat_activity WHERE datname='ashibase' AND state <> 'idle' AND pid <> pg_backend_pid() ORDER BY query_start\"
+                echo; echo '=== 予約の heartbeat ==='
+                docker compose -f deploy/docker-compose.yml exec -T postgres \
+                  psql -U ashibase -d ashibase -c \"SELECT id, status, claimed_at, heartbeat_at, worker FROM scheduled_sends WHERE status IN ('RUNNING','PENDING') ORDER BY id\"" ;;
             # ディスクが埋まる前に「何が食っているか」を見る(T142。スクリーンショットが
             # 1試行2枚ずつ溜まり、11万社の送信で数十GBになる)。削除はしない
             disk)
